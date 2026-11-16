@@ -2940,54 +2940,51 @@ export async function declineSigningForToken(
     declinedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
-  let certificate: { key: string; sha256: string };
-  let recipientCertificateSha256: string;
+  // The seal's key and the install's name, read before the transaction:
+  // sealing inside it then needs no second connection from the pool.
+  const seal = await loadInstallSealer();
 
-  try {
-    certificate = await storeEnvelopeCertificatePdf(
-      {
-        auditEvents,
-        certificate: canonicalCertificate,
-        envelope: declinedEnvelope,
-        signers: declinedSigners,
-      },
-      {
-        storageService,
-      },
-    );
-    storedCertificateKeys.push(certificate.key);
+  await withTransaction(async (tx) => {
+    await lockSentEnvelope(context.envelope.id, tx);
+    await assertStillSignersTurn(context.envelope.id, currentSignerId, tx);
 
-    const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
-      {
-        auditEvents,
-        certificate: {
-          bucketName: sourcePdfHead.bucketName,
-          key: buildEnvelopeCertificateKey({
-            ...storageIdentity,
-            audience: "recipient",
-          }),
+    try {
+      // Made while the envelope is locked: the certificates have fixed keys,
+      // and a void, the last signature or a second decline at the same time
+      // waits, then stops above without touching the files this one saved.
+      const certificate = await storeEnvelopeCertificatePdf(
+        {
+          auditEvents,
+          certificate: canonicalCertificate,
+          envelope: declinedEnvelope,
+          signers: declinedSigners,
         },
-        envelope: declinedEnvelope,
-        signers: declinedSigners,
-      },
-      {
-        storageService,
-      },
-    );
-    storedCertificateKeys.push(recipientCertificate.key);
-    recipientCertificateSha256 = recipientCertificate.sha256;
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
-    throw error;
-  }
+        {
+          seal,
+          storageService,
+        },
+      );
+      storedCertificateKeys.push(certificate.key);
 
-  try {
-    await withTransaction(async (tx) => {
-      await lockSentEnvelope(context.envelope.id, tx);
+      const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
+        {
+          auditEvents,
+          certificate: {
+            bucketName: sourcePdfHead.bucketName,
+            key: buildEnvelopeCertificateKey({
+              ...storageIdentity,
+              audience: "recipient",
+            }),
+          },
+          envelope: declinedEnvelope,
+          signers: declinedSigners,
+        },
+        {
+          seal,
+          storageService,
+        },
+      );
+      storedCertificateKeys.push(recipientCertificate.key);
 
       const declinedSignerResult = await tx.query(
         `
@@ -3038,7 +3035,7 @@ export async function declineSigningForToken(
           declinedAt,
           context.envelope.id,
           certificate.sha256,
-          recipientCertificateSha256,
+          recipientCertificate.sha256,
         ],
       );
 
@@ -3063,15 +3060,17 @@ export async function declineSigningForToken(
         },
         tx,
       );
-    }, database);
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
-    throw error;
-  }
+    } catch (error) {
+      // Removed while the envelope is still locked, so these can only be the
+      // files this call wrote.
+      await Promise.all(
+        storedCertificateKeys.map((key) =>
+          storageService.deleteObject(key).catch(() => undefined),
+        ),
+      );
+      throw error;
+    }
+  }, database);
 
   try {
     const delivery = await emailService.send(
