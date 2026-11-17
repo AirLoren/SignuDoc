@@ -21,6 +21,7 @@ import {
   issueEmbedLink,
   listEmbedOrigins,
   openEmbedLink,
+  readEmbedEvidence,
   removeEmbedOrigin,
 } from "./embedding.ts";
 import {
@@ -451,9 +452,14 @@ test("an emailed envelope gets no embed links, and an embedded one no reminders 
   );
 });
 
-async function linkFor(admin: ApiActor, envelopeId: string, signerId: string) {
+async function linkFor(
+  admin: ApiActor,
+  envelopeId: string,
+  signerId: string,
+  apiKeyId: string = admin.apiKeyId,
+) {
   const link = await issueEmbedLink(
-    { envelopeId, origin: ORIGIN, signerId, userId: admin.userId },
+    { apiKeyId, envelopeId, origin: ORIGIN, signerId, userId: admin.userId },
     { database },
   );
 
@@ -600,6 +606,26 @@ test("a signer who declines in the app is recorded as declining there", async ()
 
   assert.deepEqual(declined.rows[0]?.metadata.embedded, {
     apiKeyName: "Portal",
+    origin: ORIGIN,
+  });
+});
+
+test("the evidence names the key that asked for the link, not the one that made the envelope", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const signerId = envelope.signers[0]!.id;
+  const { summary: other } = await createApiKey(
+    { email: admin.email, userId: admin.userId },
+    { expiresInDays: null, name: "Kiosk", scope: "write" },
+    database,
+  );
+
+  await linkFor(admin, envelope.id, signerId, other.id);
+  assert.deepEqual(await readEmbedEvidence(envelope.id, signerId, database), {
+    apiKeyName: "Kiosk",
     origin: ORIGIN,
   });
 });

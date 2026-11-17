@@ -26,6 +26,7 @@ export async function POST(request: Request, context: RouteContext) {
     } | null;
 
     const link = await issueEmbedLink({
+      apiKeyId: api.actor.apiKeyId,
       envelopeId: id,
       origin: body?.origin,
       signerId,

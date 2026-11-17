@@ -16,7 +16,8 @@ export { httpEmbedOriginsAllowed, parseEmbedOrigin } from "./embed-origin.ts";
 
 // Embedded signing: an app shows SignuDoc's signing page inside its own
 // site, in a frame, instead of SignuDoc emailing the signer a link. See
-// db/migrations/20261118120000_embedded_signing.sql.
+// db/migrations/20261118120000_embedded_signing.sql and
+// 20261118120500_embed_link_api_key.sql.
 //
 // - An administrator lists the sites allowed to frame signing pages.
 // - An envelope sent through the API with delivery "embedded" emails no
@@ -224,6 +225,8 @@ export function embedSigningPath(token: string, origin: string): string {
  */
 export async function issueEmbedLink(
   input: {
+    /** The key asking for the link; the signature's evidence names it. */
+    apiKeyId?: string | null;
     envelopeId: string;
     origin: unknown;
     signerId: string;
@@ -251,6 +254,23 @@ export async function issueEmbedLink(
   const now = nowInSeconds();
 
   return withTransaction(async (tx) => {
+    // Holds the site on the list until this link is saved. Removing the
+    // site deletes this row and then expires its links, so it waits for
+    // this link and expires it too, or goes first and this is refused.
+    // Taken before any other lock here, so the two cannot deadlock.
+    const stillAllowed = await queryOne<{ origin: string }>(
+      tx,
+      `SELECT origin FROM embed_allowed_origins WHERE origin = $1 FOR SHARE`,
+      [origin],
+    );
+
+    if (!stillAllowed) {
+      throw new EmbeddingError(
+        "origin: this site is not allowed to frame signing pages. An administrator can add it under Settings, Organization, Embedded signing.",
+        403,
+      );
+    }
+
     const envelope = await queryOne<{
       delivery: string;
       expiresAt: number | null;
@@ -322,10 +342,18 @@ export async function issueEmbedLink(
       `
         UPDATE signers
         SET signing_token_hash = $1, signing_token_expires_at = $2,
-            embed_origin = $3, embed_link_opened_at = NULL, updated_at = $4
+            embed_origin = $3, embed_link_opened_at = NULL, updated_at = $4,
+            embed_api_key_id = $6
         WHERE id = $5
       `,
-      [link.tokenHash, link.exp, origin, now, input.signerId],
+      [
+        link.tokenHash,
+        link.exp,
+        origin,
+        now,
+        input.signerId,
+        input.apiKeyId ?? null,
+      ],
     );
 
     return {
@@ -434,7 +462,9 @@ export async function readEmbedEvidence(
       SELECT e.delivery, s.embed_origin AS origin, k.name AS "apiKeyName"
       FROM envelopes e
       JOIN signers s ON s.envelope_id = e.id AND s.id = $2
-      LEFT JOIN api_keys k ON k.id = e.api_key_id
+      -- The key that asked for this signer's link, not the one that made
+      -- the envelope.
+      LEFT JOIN api_keys k ON k.id = s.embed_api_key_id
       WHERE e.id = $1
     `,
     [envelopeId, signerId],
