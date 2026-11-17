@@ -10,6 +10,8 @@ import type pg from "pg";
 import { ZodError } from "zod";
 
 import {
+  BULK_SEND_CLAIM_STALE_SECONDS,
+  bulkSendBatchBusyMessage,
   bulkSendBatchMismatchMessage,
   bulkSendFromTemplate,
   bulkSendInvitationUnconfirmedMessage,
@@ -29,6 +31,8 @@ import {
   createStorageService,
   type StorageService,
 } from "./services/storage.ts";
+import { duplicateCopyRecipientEmailMessage } from "./schemas/signer.ts";
+import { eraseSignerData } from "./signer-data.ts";
 import { saveEnvelopeAsTemplate, TemplateError } from "./templates.ts";
 
 // Bulk send against a real Postgres: a CSV of people becomes envelopes
@@ -926,4 +930,196 @@ test("an unexpected row failure is logged and kept for the sender", async () => 
   } finally {
     console.error = originalError;
   }
+});
+
+test("a batch another request is sending is refused at once, and a stale claim is taken over", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const body = confirmBody(
+    `name,email\nAnn,ann-${randomUUID()}@example.test\n`,
+  );
+  const first = await bulkSendFromTemplate(userId, template.id, body, {
+    ...options(),
+    sender: senderFor(userId),
+  });
+
+  assert.equal(first.rows[0]?.status, "sent");
+
+  const released = await database.query<{ claimToken: string | null }>(
+    `select claim_token as "claimToken" from bulk_send_batches where user_id = $1 and batch_key = $2`,
+    [userId, body.batchKey],
+  );
+
+  assert.equal(released.rows[0]?.claimToken, null);
+
+  await database.query(
+    `
+      update bulk_send_batches
+      set claim_token = 'another-request',
+        claimed_at = extract(epoch from now())::bigint
+      where user_id = $1 and batch_key = $2
+    `,
+    [userId, body.batchKey],
+  );
+
+  await assert.rejects(
+    bulkSendFromTemplate(userId, template.id, body, {
+      ...options(),
+      sender: senderFor(userId),
+    }),
+    (error: unknown) =>
+      error instanceof BulkSendError &&
+      error.statusCode === 409 &&
+      error.message === bulkSendBatchBusyMessage,
+  );
+
+  await database.query(
+    `
+      update bulk_send_batches
+      set claimed_at = extract(epoch from now())::bigint - $3
+      where user_id = $1 and batch_key = $2
+    `,
+    [userId, body.batchKey, BULK_SEND_CLAIM_STALE_SECONDS + 1],
+  );
+
+  const retry = await bulkSendFromTemplate(userId, template.id, body, {
+    ...options(),
+    sender: senderFor(userId),
+  });
+
+  assert.equal(retry.rows[0]?.status, "sent");
+  assert.equal(retry.rows[0]?.envelopeId, first.rows[0]?.envelopeId);
+  assert.equal(await countSent(userId), 1);
+});
+
+test("two confirms of one batch at once send each row once", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const body = confirmBody(
+    `name,email\nAnn,ann-${randomUUID()}@example.test\nCara,cara-${randomUUID()}@example.test\n`,
+  );
+  const attempts = await Promise.allSettled([
+    bulkSendFromTemplate(userId, template.id, body, {
+      ...options(),
+      sender: senderFor(userId),
+    }),
+    bulkSendFromTemplate(userId, template.id, body, {
+      ...options(),
+      sender: senderFor(userId),
+    }),
+  ]);
+
+  for (const attempt of attempts) {
+    if (attempt.status === "rejected") {
+      assert.ok(attempt.reason instanceof BulkSendError);
+      assert.equal(attempt.reason.message, bulkSendBatchBusyMessage);
+    }
+  }
+
+  assert.ok(attempts.some((attempt) => attempt.status === "fulfilled"));
+  assert.equal(await countSent(userId), 2);
+});
+
+test("skipped rows are returned but not saved to the batch", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const body = confirmBody(
+    `name,email\nAnn,ann-${randomUUID()}@example.test\nBo,not-an-email\n`,
+  );
+  const first = await bulkSendFromTemplate(userId, template.id, body, {
+    ...options(),
+    sender: senderFor(userId),
+  });
+
+  assert.deepEqual(
+    first.rows.map((row) => row.status),
+    ["sent", "skipped"],
+  );
+
+  const stored = await database.query<{ rowNumber: number; status: string }>(
+    `
+      select r.row_number as "rowNumber", r.status
+      from bulk_send_batches b
+      join bulk_send_batch_rows r on r.batch_id = b.id
+      where b.user_id = $1 and b.batch_key = $2
+    `,
+    [userId, body.batchKey],
+  );
+
+  assert.deepEqual(stored.rows, [
+    { rowNumber: first.rows[0]!.rowNumber, status: "sent" },
+  ]);
+
+  const retry = await bulkSendFromTemplate(userId, template.id, body, {
+    ...options(),
+    sender: senderFor(userId),
+  });
+
+  assert.deepEqual(
+    retry.rows.map((row) => [row.status, row.reason]),
+    first.rows.map((row) => [row.status, row.reason]),
+  );
+  assert.equal(await countSent(userId), 1);
+});
+
+test("a repeated copy recipient is refused before the preview", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const before = await countEnvelopes(userId);
+  const copyRecipients = [
+    { email: "copy@example.test", name: "Copy One" },
+    { email: "COPY@example.test", name: "Copy Two" },
+  ];
+  const csv = `name,email\nAnn,ann-${randomUUID()}@example.test\n`;
+
+  for (const body of [
+    { copyRecipients, csv },
+    confirmBody(csv, { copyRecipients }),
+  ]) {
+    await assert.rejects(
+      bulkSendFromTemplate(userId, template.id, body, {
+        ...options(),
+        sender: senderFor(userId),
+      }),
+      (error: unknown) =>
+        error instanceof ZodError &&
+        error.issues[0]?.message === duplicateCopyRecipientEmailMessage,
+    );
+  }
+
+  assert.equal(await countEnvelopes(userId), before);
+});
+
+test("erasing a signer clears a saved failure reason that names them", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const email = `ann-${randomUUID()}@example.test`;
+  const result = await bulkSendFromTemplate(
+    userId,
+    template.id,
+    confirmBody(`name,email\nAnn Example,${email}\n`),
+    { ...options(), sender: senderFor(userId) },
+  );
+  const envelopeId = result.rows[0]?.envelopeId;
+
+  assert.ok(envelopeId);
+
+  await database.query(
+    `
+      update bulk_send_batch_rows
+      set status = 'failed', reason = $2
+      where envelope_id = $1
+    `,
+    [envelopeId, `Ann Example (${email}) needs an account on this site.`],
+  );
+
+  await eraseSignerData(email, email, database);
+
+  const stored = await database.query<{ reason: string | null }>(
+    `select reason from bulk_send_batch_rows where envelope_id = $1`,
+    [envelopeId],
+  );
+
+  assert.equal(stored.rowCount, 1);
+  assert.equal(stored.rows[0]?.reason, null);
 });

@@ -55,6 +55,9 @@ export const missingBulkSendBatchKeyMessage =
 export const bulkSendBatchMismatchMessage =
   "This batch key was used with a different list.";
 
+export const bulkSendBatchBusyMessage =
+  "This batch is still sending. Wait a moment, then confirm again to see its results.";
+
 export const bulkSendInvitationUnconfirmedMessage =
   "This envelope was marked sent but the invitation was not recorded. Check your documents before sending this row again.";
 
@@ -82,6 +85,7 @@ type BulkSendOptions = {
 };
 
 type StoredBatch = {
+  claimToken: string;
   id: string;
   requestFingerprint: string;
   rows: Map<number, StoredBatchRow>;
@@ -90,7 +94,7 @@ type StoredBatch = {
 type StoredBatchRow = {
   envelopeId: string | null;
   reason: string | null;
-  status: "failed" | "processing" | "sent" | "skipped";
+  status: "failed" | "processing" | "sent";
 };
 
 type SendRowContext = {
@@ -108,7 +112,14 @@ type SendRowContext = {
   userId: string;
 };
 
-const TERMINAL_ROW_STATUSES = new Set(["failed", "sent", "skipped"]);
+const TERMINAL_ROW_STATUSES = new Set(["failed", "sent"]);
+
+/**
+ * How long a claim on a batch lasts without being refreshed. The request
+ * sending a batch refreshes it before each row, so this only has to outlast
+ * one row. A request that dies leaves a claim a retry can take after this.
+ */
+export const BULK_SEND_CLAIM_STALE_SECONDS = 5 * 60;
 
 function describeSendFailure(error: unknown): string {
   if (error instanceof ZodError) {
@@ -231,53 +242,10 @@ function failedRow(
   };
 }
 
-async function withBatchLock<T>(
-  pool: DbPool,
-  lockKey: string,
-  run: () => Promise<T>,
-): Promise<T> {
-  const client = await pool.connect();
-
-  try {
-    await client.query("SELECT pg_advisory_lock(hashtextextended($1, 19))", [
-      lockKey,
-    ]);
-
-    try {
-      return await run();
-    } finally {
-      await client.query(
-        "SELECT pg_advisory_unlock(hashtextextended($1, 19))",
-        [lockKey],
-      );
-    }
-  } finally {
-    client.release();
-  }
-}
-
-async function loadBatch(
-  userId: string,
-  batchKey: string,
+async function loadBatchRows(
+  batchId: string,
   database: DbExecutor,
-): Promise<StoredBatch | null> {
-  const batch = await queryOne<{
-    id: string;
-    requestFingerprint: string;
-  }>(
-    database,
-    `
-      SELECT id, request_fingerprint AS "requestFingerprint"
-      FROM bulk_send_batches
-      WHERE user_id = $1 AND batch_key = $2
-    `,
-    [userId, batchKey],
-  );
-
-  if (!batch) {
-    return null;
-  }
-
+): Promise<Map<number, StoredBatchRow>> {
   const rows = await queryMany<{
     envelopeId: string | null;
     reason: string | null;
@@ -294,96 +262,127 @@ async function loadBatch(
       FROM bulk_send_batch_rows
       WHERE batch_id = $1
     `,
-    [batch.id],
+    [batchId],
   );
 
-  return {
-    id: batch.id,
-    requestFingerprint: batch.requestFingerprint,
-    rows: new Map(
-      rows.map((row) => [
-        row.rowNumber,
-        {
-          envelopeId: row.envelopeId,
-          reason: row.reason,
-          status: row.status,
-        },
-      ]),
-    ),
-  };
+  return new Map(
+    rows.map((row) => [
+      row.rowNumber,
+      {
+        envelopeId: row.envelopeId,
+        reason: row.reason,
+        status: row.status,
+      },
+    ]),
+  );
 }
 
-async function insertBatch(
+/**
+ * Creates the batch or takes it over, and claims it for this request. The
+ * claim is a saved token, not a session lock, so it holds through pooled
+ * connections and no connection waits on it. A batch another request is
+ * still sending is refused at once; the sender can confirm again later and
+ * get the stored results.
+ */
+async function claimBatch(
   userId: string,
   templateId: string,
   batchKey: string,
   requestFingerprint: string,
   database: DbExecutor,
 ): Promise<StoredBatch> {
-  const id = randomUUID();
-
-  await database.query(
+  const claimToken = randomUUID();
+  const claimed = await queryOne<{ id: string }>(
+    database,
     `
       INSERT INTO bulk_send_batches (
         id,
         user_id,
         template_id,
         batch_key,
-        request_fingerprint
+        request_fingerprint,
+        claim_token,
+        claimed_at
       )
-      VALUES ($1, $2, $3, $4, $5)
+      VALUES ($1, $2, $3, $4, $5, $6, extract(epoch from now())::bigint)
+      ON CONFLICT (user_id, batch_key) DO UPDATE SET
+        claim_token = EXCLUDED.claim_token,
+        claimed_at = EXCLUDED.claimed_at
+      WHERE bulk_send_batches.request_fingerprint = EXCLUDED.request_fingerprint
+        AND (
+          bulk_send_batches.claim_token IS NULL
+          OR bulk_send_batches.claimed_at < EXCLUDED.claimed_at - $7
+        )
+      RETURNING id
     `,
-    [id, userId, templateId, batchKey, requestFingerprint],
-  );
-
-  return { id, requestFingerprint, rows: new Map() };
-}
-
-async function ensureBatch(
-  userId: string,
-  templateId: string,
-  batchKey: string,
-  requestFingerprint: string,
-  database: DbExecutor,
-): Promise<StoredBatch> {
-  const existing = await loadBatch(userId, batchKey, database);
-
-  if (existing) {
-    if (existing.requestFingerprint !== requestFingerprint) {
-      throw new BulkSendError(bulkSendBatchMismatchMessage, 409);
-    }
-
-    return existing;
-  }
-
-  try {
-    return await insertBatch(
+    [
+      randomUUID(),
       userId,
       templateId,
       batchKey,
       requestFingerprint,
+      claimToken,
+      BULK_SEND_CLAIM_STALE_SECONDS,
+    ],
+  );
+
+  if (!claimed) {
+    const existing = await queryOne<{ requestFingerprint: string }>(
       database,
+      `
+        SELECT request_fingerprint AS "requestFingerprint"
+        FROM bulk_send_batches
+        WHERE user_id = $1 AND batch_key = $2
+      `,
+      [userId, batchKey],
     );
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "23505"
-    ) {
-      const raced = await loadBatch(userId, batchKey, database);
 
-      if (raced) {
-        if (raced.requestFingerprint !== requestFingerprint) {
-          throw new BulkSendError(bulkSendBatchMismatchMessage, 409);
-        }
-
-        return raced;
-      }
+    if (existing && existing.requestFingerprint !== requestFingerprint) {
+      throw new BulkSendError(bulkSendBatchMismatchMessage, 409);
     }
 
-    throw error;
+    throw new BulkSendError(bulkSendBatchBusyMessage, 409);
   }
+
+  return {
+    claimToken,
+    id: claimed.id,
+    requestFingerprint,
+    rows: await loadBatchRows(claimed.id, database),
+  };
+}
+
+/** Keeps this request's claim fresh, or stops if another request took it. */
+async function refreshBatchClaim(
+  batch: StoredBatch,
+  database: DbExecutor,
+): Promise<void> {
+  const refreshed = await database.query(
+    `
+      UPDATE bulk_send_batches
+      SET claimed_at = extract(epoch from now())::bigint
+      WHERE id = $1 AND claim_token = $2
+    `,
+    [batch.id, batch.claimToken],
+  );
+
+  if (refreshed.rowCount === 0) {
+    throw new BulkSendError(bulkSendBatchBusyMessage, 409);
+  }
+}
+
+async function releaseBatchClaim(
+  batch: StoredBatch,
+  database: DbExecutor,
+): Promise<void> {
+  await database.query(
+    `
+      UPDATE bulk_send_batches
+      SET claim_token = NULL, claimed_at = NULL
+      WHERE id = $1 AND claim_token = $2
+    `,
+    [batch.id, batch.claimToken],
+  );
 }
 
 async function saveBatchRow(
@@ -438,16 +437,6 @@ function restoreStoredRow(
 ): BulkSendRowResult {
   if (stored.status === "sent" && stored.envelopeId) {
     return sentRow(row, stored.envelopeId);
-  }
-
-  if (stored.status === "skipped") {
-    return {
-      ...row,
-      envelopeId: null,
-      envelopePath: null,
-      reason: stored.reason,
-      status: "skipped",
-    };
   }
 
   return {
@@ -678,14 +667,15 @@ export async function bulkSendFromTemplate(
   const signatureMeaning = parsedInput.signatureMeaning ?? null;
   const fingerprint = fingerprintBulkSendRequest(template.id, parsedInput);
 
-  return withBatchLock(database, `${userId}:${batchKey}`, async () => {
-    const batch = await ensureBatch(
-      userId,
-      template.id,
-      batchKey,
-      fingerprint,
-      database,
-    );
+  const batch = await claimBatch(
+    userId,
+    template.id,
+    batchKey,
+    fingerprint,
+    database,
+  );
+
+  try {
     const sent: BulkSendRowResult[] = [];
 
     for (const row of rows) {
@@ -696,11 +686,16 @@ export async function bulkSendFromTemplate(
         continue;
       }
 
+      // A skipped row is worked out again from the same list on a retry,
+      // so it is not saved. That keeps a long list past the cap from
+      // costing a write per row, and keeps the reasons, which can name the
+      // person, out of the batch table.
       if (row.status !== "ok") {
-        await saveBatchRow(batch.id, row, "skipped", database);
         sent.push(row);
         continue;
       }
+
+      await refreshBatchClaim(batch, database);
 
       const progress = { envelopeId: stored?.envelopeId ?? null };
 
@@ -745,5 +740,7 @@ export async function bulkSendFromTemplate(
     }
 
     return resultFor(sent);
-  });
+  } finally {
+    await releaseBatchClaim(batch, database);
+  }
 }

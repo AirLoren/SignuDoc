@@ -6,6 +6,7 @@ import {
 } from "../types/domain.ts";
 import { emailSchema, nameSchema } from "./common.ts";
 import { deadlineDaysSchema, reminderIntervalDaysSchema } from "./envelope.ts";
+import { duplicateCopyRecipientEmailMessage } from "./signer.ts";
 
 /** Enough for 200 rows with names, addresses and a title. */
 export const MAX_BULK_SEND_CSV_CHARS = 512 * 1024;
@@ -21,6 +22,25 @@ export const bulkSendRequestSchema = z.object({
   copyRecipients: z
     .array(z.object({ email: emailSchema, name: nameSchema }))
     .max(MAX_COPY_RECIPIENTS_PER_ENVELOPE)
+    // Every envelope gets the same copy list, so a repeated address would
+    // fail on every row once its draft exists. Refuse it before the preview.
+    .superRefine((recipients, ctx) => {
+      const emails = new Set<string>();
+
+      for (const [index, recipient] of recipients.entries()) {
+        const email = recipient.email.toLowerCase();
+
+        if (emails.has(email)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: duplicateCopyRecipientEmailMessage,
+            path: [index, "email"],
+          });
+        }
+
+        emails.add(email);
+      }
+    })
     .optional(),
   csv: z.string().min(1).max(MAX_BULK_SEND_CSV_CHARS),
   expiresInDays: deadlineDaysSchema.optional(),
