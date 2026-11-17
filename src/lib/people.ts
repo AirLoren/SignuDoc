@@ -6,6 +6,7 @@ import {
   queryOne,
   withTransaction,
 } from "./db/connection.ts";
+import { revokeApiKeysForUser } from "./api-keys.ts";
 import { recordSystemAuditEvent } from "./services/system-audit.ts";
 
 // The accounts on this install and who among them is an administrator.
@@ -297,6 +298,16 @@ export async function setPersonRole(
       },
       tx,
     );
+
+    if (role === "user") {
+      // A key acts as its administrator. One who is no longer one loses
+      // their keys for good, so making them one again later does not
+      // quietly bring old keys back.
+      await revokeApiKeysForUser(targetUserId, "role_removed", tx, {
+        email: actor.email,
+        userId: actingUserId,
+      });
+    }
 
     if (keeperId) {
       // The account's row has been held since it was read above. A closed
