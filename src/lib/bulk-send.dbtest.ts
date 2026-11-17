@@ -1123,3 +1123,139 @@ test("erasing a signer clears a saved failure reason that names them", async () 
   assert.equal(stored.rowCount, 1);
   assert.equal(stored.rows[0]?.reason, null);
 });
+
+async function takeOverBatch(userId: string, batchKey: unknown) {
+  await database.query(
+    `
+      update bulk_send_batches
+      set claim_token = 'another-request',
+        claimed_at = extract(epoch from now())::bigint
+      where user_id = $1 and batch_key = $2
+    `,
+    [userId, batchKey],
+  );
+}
+
+test("a request that loses its claim while making a draft saves and sends nothing", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const body = confirmBody(
+    `name,email\nAnn,ann-${randomUUID()}@example.test\n`,
+  );
+  const envelopesBefore = await countEnvelopes(userId);
+  // A retry takes the batch over while this request reads the template's
+  // file, as it could if the read stalled past the claim's lifetime.
+  const slowStorage: StorageService = {
+    deleteObject: (key) => storageService.deleteObject(key),
+    getObject: async (key) => {
+      await takeOverBatch(userId, body.batchKey);
+      return storageService.getObject(key);
+    },
+    getObjectStream: (key) => storageService.getObjectStream(key),
+    headObject: (key) => storageService.headObject(key),
+    putObject: (input) => storageService.putObject(input),
+  };
+
+  await assert.rejects(
+    bulkSendFromTemplate(userId, template.id, body, {
+      database,
+      sender: senderFor(userId),
+      storageService: slowStorage,
+    }),
+    (error: unknown) =>
+      error instanceof BulkSendError &&
+      error.statusCode === 409 &&
+      error.message === bulkSendBatchBusyMessage,
+  );
+
+  const saved = await database.query(
+    `
+      select r.row_number
+      from bulk_send_batch_rows r
+      join bulk_send_batches b on b.id = r.batch_id
+      where b.user_id = $1 and b.batch_key = $2
+    `,
+    [userId, body.batchKey],
+  );
+
+  assert.equal(saved.rowCount, 0);
+  assert.equal(await countSent(userId), 0);
+  assert.equal(await countEnvelopes(userId), envelopesBefore);
+});
+
+test("a request that loses its claim before sending does not send, and the retry sends the same envelope", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const body = confirmBody(
+    `name,email\nAnn,ann-${randomUUID()}@example.test\n`,
+  );
+  // A retry takes the batch over right after the row's envelope is saved.
+  const slowDatabase = new Proxy(database, {
+    get(target, property, receiver) {
+      if (property !== "query") {
+        return Reflect.get(target, property, receiver);
+      }
+
+      return async (text: string, values?: unknown[]) => {
+        const result = await target.query(text, values);
+
+        if (
+          typeof text === "string" &&
+          text.includes("INSERT INTO bulk_send_batch_rows") &&
+          values?.[2] === "processing"
+        ) {
+          await takeOverBatch(userId, body.batchKey);
+        }
+
+        return result;
+      };
+    },
+  });
+
+  await assert.rejects(
+    bulkSendFromTemplate(userId, template.id, body, {
+      database: slowDatabase,
+      sender: senderFor(userId),
+      storageService,
+    }),
+    (error: unknown) =>
+      error instanceof BulkSendError &&
+      error.message === bulkSendBatchBusyMessage,
+  );
+
+  const stored = await database.query<{
+    envelopeId: string | null;
+    status: string;
+  }>(
+    `
+      select r.envelope_id as "envelopeId", r.status
+      from bulk_send_batch_rows r
+      join bulk_send_batches b on b.id = r.batch_id
+      where b.user_id = $1 and b.batch_key = $2
+    `,
+    [userId, body.batchKey],
+  );
+
+  assert.equal(stored.rows[0]?.status, "processing");
+  assert.ok(stored.rows[0]?.envelopeId);
+  assert.equal(await countSent(userId), 0);
+
+  await database.query(
+    `
+      update bulk_send_batches
+      set claimed_at = extract(epoch from now())::bigint - $3
+      where user_id = $1 and batch_key = $2
+    `,
+    [userId, body.batchKey, BULK_SEND_CLAIM_STALE_SECONDS + 1],
+  );
+
+  const retry = await bulkSendFromTemplate(userId, template.id, body, {
+    ...options(),
+    sender: senderFor(userId),
+  });
+
+  assert.equal(retry.rows[0]?.status, "sent");
+  assert.equal(retry.rows[0]?.envelopeId, stored.rows[0]?.envelopeId);
+  assert.equal(await countSent(userId), 1);
+  assert.equal(await countEnvelopes(userId), 2);
+});

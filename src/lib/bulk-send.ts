@@ -18,6 +18,7 @@ import {
   queryOne,
 } from "./db/connection.ts";
 import {
+  deleteDraftEnvelope,
   EnvelopeMutationError,
   getPrepareEnvelopeDataForUser,
   replaceDraftEnvelopeSigners,
@@ -71,6 +72,18 @@ export class BulkSendError extends Error {
   }
 }
 
+/**
+ * This request no longer holds the batch: it was too slow and a retry took
+ * the claim over. It stops without saving or sending anything more, and the
+ * request that holds the claim finishes the batch.
+ */
+class BulkSendClaimLostError extends BulkSendError {
+  constructor() {
+    super(bulkSendBatchBusyMessage, 409);
+    this.name = "BulkSendClaimLostError";
+  }
+}
+
 export type BulkSendSender = {
   email: string;
   ipAddress?: string | null;
@@ -98,7 +111,7 @@ type StoredBatchRow = {
 };
 
 type SendRowContext = {
-  batchId: string;
+  batch: StoredBatch;
   copyRecipients: NonNullable<BulkSendRequest["copyRecipients"]>;
   database: DbPool;
   expiresInDays: BulkSendRequest["expiresInDays"];
@@ -116,8 +129,10 @@ const TERMINAL_ROW_STATUSES = new Set(["failed", "sent"]);
 
 /**
  * How long a claim on a batch lasts without being refreshed. The request
- * sending a batch refreshes it before each row, so this only has to outlast
- * one row. A request that dies leaves a claim a retry can take after this.
+ * sending a batch refreshes it before each step of a row, so this only has
+ * to outlast one step. A request that dies leaves a claim a retry can take
+ * after this, and a request that loses its claim stops before it saves or
+ * sends.
  */
 export const BULK_SEND_CLAIM_STALE_SECONDS = 5 * 60;
 
@@ -367,7 +382,7 @@ async function refreshBatchClaim(
   );
 
   if (refreshed.rowCount === 0) {
-    throw new BulkSendError(bulkSendBatchBusyMessage, 409);
+    throw new BulkSendClaimLostError();
   }
 }
 
@@ -385,14 +400,26 @@ async function releaseBatchClaim(
   );
 }
 
+/**
+ * Saves a row only while this request still holds the batch, and refreshes
+ * the claim in the same statement. The claim update locks the batch, so a
+ * retry taking the claim over either waits for this save and then sees the
+ * row's envelope, or wins first and this save writes nothing.
+ */
 async function saveBatchRow(
-  batchId: string,
+  batch: StoredBatch,
   row: BulkSendRowResult,
   status: StoredBatchRow["status"],
   database: DbExecutor,
 ): Promise<void> {
-  await database.query(
+  const saved = await database.query(
     `
+      WITH claim AS (
+        UPDATE bulk_send_batches
+        SET claimed_at = extract(epoch from now())::bigint
+        WHERE id = $1 AND claim_token = $6
+        RETURNING id
+      )
       INSERT INTO bulk_send_batch_rows (
         batch_id,
         row_number,
@@ -400,15 +427,27 @@ async function saveBatchRow(
         envelope_id,
         reason
       )
-      VALUES ($1, $2, $3, $4, $5)
+      SELECT claim.id, $2, $3, $4, $5
+      FROM claim
       ON CONFLICT (batch_id, row_number)
       DO UPDATE SET
         status = EXCLUDED.status,
         envelope_id = EXCLUDED.envelope_id,
         reason = EXCLUDED.reason
     `,
-    [batchId, row.rowNumber, status, row.envelopeId, row.reason],
+    [
+      batch.id,
+      row.rowNumber,
+      status,
+      row.envelopeId,
+      row.reason,
+      batch.claimToken,
+    ],
   );
+
+  if (saved.rowCount === 0) {
+    throw new BulkSendClaimLostError();
+  }
 }
 
 async function invitationWasRecorded(
@@ -454,7 +493,7 @@ async function sendOneRow(
   context: SendRowContext,
 ): Promise<BulkSendRowResult> {
   const {
-    batchId,
+    batch,
     copyRecipients,
     database,
     expiresInDays,
@@ -504,19 +543,41 @@ async function sendOneRow(
       { database, storageService },
     );
 
+    try {
+      await saveBatchRow(
+        batch,
+        { ...row, envelopeId: draft.envelopeId, reason: null },
+        "processing",
+        database,
+      );
+    } catch (error) {
+      // Another request took the batch while this draft was being made. It
+      // makes and sends its own envelope for this row, so this draft is
+      // never sent and is removed.
+      if (error instanceof BulkSendClaimLostError) {
+        await deleteDraftEnvelope(userId, draft.envelopeId, {
+          database,
+          storageService,
+        }).catch(() => undefined);
+      }
+
+      throw error;
+    }
+
     envelopeId = draft.envelopeId;
     progress.envelopeId = envelopeId;
+  } else {
+    await saveBatchRow(
+      batch,
+      { ...row, envelopeId, reason: null },
+      "processing",
+      database,
+    );
   }
 
-  const processing = {
-    ...row,
-    envelopeId,
-    envelopePath: envelopePath(envelopeId),
-  };
-
-  await saveBatchRow(batchId, processing, "processing", database);
-
   if (needsSignerUpdate) {
+    await refreshBatchClaim(batch, database);
+
     const prepared = await getPrepareEnvelopeDataForUser(userId, envelopeId, {
       database,
     });
@@ -545,6 +606,8 @@ async function sendOneRow(
       );
     }
   }
+
+  await refreshBatchClaim(batch, database);
 
   try {
     await sendDraftEnvelope(
@@ -701,7 +764,7 @@ export async function bulkSendFromTemplate(
 
       try {
         const result = await sendOneRow(row, stored, {
-          batchId: batch.id,
+          batch,
           copyRecipients,
           database,
           expiresInDays: parsedInput.expiresInDays,
@@ -715,9 +778,13 @@ export async function bulkSendFromTemplate(
           userId,
         });
 
-        await saveBatchRow(batch.id, result, "sent", database);
+        await saveBatchRow(batch, result, "sent", database);
         sent.push(result);
       } catch (error) {
+        if (error instanceof BulkSendClaimLostError) {
+          throw error;
+        }
+
         if (!isExpectedSendFailure(error)) {
           logRouteError(error, {
             category: "template_bulk_send_row_failure",
@@ -734,7 +801,7 @@ export async function bulkSendFromTemplate(
 
         const failed = failedRow(row, progress.envelopeId, error);
 
-        await saveBatchRow(batch.id, failed, "failed", database);
+        await saveBatchRow(batch, failed, "failed", database);
         sent.push(failed);
       }
     }
