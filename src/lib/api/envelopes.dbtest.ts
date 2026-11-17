@@ -11,6 +11,7 @@ import type pg from "pg";
 import { createApiKey } from "../api-keys.ts";
 import { openTestDatabase } from "../db/test-database.ts";
 import { EnvelopeMutationError } from "../envelopes.ts";
+import { recordAuditEvent } from "../services/audit.ts";
 import {
   apiCreateEnvelopeSchema,
   createEnvelopeForApi,
@@ -508,4 +509,40 @@ test("a create that fails is not remembered, so its retry runs for real", async 
     EnvelopeMutationError,
   );
   assert.equal(called, false);
+});
+
+test("a corrected signer does not inherit the first view of the person before", async () => {
+  const actor = await createActor();
+  const envelope = await createEnvelopeForApi(
+    actor,
+    request({ send: { permittedUseConfirmed: true } }),
+    source(),
+    database,
+  );
+  const client = envelope.signers[0]!;
+
+  await recordAuditEvent(
+    {
+      actorEmail: client.email,
+      actorType: "signer",
+      envelopeId: envelope.id,
+      event: "viewed",
+      metadata: { signerEmail: client.email, signerId: client.id },
+    },
+    database,
+  );
+
+  const viewed = await getApiEnvelope(actor.userId, envelope.id, database);
+
+  assert.ok(viewed?.signers[0]?.viewedAt);
+
+  // A correction keeps the signer id and changes the address.
+  await database.query(`update signers set email = $2 where id = $1`, [
+    client.id,
+    "corrected@example.test",
+  ]);
+
+  const corrected = await getApiEnvelope(actor.userId, envelope.id, database);
+
+  assert.equal(corrected?.signers[0]?.viewedAt, null);
 });
