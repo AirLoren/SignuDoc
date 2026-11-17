@@ -229,6 +229,43 @@ export async function getApiEnvelope(
   return toApiEnvelope(row, signers.get(row.id) ?? []);
 }
 
+/**
+ * An envelope with its owner, whoever that is, for webhook payloads, which
+ * go to endpoints set up for the whole install. Null once it is deleted.
+ */
+export async function getApiEnvelopeWithOwner(
+  envelopeId: string,
+  database: DbExecutor = getDb(),
+): Promise<{
+  envelope: ApiEnvelope;
+  owner: { email: string; id: string; name: string };
+} | null> {
+  const row = await queryOne<
+    EnvelopeRow & { ownerEmail: string; ownerId: string; ownerName: string }
+  >(
+    database,
+    `
+      SELECT ${ENVELOPE_COLUMNS},
+        u.id AS "ownerId", u.email AS "ownerEmail", u.name AS "ownerName"
+      FROM envelopes e
+      JOIN "user" u ON u.id = e.user_id
+      WHERE e.id = $1
+    `,
+    [envelopeId],
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  const signers = await readSigners([row.id], database);
+
+  return {
+    envelope: toApiEnvelope(row, signers.get(row.id) ?? []),
+    owner: { email: row.ownerEmail, id: row.ownerId, name: row.ownerName },
+  };
+}
+
 export function encodeCursor(createdAt: number, id: string): string {
   return Buffer.from(`${String(createdAt)}:${id}`, "utf8").toString(
     "base64url",
