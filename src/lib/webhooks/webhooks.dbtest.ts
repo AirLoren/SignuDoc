@@ -19,6 +19,8 @@ import {
 import { withTransaction } from "../db/connection.ts";
 import { openTestDatabase } from "../db/test-database.ts";
 import { recordAuditEvent } from "../services/audit.ts";
+import { issueSigningLink } from "../services/signing-links.ts";
+import { getSigningPayloadForToken } from "../signing.ts";
 import {
   drainWebhookDeliveries,
   MAX_ATTEMPTS,
@@ -750,4 +752,36 @@ test("a retry is dropped once its envelope is deleted, even after a first try", 
   assert.ok(await resendWebhookDelivery(tried!.id, database));
   assert.equal((await drainWebhookDeliveries({ database, env })).dropped, 1);
   assert.equal(received.length, 1);
+});
+
+test("two first openings at once record one view and queue one signer.viewed", async () => {
+  const actor = await createAdmin();
+  const endpoint = await addEndpoint(actor, ["signer.viewed"]);
+  const envelope = await createEnvelope(actor);
+  const signerId = envelope.signers[0]!.id;
+  const link = await issueSigningLink({ expiresInSeconds: 3600 }, { env });
+
+  await database.query(
+    `
+      update signers set signing_token_hash = $2, signing_token_expires_at = $3
+      where id = $1
+    `,
+    [signerId, link.tokenHash, link.exp],
+  );
+  await Promise.all(
+    Array.from({ length: 4 }, () =>
+      getSigningPayloadForToken(link.token, { database }),
+    ),
+  );
+
+  const views = await database.query<{ count: number }>(
+    `
+      select count(*)::int as count from audit_events
+      where envelope_id = $1 and event = 'viewed'
+    `,
+    [envelope.id],
+  );
+
+  assert.equal(views.rows[0]?.count, 1);
+  assert.equal((await deliveriesFor(endpoint.endpoint.id)).length, 1);
 });
