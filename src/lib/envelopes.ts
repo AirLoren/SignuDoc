@@ -81,6 +81,8 @@ import {
 } from "./services/audit.ts";
 import {
   createEmailService,
+  EMAIL_NOT_CONNECTED_MESSAGE,
+  isEmailNotConnectedError,
   resolveEmailAddresses,
   type EmailService,
 } from "./services/email.ts";
@@ -450,6 +452,23 @@ export class EnvelopeMutationError extends Error {
     super(message);
     this.name = "EnvelopeMutationError";
     this.statusCode = statusCode;
+  }
+}
+
+/**
+ * The email service for a send. With no provider connected, sending is
+ * refused with a message that says so, before anything changes, instead of
+ * failing as an unexpected server error (issue #53).
+ */
+function createEmailServiceForSending(): EmailService {
+  try {
+    return createEmailService();
+  } catch (error) {
+    if (isEmailNotConnectedError(error)) {
+      throw new EnvelopeMutationError(EMAIL_NOT_CONNECTED_MESSAGE, 503);
+    }
+
+    throw error;
   }
 }
 
@@ -2436,7 +2455,7 @@ export async function sendDraftEnvelope(
     );
   }
 
-  const emailService = createEmailService();
+  const emailService = createEmailServiceForSending();
   const storageService = createStorageService();
   const sourcePdfHead = await storageService.headObject(envelope.sourcePdfKey);
 

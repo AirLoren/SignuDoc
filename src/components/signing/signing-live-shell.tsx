@@ -41,6 +41,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { SigningStateScreen } from "@/components/signing/signing-state-screen";
 import {
   type SigningCurrentField,
   type SigningPayload,
@@ -84,6 +85,12 @@ const defaultSubmitErrorMessage =
   "We couldn't finish signing right now. Reload the page or request a fresh signing link from the sender.";
 const defaultDeclineErrorMessage =
   "We couldn't record your decline right now. Reload the page or request a fresh signing link from the sender.";
+/** What a signer sees once their decline is recorded. */
+export const declinedConfirmation = {
+  description:
+    "Your decline has been recorded. No further action is needed, and this link no longer opens the document.",
+  title: "You declined to sign",
+};
 const compactFieldHeightThreshold = 0.045;
 const compactFieldWidthThreshold = 0.12;
 
@@ -466,6 +473,7 @@ export function SigningLiveShell({
   record: SigningPayload;
   signatureProblem?: ProviderSignatureProblem | null;
 }) {
+  const [hasDeclined, setHasDeclined] = useState(false);
   const [activePage, setActivePage] = useState(
     record.currentSignerFields[0]?.page ??
       record.visibleFields[0]?.page ??
@@ -756,7 +764,10 @@ export function SigningLiveShell({
         return;
       }
 
-      window.location.reload();
+      // Not a reload: a decline retires this link, so reloading would land
+      // on "This link has expired" instead of saying the decline was
+      // recorded (issue #55).
+      setHasDeclined(true);
     } catch {
       setDeclineError(defaultDeclineErrorMessage);
       setIsDeclining(false);
@@ -793,6 +804,16 @@ export function SigningLiveShell({
     ) {
       documentPanGestureRef.current = null;
     }
+  }
+
+  if (hasDeclined) {
+    return (
+      <SigningStateScreen
+        description={declinedConfirmation.description}
+        focusHeading
+        title={declinedConfirmation.title}
+      />
+    );
   }
 
   return (
