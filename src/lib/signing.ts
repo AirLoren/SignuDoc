@@ -70,6 +70,7 @@ import {
   storeRecipientEnvelopeCertificatePdf,
 } from "./services/pdf-finalize.ts";
 import { buildSigningInvitationEmail } from "./services/signing-invitation-email.ts";
+import { readEmbedEvidence } from "./embedding.ts";
 import {
   issueSigningLink,
   type IssuedSigningLink,
@@ -990,6 +991,7 @@ type Part11SignatureRecord = {
 
 function buildSignedAuditEvent(input: {
   authMethods: readonly SignerCheckMethod[];
+  embedded?: { apiKeyName: string | null; origin: string | null } | null;
   envelopeId: string;
   part11?: Part11SignatureRecord | null;
   providerSignature?: ProviderSignatureEvidence | null;
@@ -1015,6 +1017,7 @@ function buildSignedAuditEvent(input: {
       authMethods: [...input.authMethods],
       signatureMethods: [...input.signatureMethods],
       timezoneOffsetMinutes: input.timezoneOffsetMinutes,
+      ...(input.embedded ? { embedded: input.embedded } : {}),
       ...(input.part11 ? { part11: input.part11 } : {}),
       ...(input.providerSignature
         ? { providerSignature: input.providerSignature }
@@ -2316,6 +2319,14 @@ export async function submitSigningForToken(
 ): Promise<SigningSubmitResponse> {
   const parsedInput = signingSubmissionSchema.parse(input);
   const context = await resolveSigningContext(token, { database });
+  // Signed inside another app: no email to the next signer, and the
+  // evidence says where.
+  const embedded = context.signer.id
+    ? await readEmbedEvidence(context.envelope.id, context.signer.id, database)
+    : null;
+  const doneRedirectPath = embedded?.origin
+    ? `/embed/sign/${encodeURIComponent(token)}/done?${new URLSearchParams({ origin: embedded.origin, title: context.envelope.title }).toString()}`
+    : getSigningDoneRedirectPath(token, context.envelope.title);
 
   // A document sent for advanced or qualified signatures is signed by each
   // signer's provider, never by a plain submit, and the other way round.
@@ -2414,6 +2425,7 @@ export async function submitSigningForToken(
 
     const signedAuditEvent = buildSignedAuditEvent({
       authMethods: signerChecks.passed,
+      embedded,
       envelopeId: context.envelope.id,
       part11: part11Signature,
       providerSignature: providerSignature?.evidence ?? null,
@@ -2626,39 +2638,43 @@ export async function submitSigningForToken(
         );
       }
 
-      try {
-        const delivery = await emailService.send(
-          buildSigningInvitationEmail({
-            branding: await getBranding(),
-            envelopeTitle: context.envelope.title,
-            expiresAt: nextSignerDeadline,
-            senderName: normalizeSenderName(context.sender),
-            signerEmail: nextSignerDelivery.email,
-            signerName: nextSignerDelivery.name,
-            signingUrl: nextSignerLink.url,
-          }),
-        );
+      // In an embedded envelope the app starts the next signer's turn:
+      // the signer.signed webhook shows who is next.
+      if (!embedded) {
+        try {
+          const delivery = await emailService.send(
+            buildSigningInvitationEmail({
+              branding: await getBranding(),
+              envelopeTitle: context.envelope.title,
+              expiresAt: nextSignerDeadline,
+              senderName: normalizeSenderName(context.sender),
+              signerEmail: nextSignerDelivery.email,
+              signerName: nextSignerDelivery.name,
+              signingUrl: nextSignerLink.url,
+            }),
+          );
 
-        await recordEmailSent(
-          {
-            envelopeId: context.envelope.id,
-            messageId: delivery.messageId,
-            recipient: nextSignerDelivery.email,
-            signerId: nextSignerDelivery.id,
-            template: "signing_invitation",
-          },
-          database,
-        );
-      } catch (error) {
-        console.error(
-          `Failed to send next signer invitation for envelope ${context.envelope.id} to ${nextSignerDelivery.email}:`,
-          error,
-        );
+          await recordEmailSent(
+            {
+              envelopeId: context.envelope.id,
+              messageId: delivery.messageId,
+              recipient: nextSignerDelivery.email,
+              signerId: nextSignerDelivery.id,
+              template: "signing_invitation",
+            },
+            database,
+          );
+        } catch (error) {
+          console.error(
+            `Failed to send next signer invitation for envelope ${context.envelope.id} to ${nextSignerDelivery.email}:`,
+            error,
+          );
+        }
       }
 
       return signingSubmitResponseSchema.parse({
         envelopeId: context.envelope.id,
-        redirectPath: getSigningDoneRedirectPath(token, context.envelope.title),
+        redirectPath: doneRedirectPath,
         submittedAt,
       });
     }
@@ -2923,7 +2939,7 @@ export async function submitSigningForToken(
 
     return signingSubmitResponseSchema.parse({
       envelopeId: context.envelope.id,
-      redirectPath: getSigningDoneRedirectPath(token, context.envelope.title),
+      redirectPath: doneRedirectPath,
       submittedAt,
     });
   } catch (error) {
