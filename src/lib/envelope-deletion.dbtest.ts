@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
 
 import type pg from "pg";
@@ -26,6 +27,9 @@ import {
 const SOURCE_HASH = "a".repeat(64);
 const SIGNED_HASH = "b".repeat(64);
 const EVIDENCE_HASH = "c".repeat(64);
+const RECIPIENT_EVIDENCE_HASH = "d".repeat(64);
+// The install audit trail's lock (services/system-audit.ts).
+const SYSTEM_AUDIT_LOCK_ID = 746108325;
 
 let database: pg.Pool;
 let storageDir: string;
@@ -108,10 +112,10 @@ async function createEnvelope(
         id, user_id, title, status, source_pdf_key, source_pdf_filename,
         source_pdf_size_bytes, page_count, source_pdf_hash, sent_at,
         completed_at, declined_at, voided_at, signed_pdf_key, evidence_key,
-        signed_pdf_sha256, evidence_sha256, part11
+        signed_pdf_sha256, evidence_sha256, part11, recipient_evidence_sha256
       ) values (
         $1, $2, 'Lease', $3, $4, 'lease.pdf', 4, 1, $14, $5,
-        $6, $7, $8, $9, $10, $11, $12, $13
+        $6, $7, $8, $9, $10, $11, $12, $13, $15
       )
     `,
     [
@@ -129,6 +133,7 @@ async function createEnvelope(
       finished ? EVIDENCE_HASH : null,
       part11,
       SOURCE_HASH,
+      finished ? RECIPIENT_EVIDENCE_HASH : null,
     ],
   );
   await database.query(
@@ -199,6 +204,7 @@ for (const status of ["completed", "declined", "voided"] as const) {
         envelopeId: event?.metadata?.envelopeId,
         evidenceSha256: event?.metadata?.evidenceSha256,
         reason: event?.metadata?.reason,
+        recipientEvidenceSha256: event?.metadata?.recipientEvidenceSha256,
         sourcePdfHash: event?.metadata?.sourcePdfHash,
         status: event?.metadata?.status,
         title: event?.metadata?.title,
@@ -207,6 +213,7 @@ for (const status of ["completed", "declined", "voided"] as const) {
         envelopeId: envelope.envelopeId,
         evidenceSha256: EVIDENCE_HASH,
         reason: "Kept long enough.",
+        recipientEvidenceSha256: RECIPIENT_EVIDENCE_HASH,
         sourcePdfHash: SOURCE_HASH,
         status,
         title: "Lease",
@@ -361,4 +368,75 @@ test("when the deletion fails before it commits, no file is touched", async () =
   assert.equal(deletes, 0);
   assert.equal(await envelopeExists(envelope.envelopeId), true);
   assert.ok((await filesExist(envelope.stored)).every(Boolean));
+});
+
+test("an administrator whose role is being taken away waits for it, and is then refused", async () => {
+  const admin = await createUser("admin");
+  const envelope = await createEnvelope(admin.userId, { status: "completed" });
+  const demotion = await database.connect();
+
+  try {
+    // As taking the role away does: the account row first.
+    await demotion.query("begin");
+    await demotion.query(
+      `select id from public."user" where id = $1 for update`,
+      [admin.userId],
+    );
+
+    const deletion = deleteAs(admin, envelope.envelopeId, "Done.");
+
+    await delay(300);
+    await demotion.query(
+      `update public."user" set role = 'user' where id = $1`,
+      [admin.userId],
+    );
+    await demotion.query("commit");
+
+    await assert.rejects(deletion, rejectsWith(403));
+  } finally {
+    demotion.release();
+  }
+
+  assert.equal(await envelopeExists(envelope.envelopeId), true);
+  assert.ok((await filesExist(envelope.stored)).every(Boolean));
+});
+
+test("a deletion running while the administrator's handed-over envelopes move does not deadlock", async () => {
+  const admin = await createUser("admin");
+  const keeper = await createUser("admin");
+  const envelope = await createEnvelope(admin.userId, { status: "completed" });
+  const demotion = await database.connect();
+
+  try {
+    // In the order taking the role away uses: the account row, the audit
+    // trail lock, then the envelopes it moves to the administrator who stays.
+    await demotion.query("begin");
+    await demotion.query(
+      `select id from public."user" where id = $1 for update`,
+      [admin.userId],
+    );
+    await demotion.query(
+      `update public."user" set role = 'user' where id = $1`,
+      [admin.userId],
+    );
+    await demotion.query("select pg_advisory_xact_lock($1)", [
+      SYSTEM_AUDIT_LOCK_ID,
+    ]);
+
+    const deletion = deleteAs(admin, envelope.envelopeId, "Done.");
+
+    await delay(300);
+    await demotion.query(`update envelopes set user_id = $1 where id = $2`, [
+      keeper.userId,
+      envelope.envelopeId,
+    ]);
+    await demotion.query("commit");
+
+    // The envelope is no longer the deleting account's to delete.
+    await assert.rejects(deletion, rejectsWith(404));
+  } finally {
+    demotion.release();
+  }
+
+  assert.equal(await envelopeExists(envelope.envelopeId), true);
 });

@@ -27,6 +27,7 @@ type FinishedEnvelopeRow = {
   finishedAt: number | null;
   id: string;
   part11: boolean;
+  recipientEvidenceSha256: string | null;
   signedPdfSha256: string | null;
   sourcePdfHash: string;
   status: string;
@@ -86,7 +87,19 @@ export async function deleteFinishedEnvelope(
 ): Promise<{ deletedEnvelopeId: string }> {
   const { deletedEnvelopeId, storageKeys } = await withTransaction(
     async (tx) => {
-      // The envelope row first, as everything that changes an envelope takes
+      // The administrator's own account row before the envelope row. Taking
+      // away the role holds that row (FOR UPDATE) before it takes the audit
+      // trail lock and moves the account's handed-over envelopes, so the
+      // two wait for each other here instead of each holding what the
+      // other needs. Read under this lock, the role is the one in force:
+      // a change since the page loaded is honored.
+      const actorRole = await queryOne<{ role: string }>(
+        tx,
+        `SELECT role FROM public."user" WHERE id = $1 FOR SHARE`,
+        [actor.userId],
+      );
+
+      // Then the envelope row, as everything that changes an envelope takes
       // it; the install's audit trail lock comes after.
       const envelope = await queryOne<FinishedEnvelopeRow>(
         tx,
@@ -99,6 +112,7 @@ export async function deleteFinishedEnvelope(
           source_pdf_hash AS "sourcePdfHash",
           signed_pdf_sha256 AS "signedPdfSha256",
           evidence_sha256 AS "evidenceSha256",
+          recipient_evidence_sha256 AS "recipientEvidenceSha256",
           COALESCE(completed_at, declined_at, voided_at) AS "finishedAt"
         FROM envelopes
         WHERE id = $1 AND user_id = $2
@@ -119,14 +133,6 @@ export async function deleteFinishedEnvelope(
           409,
         );
       }
-
-      // Asked again here, not only by the route: the role is read from the
-      // database, and a change since the page loaded is honored.
-      const actorRole = await queryOne<{ role: string }>(
-        tx,
-        `SELECT role FROM public."user" WHERE id = $1`,
-        [actor.userId],
-      );
 
       if (actorRole?.role !== "admin") {
         throw new EnvelopeMutationError(
@@ -149,6 +155,7 @@ export async function deleteFinishedEnvelope(
             finishedAt: envelope.finishedAt,
             part11: envelope.part11,
             reason: deletionReason,
+            recipientEvidenceSha256: envelope.recipientEvidenceSha256,
             signedPdfSha256: envelope.signedPdfSha256,
             sourcePdfHash: envelope.sourcePdfHash,
             status: envelope.status,
