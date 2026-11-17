@@ -11,6 +11,7 @@ import type pg from "pg";
 import { openTestDatabase } from "./db/test-database.ts";
 import { deleteFinishedEnvelope } from "./envelope-deletion.ts";
 import { EnvelopeMutationError } from "./envelopes.ts";
+import { runRetentionSweep } from "./retention.ts";
 import { getRecipientCertificateKey } from "./services/storage-keys.ts";
 import {
   createStorageService,
@@ -155,6 +156,15 @@ async function envelopeExists(envelopeId: string) {
   return result.rowCount === 1;
 }
 
+async function pendingFileDeletions(envelopeId: string) {
+  const result = await database.query<{ storage_key: string }>(
+    `select storage_key from pending_file_deletions where envelope_id = $1`,
+    [envelopeId],
+  );
+
+  return result.rows.map((row) => row.storage_key);
+}
+
 async function filesExist(keys: readonly string[]) {
   return Promise.all(
     keys.map(async (key) => (await storageService.headObject(key)).exists),
@@ -192,6 +202,7 @@ for (const status of ["completed", "declined", "voided"] as const) {
       await filesExist(envelope.stored),
       envelope.stored.map(() => false),
     );
+    assert.deepEqual(await pendingFileDeletions(envelope.envelopeId), []);
 
     const [event] = await listSystemAuditEvents({ limit: 1 }, database);
 
@@ -301,7 +312,7 @@ test("a reason that is not text, or too long, is refused", async () => {
   assert.equal(await envelopeExists(envelope.envelopeId), true);
 });
 
-test("when a file cannot be deleted, the envelope is still deleted and recorded, and the file is logged", async () => {
+test("when a file cannot be deleted, the envelope is still deleted and recorded, and the next cleanup deletes the file", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "completed" });
   const failingStorage = {
@@ -333,13 +344,27 @@ test("when a file cannot be deleted, the envelope is still deleted and recorded,
 
   assert.equal(event?.event, "envelope_deleted");
   assert.equal(event?.metadata?.envelopeId, envelope.envelopeId);
-  // Every file it held is named in the log, so it can be removed by hand.
   for (const key of envelope.stored) {
     assert.ok(
       logged.some((args) => String(args[0]).includes(key)),
       `expected ${key} to be logged`,
     );
   }
+  assert.ok((await filesExist(envelope.stored)).every(Boolean));
+  assert.ok(
+    (await pendingFileDeletions(envelope.envelopeId)).length >=
+      envelope.stored.length,
+  );
+
+  // Storage is back: the daily cleanup finishes the job.
+  const summary = await runRetentionSweep({ database, storageService });
+
+  assert.ok(summary.pendingFileDeletionsDone >= envelope.stored.length);
+  assert.deepEqual(
+    await filesExist(envelope.stored),
+    envelope.stored.map(() => false),
+  );
+  assert.deepEqual(await pendingFileDeletions(envelope.envelopeId), []);
 });
 
 test("when the deletion fails before it commits, no file is touched", async () => {

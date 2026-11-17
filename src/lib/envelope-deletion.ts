@@ -5,7 +5,11 @@ import {
   withTransaction,
 } from "./db/connection.ts";
 import { EnvelopeMutationError } from "./envelopes.ts";
-import { listEnvelopeStorageKeys } from "./retention.ts";
+import {
+  deletePendingFile,
+  listEnvelopeStorageKeys,
+  queueFileDeletions,
+} from "./retention.ts";
 import {
   createStorageService,
   type StorageService,
@@ -166,11 +170,18 @@ export async function deleteFinishedEnvelope(
         tx,
       );
 
-      // The row and the record of its deletion commit together. The files
-      // cannot roll back with them, so they go only after the commit: a file
-      // left behind by a failure is logged, never an envelope that lost its
-      // files without a record of why.
+      // The row, the record of its deletion and the list of its files
+      // commit together. The files cannot roll back with them, so they go
+      // only after the commit; one that cannot be deleted then stays on the
+      // list, and the daily cleanup tries it again.
       const storageKeys = await listEnvelopeStorageKeys(envelope.id, tx);
+
+      await queueFileDeletions(
+        envelope.id,
+        storageKeys,
+        Math.floor(Date.now() / 1000),
+        tx,
+      );
       const deleted = await tx.query(`DELETE FROM envelopes WHERE id = $1`, [
         envelope.id,
       ]);
@@ -185,12 +196,7 @@ export async function deleteFinishedEnvelope(
   );
 
   for (const key of storageKeys) {
-    await storageService.deleteObject(key).catch((error: unknown) => {
-      console.error(
-        `Failed to delete stored file ${key} of deleted envelope ${deletedEnvelopeId}:`,
-        error,
-      );
-    });
+    await deletePendingFile(key, database, storageService);
   }
 
   return { deletedEnvelopeId };

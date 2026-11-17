@@ -63,6 +63,8 @@ export type RetentionSweepSummary = {
   finishedEnvelopeDeletionFailures: string[];
   finishedEnvelopesDeleted: number;
   finishedEnvelopeWarningsSent: number;
+  /** Files of deleted envelopes that an earlier deletion could not remove. */
+  pendingFileDeletionsDone: number;
   /** Trips to a signing provider ended because nobody came back. */
   providerSigningSessionsEnded: number;
   ranAt: number;
@@ -949,6 +951,87 @@ export async function listEnvelopeStorageKeys(
   );
 }
 
+/** How many queued file deletions one cleanup tries, at most. */
+const PENDING_FILE_DELETIONS_PER_SWEEP = 500;
+
+/**
+ * Names files to delete once the transaction that deletes their envelope
+ * has committed. Until `deletePendingFile` removes one, the daily cleanup
+ * keeps trying it.
+ */
+export async function queueFileDeletions(
+  envelopeId: string,
+  keys: readonly string[],
+  now: number,
+  database: DbExecutor,
+): Promise<void> {
+  if (keys.length === 0) {
+    return;
+  }
+
+  await database.query(
+    `
+      INSERT INTO pending_file_deletions (storage_key, envelope_id, queued_at)
+      SELECT key, $2, $3 FROM unnest($1::text[]) AS key
+      ON CONFLICT (storage_key) DO NOTHING
+    `,
+    [keys, envelopeId, now],
+  );
+}
+
+/**
+ * Deletes one queued file and takes it off the queue. Returns false, after
+ * logging, when it could not, so it stays queued for the next cleanup.
+ */
+export async function deletePendingFile(
+  key: string,
+  database: DbExecutor,
+  storageService: StorageService,
+): Promise<boolean> {
+  try {
+    // Deleting a file that is already gone succeeds.
+    await storageService.deleteObject(key);
+    await database.query(
+      `DELETE FROM pending_file_deletions WHERE storage_key = $1`,
+      [key],
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      `Failed to delete stored file ${key}; it stays queued for the next cleanup:`,
+      error,
+    );
+
+    return false;
+  }
+}
+
+async function deletePendingFiles(
+  database: DbExecutor,
+  storageService: StorageService,
+): Promise<number> {
+  const pending = await queryMany<{ storageKey: string }>(
+    database,
+    `
+      SELECT storage_key AS "storageKey"
+      FROM pending_file_deletions
+      ORDER BY queued_at ASC, storage_key ASC
+      LIMIT $1
+    `,
+    [PENDING_FILE_DELETIONS_PER_SWEEP],
+  );
+  let done = 0;
+
+  for (const { storageKey } of pending) {
+    if (await deletePendingFile(storageKey, database, storageService)) {
+      done += 1;
+    }
+  }
+
+  return done;
+}
+
 /** Deletes these envelopes and their stored files. Returns how many went. */
 export async function deleteEnvelopesAndFiles(
   envelopeIds: readonly string[],
@@ -1016,9 +1099,15 @@ export async function runRetentionSweep({
     finishedEnvelopeDeletionFailures: [],
     finishedEnvelopesDeleted: 0,
     finishedEnvelopeWarningsSent: 0,
+    pendingFileDeletionsDone: 0,
     providerSigningSessionsEnded: 0,
     ranAt: now,
   };
+
+  summary.pendingFileDeletionsDone = await deletePendingFiles(
+    database,
+    storageService,
+  );
 
   summary.expiredRecipientDownloadTokensDeleted =
     await deleteExpiredRecipientDownloadTokens(now, database);
