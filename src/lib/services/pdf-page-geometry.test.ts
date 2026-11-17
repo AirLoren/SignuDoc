@@ -285,7 +285,10 @@ async function showAppearanceAlone(
   const appearanceRef = annotation
     .lookup(PDFName.of("AP"), PDFDict)
     .get(PDFName.of("N"));
-  const appearance = document.context.lookup(appearanceRef, PDFRawStream);
+  const appearance = document.context.lookup(appearanceRef);
+
+  assert.ok(appearance instanceof PDFRawStream);
+
   const numbers = (array: PDFArray | undefined) =>
     array?.asArray().map((entry) => Number(entry.toString()));
   const [left, bottom, right, top] = numbers(
