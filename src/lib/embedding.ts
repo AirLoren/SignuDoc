@@ -126,9 +126,12 @@ export async function addEmbedOrigin(
       `LOCK TABLE embed_allowed_origins IN SHARE ROW EXCLUSIVE MODE`,
     );
 
+    // A site already on the list takes no new place, so adding it again
+    // succeeds and changes nothing, even when the list is full.
     const count = await queryOne<{ count: number }>(
       tx,
-      `SELECT count(*)::int AS count FROM embed_allowed_origins`,
+      `SELECT count(*)::int AS count FROM embed_allowed_origins WHERE origin <> $1`,
+      [origin],
     );
 
     if ((count?.count ?? 0) >= MAX_EMBED_ORIGINS) {

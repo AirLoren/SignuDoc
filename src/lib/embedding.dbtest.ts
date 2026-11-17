@@ -79,6 +79,8 @@ before(async () => {
 
   document.addPage([612, 792]);
   pdf = await document.save();
+  // The end-to-end run shares this database and leaves its site behind.
+  await database.query(`delete from embed_allowed_origins`);
 });
 
 afterEach(async () => {
@@ -665,4 +667,24 @@ test("a link opened while its site is being removed stays expired", async () => 
 
   assert.equal(after.openedAt, null);
   assert.ok(after.expiresAt < Date.now() / 1000);
+});
+
+test("a site already on a full list can be added again without an error", async () => {
+  const admin = await createAdmin();
+  const sites = Array.from(
+    { length: 10 },
+    (_, index) => `https://app${String(index)}.example.com`,
+  );
+
+  for (const site of sites) {
+    await addEmbedOrigin(admin, site, { database });
+  }
+
+  assert.equal(await addEmbedOrigin(admin, sites[3]!, { database }), sites[3]!);
+  await assert.rejects(
+    addEmbedOrigin(admin, "https://eleventh.example.com", { database }),
+    (error: unknown) =>
+      error instanceof EmbeddingError && error.statusCode === 409,
+  );
+  assert.equal((await listEmbedOrigins(database)).length, 10);
 });
