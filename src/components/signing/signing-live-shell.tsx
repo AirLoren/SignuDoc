@@ -88,7 +88,7 @@ const defaultDeclineErrorMessage =
 /** What a signer sees once their decline is recorded. */
 export const declinedConfirmation = {
   description:
-    "Your decline has been recorded and the sender has been told. No further action is needed, and this link no longer opens the document.",
+    "Your decline has been recorded. No further action is needed, and this link no longer opens the document.",
   title: "You declined to sign",
 };
 const compactFieldHeightThreshold = 0.045;
@@ -799,6 +799,7 @@ export function SigningLiveShell({
     return (
       <SigningStateScreen
         description={declinedConfirmation.description}
+        focusHeading
         title={declinedConfirmation.title}
       />
     );

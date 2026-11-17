@@ -1,6 +1,7 @@
 "use client";
 
 import { FileTextIcon } from "lucide-react";
+import { useEffect, useRef } from "react";
 
 import { Brand } from "@/components/layout/brand";
 import { PublicLegalFooter } from "@/components/layout/public-legal-links";
@@ -8,11 +9,26 @@ import { PublicLegalFooter } from "@/components/layout/public-legal-links";
 /** A signing link's end state: a heading and one line, with no document. */
 export function SigningStateScreen({
   description,
+  focusHeading = false,
   title,
 }: {
   description: string;
+  /**
+   * Moves focus to the heading when the screen appears in place of
+   * something the person was using (a dialog), so a screen reader reads
+   * the outcome out.
+   */
+  focusHeading?: boolean;
   title: string;
 }) {
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    if (focusHeading) {
+      headingRef.current?.focus();
+    }
+  }, [focusHeading]);
+
   return (
     <div className="flex min-h-screen flex-col">
       <header>
@@ -31,7 +47,11 @@ export function SigningStateScreen({
           >
             <FileTextIcon className="size-6" strokeWidth={2.2} />
           </span>
-          <h1 className="mt-6 text-[clamp(1.625rem,4vw,2.125rem)] font-extrabold leading-tight tracking-[-0.03em] text-(--fg)">
+          <h1
+            className="mt-6 text-[clamp(1.625rem,4vw,2.125rem)] font-extrabold leading-tight tracking-[-0.03em] text-(--fg) outline-none"
+            ref={headingRef}
+            tabIndex={-1}
+          >
             {title}
           </h1>
           <p className="mx-auto mt-3 max-w-[460px] text-base leading-7 text-(--secondary)">

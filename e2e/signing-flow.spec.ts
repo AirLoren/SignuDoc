@@ -1317,9 +1317,13 @@ test("a signer who declines is told the decline was recorded, not that the link 
       .fill("Terms in section 2 are not what we agreed.");
     await decline.getByRole("button", { name: "Decline to sign" }).click();
 
-    await expect(
-      signerPage.getByRole("heading", { name: "You declined to sign" }),
-    ).toBeVisible();
+    const declined = signerPage.getByRole("heading", {
+      name: "You declined to sign",
+    });
+
+    await expect(declined).toBeVisible();
+    // Focus moves to the outcome, so a screen reader reads it out.
+    await expect(declined).toBeFocused();
     await expect(signerPage.getByText("This link has expired")).toHaveCount(0);
     await expect(
       signerPage.getByText(/Request a new signing link/),
