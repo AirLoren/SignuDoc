@@ -543,6 +543,8 @@ async function sendOneRow(
       { database, storageService },
     );
 
+    progress.envelopeId = draft.envelopeId;
+
     try {
       await saveBatchRow(
         batch,
@@ -559,6 +561,7 @@ async function sendOneRow(
           database,
           storageService,
         }).catch(() => undefined);
+        progress.envelopeId = null;
       }
 
       throw error;
