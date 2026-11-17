@@ -2885,7 +2885,14 @@ export async function changeEnvelopeDeadline(
     await tx.query(
       `
         UPDATE signers
-        SET signing_token_expires_at = $1, updated_at = $2
+        -- A link made for an app keeps its own short life: a later
+        -- deadline must not bring it back or stretch it, though an
+        -- earlier one still cuts it short.
+        SET signing_token_expires_at = CASE
+              WHEN embed_origin IS NULL THEN $1
+              ELSE LEAST(signing_token_expires_at, $1)
+            END,
+            updated_at = $2
         WHERE envelope_id = $3
           AND status = 'notified'
           AND signing_token_hash IS NOT NULL
@@ -2917,6 +2924,9 @@ export async function changeEnvelopeDeadline(
 const SENT_ENVELOPE_SIGNER_CORRECTION_MESSAGE =
   "Only an envelope that is out for signature can have a signer corrected.";
 
+const EMBEDDED_SIGNER_CORRECTION_MESSAGE =
+  "This envelope is signed in another app, which says who signs. Void it and send a new one to change a signer.";
+
 /**
  * Fixes the name and/or email of a signer who has not signed or declined on
  * an envelope that is out for signature. The signing link they already have
@@ -2946,10 +2956,7 @@ export async function correctSentEnvelopeSigner(
   const parsedInput = correctSentSignerSchema.parse(input);
 
   if (await isEmbeddedEnvelope(envelopeId, database, userId)) {
-    throw new EnvelopeMutationError(
-      "This envelope is signed in another app, which says who signs. Void it and send a new one to change a signer.",
-      409,
-    );
+    throw new EnvelopeMutationError(EMBEDDED_SIGNER_CORRECTION_MESSAGE, 409);
   }
 
   // Read settings before taking the envelope lock: an uncached read inside the
@@ -2960,6 +2967,7 @@ export async function correctSentEnvelopeSigner(
 
   return withTransaction(async (tx) => {
     const envelope = await queryOne<{
+      delivery: string;
       expiresAt: number | null;
       part11: boolean;
       status: EnvelopeRecord["status"];
@@ -2970,6 +2978,7 @@ export async function correctSentEnvelopeSigner(
       tx,
       `
         SELECT
+          delivery,
           expires_at AS "expiresAt",
           part11,
           status,
@@ -2992,6 +3001,12 @@ export async function correctSentEnvelopeSigner(
         SENT_ENVELOPE_SIGNER_CORRECTION_MESSAGE,
         409,
       );
+    }
+
+    // Checked again on the locked row: an embedded send may have landed
+    // since the check above.
+    if (envelope.delivery === "embedded") {
+      throw new EnvelopeMutationError(EMBEDDED_SIGNER_CORRECTION_MESSAGE, 409);
     }
 
     if (envelope.part11) {

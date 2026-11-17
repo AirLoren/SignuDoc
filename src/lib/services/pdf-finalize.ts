@@ -959,9 +959,17 @@ function describeSignerEvidence(
     }
   }
 
+  // A signer who declined in another app has no signed event; the
+  // declined event carries the same record of where it happened.
+  const declined =
+    signed === undefined && signer.status === "declined"
+      ? forSigner.findLast((event) => event.event === "declined")
+      : undefined;
+  const embeddedSource = signed ?? declined;
   const embedded =
-    signed?.metadata?.embedded && typeof signed.metadata.embedded === "object"
-      ? (signed.metadata.embedded as Record<string, unknown>)
+    embeddedSource?.metadata?.embedded &&
+    typeof embeddedSource.metadata.embedded === "object"
+      ? (embeddedSource.metadata.embedded as Record<string, unknown>)
       : null;
   const checks = [
     embedded

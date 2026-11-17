@@ -461,6 +461,11 @@ Put `url` in a frame on the page at `origin`:
   hours, or until the envelope's deadline if that is sooner. Ask for a new
   link each time you show the page; a new link replaces the signer's last
   one.
+- Changing the envelope's deadline never makes a link last longer, though
+  an earlier deadline still cuts it short.
+- Removing a site from the list stops every link made for it at once,
+  even one that is open. Ask for a new link for a site that is still
+  allowed.
 - A signer who is not yet at their turn gets 409. With several signers, the
   next one's turn starts when the one before signs: watch for the
   `signer.signed` webhook, whose `data.envelope` shows who is `notified`

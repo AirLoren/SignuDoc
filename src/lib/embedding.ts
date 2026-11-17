@@ -181,6 +181,23 @@ export async function removeEmbedOrigin(
       throw new EmbeddingError("That site is not on the list.", 404);
     }
 
+    // Links already made for the site stop working at once, opened or
+    // not. The signer's row is kept: the app can ask for a link for a
+    // site that is still allowed.
+    const now = nowInSeconds();
+
+    await tx.query(
+      `
+        UPDATE signers
+        SET signing_token_expires_at = LEAST(signing_token_expires_at, $2 - 1),
+            updated_at = $2
+        WHERE embed_origin = $1
+          AND status = 'notified'
+          AND signing_token_hash IS NOT NULL
+      `,
+      [origin, now],
+    );
+
     await recordSystemAuditEvent(
       {
         actorEmail: actor.email,
@@ -343,13 +360,17 @@ export async function openEmbedLink(
     envelopeExpiresAt: number | null;
     expiresAt: number | null;
     id: string;
+    originAllowed: boolean;
   }>(
     database,
     `
       SELECT s.id, s.embed_origin AS "embedOrigin",
         s.embed_link_opened_at AS "embedLinkOpenedAt",
         s.signing_token_expires_at AS "expiresAt",
-        e.delivery, e.expires_at AS "envelopeExpiresAt"
+        e.delivery, e.expires_at AS "envelopeExpiresAt",
+        EXISTS (
+          SELECT 1 FROM embed_allowed_origins a WHERE a.origin = s.embed_origin
+        ) AS "originAllowed"
       FROM signers s
       JOIN envelopes e ON e.id = s.envelope_id
       WHERE s.signing_token_hash = $1
@@ -365,7 +386,8 @@ export async function openEmbedLink(
     return { ok: false, reason: "not_embedded" };
   }
 
-  if (!origin || row.embedOrigin !== origin) {
+  // The site must still be on the list: removing it stops its links.
+  if (!origin || row.embedOrigin !== origin || !row.originAllowed) {
     return { ok: false, reason: "wrong_origin" };
   }
 
@@ -379,14 +401,17 @@ export async function openEmbedLink(
       row.envelopeExpiresAt ?? now + EMBED_SESSION_SECONDS,
     );
 
+    // Matched on the token too: a link replaced since the read above must
+    // not be marked opened, or given a session, by the old one.
     await database.query(
       `
         UPDATE signers
         SET embed_link_opened_at = $2,
             signing_token_expires_at = GREATEST(signing_token_expires_at, $3)
         WHERE id = $1 AND embed_link_opened_at IS NULL
+          AND signing_token_hash = $4 AND signing_token_expires_at >= $2
       `,
-      [row.id, now, sessionEnd],
+      [row.id, now, sessionEnd, hashOpaqueToken(token)],
     );
   }
 

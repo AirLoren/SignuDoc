@@ -24,12 +24,17 @@ import {
   removeEmbedOrigin,
 } from "./embedding.ts";
 import {
+  changeEnvelopeDeadline,
   correctSentEnvelopeSigner,
   EnvelopeMutationError,
 } from "./envelopes.ts";
 import { ReminderMutationError, sendManualEnvelopeNudge } from "./reminders.ts";
 import { hashOpaqueToken } from "./services/opaque-tokens.ts";
-import { getSigningPayloadForToken, SigningAccessError } from "./signing.ts";
+import {
+  declineSigningForToken,
+  getSigningPayloadForToken,
+  SigningAccessError,
+} from "./signing.ts";
 import { setWebhookDrainScheduler } from "./webhooks/outbox.ts";
 
 // Embedded signing against a real Postgres and real files. Run with
@@ -444,4 +449,157 @@ test("an emailed envelope gets no embed links, and an embedded one no reminders 
     (error: unknown) =>
       error instanceof EnvelopeMutationError && error.statusCode === 409,
   );
+});
+
+async function linkFor(admin: ApiActor, envelopeId: string, signerId: string) {
+  const link = await issueEmbedLink(
+    { envelopeId, origin: ORIGIN, signerId, userId: admin.userId },
+    { database },
+  );
+
+  return tokenOf(link.url);
+}
+
+async function signerLink(signerId: string) {
+  const row = await database.query<{
+    expiresAt: number;
+    openedAt: number | null;
+  }>(
+    `
+      select signing_token_expires_at as "expiresAt",
+        embed_link_opened_at as "openedAt"
+      from signers where id = $1
+    `,
+    [signerId],
+  );
+
+  return row.rows[0]!;
+}
+
+test("removing a site stops the links made for it, opened or not", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const token = await linkFor(admin, envelope.id, envelope.signers[0]!.id);
+
+  assert.deepEqual(await openEmbedLink(token, ORIGIN, database), { ok: true });
+  await removeEmbedOrigin(admin, ORIGIN, database);
+
+  assert.deepEqual(await openEmbedLink(token, ORIGIN, database), {
+    ok: false,
+    reason: "wrong_origin",
+  });
+  await assert.rejects(
+    getSigningPayloadForToken(token, { database }),
+    (error: unknown) =>
+      error instanceof SigningAccessError && error.state === "expired",
+  );
+
+  // Adding the site back does not revive the old link; a new one works.
+  await addEmbedOrigin(admin, ORIGIN, { database });
+  await assert.rejects(
+    getSigningPayloadForToken(token, { database }),
+    (error: unknown) =>
+      error instanceof SigningAccessError && error.state === "expired",
+  );
+
+  const fresh = await linkFor(admin, envelope.id, envelope.signers[0]!.id);
+
+  assert.ok(await getSigningPayloadForToken(fresh, { database }));
+});
+
+test("a new deadline does not bring back or stretch an embedded link", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const signerId = envelope.signers[0]!.id;
+  const token = await linkFor(admin, envelope.id, signerId);
+  const before = await signerLink(signerId);
+
+  await changeEnvelopeDeadline(
+    admin.userId,
+    envelope.id,
+    { expiresInDays: 30, senderEmail: admin.email },
+    { database },
+  );
+  assert.equal((await signerLink(signerId)).expiresAt, before.expiresAt);
+
+  // An expired link stays expired.
+  await database.query(
+    `update signers set signing_token_expires_at = $2 where id = $1`,
+    [signerId, Math.floor(Date.now() / 1000) - 1],
+  );
+  await changeEnvelopeDeadline(
+    admin.userId,
+    envelope.id,
+    { expiresInDays: 30, senderEmail: admin.email },
+    { database },
+  );
+  await assert.rejects(
+    getSigningPayloadForToken(token, { database }),
+    (error: unknown) =>
+      error instanceof SigningAccessError && error.state === "expired",
+  );
+});
+
+test("an old link opened while it is being replaced does not open the new one", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const signerId = envelope.signers[0]!.id;
+  const oldToken = await linkFor(admin, envelope.id, signerId);
+  let replaced = false;
+  // Replaces the link between openEmbedLink's read and its update.
+  const racing = {
+    query: async (text: string, values?: unknown[]) => {
+      const result = await database.query(text, values);
+
+      if (!replaced) {
+        replaced = true;
+        await linkFor(admin, envelope.id, signerId);
+      }
+
+      return result;
+    },
+  } as unknown as pg.Pool;
+
+  await openEmbedLink(oldToken, ORIGIN, racing);
+  assert.ok(replaced);
+
+  const after = await signerLink(signerId);
+
+  assert.equal(after.openedAt, null);
+  assert.ok(after.expiresAt - Date.now() / 1000 <= 15 * 60 + 1);
+});
+
+test("a signer who declines in the app is recorded as declining there", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const signerId = envelope.signers[0]!.id;
+  const token = await linkFor(admin, envelope.id, signerId);
+
+  await openEmbedLink(token, ORIGIN, database);
+  await declineSigningForToken(token, { reason: "Wrong terms" }, { database });
+
+  const declined = await database.query<{ metadata: Record<string, unknown> }>(
+    `
+      select metadata from audit_events
+      where envelope_id = $1 and event = 'declined'
+    `,
+    [envelope.id],
+  );
+
+  assert.deepEqual(declined.rows[0]?.metadata.embedded, {
+    apiKeyName: "Portal",
+    origin: ORIGIN,
+  });
 });

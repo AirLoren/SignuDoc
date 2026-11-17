@@ -1029,6 +1029,7 @@ function buildSignedAuditEvent(input: {
 
 function buildDeclinedAuditEvent(input: {
   declinedAt: number;
+  embedded?: { apiKeyName: string | null; origin: string | null } | null;
   envelopeId: string;
   reason?: string;
   requestMeta: SigningRequestMeta;
@@ -1048,6 +1049,7 @@ function buildDeclinedAuditEvent(input: {
       signerId: input.signer.id,
       signerName: input.signer.name,
       signerOrder: input.signer.signOrder,
+      ...(input.embedded ? { embedded: input.embedded } : {}),
     },
     userAgent: input.requestMeta.userAgent ?? null,
   };
@@ -3065,8 +3067,16 @@ export async function declineSigningForToken(
     );
   }
 
+  // Declined inside another app: the certificate says where, not that an
+  // emailed link was used.
+  const embedded = await readEmbedEvidence(
+    context.envelope.id,
+    currentSignerId,
+    database,
+  );
   const declinedAuditEvent = buildDeclinedAuditEvent({
     declinedAt,
+    embedded,
     envelopeId: context.envelope.id,
     reason: declineReason,
     requestMeta,

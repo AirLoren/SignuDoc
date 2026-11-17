@@ -186,7 +186,7 @@ An administrator can add webhook endpoints under Settings, Organization, Webhook
 
 ### Embedded signing
 
-An app can show the signing page inside its own site, for envelopes it sends through the API with embedded delivery: no invitations are emailed, and the app says who the signer is. An administrator lists the sites allowed to do this under Settings, Organization, Embedded signing; with none listed it is off, and no page can be framed. See [Embedded signing](api.md#embedded-signing).
+An app can show the signing page inside its own site, for envelopes it sends through the API with embedded delivery: no invitations are emailed, and the app says who the signer is. An administrator lists the sites allowed to do this under Settings, Organization, Embedded signing; with none listed it is off, and no page can be framed. Removing a site stops the links already made for it. See [Embedded signing](api.md#embedded-signing).
 
 ### Send the audit trail to your SIEM
 
