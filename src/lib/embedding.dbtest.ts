@@ -573,6 +573,7 @@ test("an old link opened while it is being replaced does not open the new one", 
 
       return result;
     },
+    connect: () => database.connect(),
   } as unknown as pg.Pool;
 
   await openEmbedLink(oldToken, ORIGIN, racing);
@@ -628,4 +629,40 @@ test("the evidence names the key that asked for the link, not the one that made 
     apiKeyName: "Kiosk",
     origin: ORIGIN,
   });
+});
+
+test("a link opened while its site is being removed stays expired", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const signerId = envelope.signers[0]!.id;
+  const token = await linkFor(admin, envelope.id, signerId);
+  let removed = false;
+  // Removes the site between openEmbedLink's read and its update.
+  const racing = {
+    query: async (text: string, values?: unknown[]) => {
+      const result = await database.query(text, values);
+
+      if (!removed) {
+        removed = true;
+        await removeEmbedOrigin(admin, ORIGIN, database);
+      }
+
+      return result;
+    },
+    connect: () => database.connect(),
+  } as unknown as pg.Pool;
+
+  assert.deepEqual(await openEmbedLink(token, ORIGIN, racing), {
+    ok: false,
+    reason: "wrong_origin",
+  });
+  assert.ok(removed);
+
+  const after = await signerLink(signerId);
+
+  assert.equal(after.openedAt, null);
+  assert.ok(after.expiresAt < Date.now() / 1000);
 });

@@ -280,7 +280,7 @@ export async function issueEmbedLink(
       `
         SELECT delivery, status, expires_at AS "expiresAt"
         FROM envelopes WHERE id = $1 AND user_id = $2
-        FOR UPDATE
+        FOR NO KEY UPDATE
       `,
       [input.envelopeId, input.userId],
     );
@@ -378,7 +378,7 @@ export type EmbedOpenResult =
 export async function openEmbedLink(
   token: string,
   origin: string | null,
-  database: DbExecutor = getDb(),
+  database: DbPool = getDb(),
   now: number = nowInSeconds(),
 ): Promise<EmbedOpenResult> {
   const row = await queryOne<{
@@ -429,18 +429,38 @@ export async function openEmbedLink(
       row.envelopeExpiresAt ?? now + EMBED_SESSION_SECONDS,
     );
 
-    // Matched on the token too: a link replaced since the read above must
-    // not be marked opened, or given a session, by the old one.
-    await database.query(
-      `
-        UPDATE signers
-        SET embed_link_opened_at = $2,
-            signing_token_expires_at = GREATEST(signing_token_expires_at, $3)
-        WHERE id = $1 AND embed_link_opened_at IS NULL
-          AND signing_token_hash = $4 AND signing_token_expires_at >= $2
-      `,
-      [row.id, now, sessionEnd, hashOpaqueToken(token)],
-    );
+    const stillAllowed = await withTransaction(async (tx) => {
+      // Held while the link opens, as when it is issued. Removing the site
+      // deletes this row, so it either waits and then expires the opened
+      // link, or went first and the link does not open.
+      const site = await tx.query(
+        `SELECT origin FROM embed_allowed_origins WHERE origin = $1 FOR SHARE`,
+        [origin],
+      );
+
+      if ((site.rowCount ?? 0) === 0) {
+        return false;
+      }
+
+      // Matched on the token too: a link replaced since the read above
+      // must not be marked opened, or given a session, by the old one.
+      await tx.query(
+        `
+          UPDATE signers
+          SET embed_link_opened_at = $2,
+              signing_token_expires_at = GREATEST(signing_token_expires_at, $3)
+          WHERE id = $1 AND embed_link_opened_at IS NULL
+            AND signing_token_hash = $4 AND signing_token_expires_at >= $2
+        `,
+        [row.id, now, sessionEnd, hashOpaqueToken(token)],
+      );
+
+      return true;
+    }, database);
+
+    if (!stillAllowed) {
+      return { ok: false, reason: "wrong_origin" };
+    }
   }
 
   return { ok: true };
