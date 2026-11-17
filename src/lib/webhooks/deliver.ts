@@ -58,6 +58,7 @@ export type WebhookPayload = {
 
 type ClaimedDelivery = {
   attempts: number;
+  auditEventId: string | null;
   auditCreatedAt: number | null;
   auditMetadata: Record<string, unknown> | null;
   createdAt: number;
@@ -164,6 +165,7 @@ async function claimDueDeliveries(
         c.id,
         c.event_type AS "eventType",
         c.envelope_id AS "envelopeId",
+        c.audit_event_id AS "auditEventId",
         c.signer_id AS "signerId",
         c.payload,
         c.attempts,
@@ -255,6 +257,21 @@ async function sendOne(
   env: EnvSource,
 ): Promise<"delivered" | "failed" | "dropped"> {
   let body = delivery.payload;
+
+  // Its event was taken back (a send whose invitation could not go out).
+  if (
+    body === null &&
+    delivery.auditEventId &&
+    delivery.auditCreatedAt === null
+  ) {
+    await recordOutcome(
+      database,
+      delivery,
+      { kind: "dropped", reason: "The change it reported was undone." },
+      nowInSeconds(),
+    );
+    return "dropped";
+  }
 
   if (body === null) {
     const payload = await buildWebhookPayload(delivery, database);

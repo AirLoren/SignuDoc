@@ -124,6 +124,7 @@ import {
 import { PERMITTED_USE_VERSION } from "./permitted-uses.ts";
 import { hashAccessCode } from "./signer-checks.ts";
 import { escapeHtml } from "./utils/html.ts";
+import { requestWebhookDrain } from "./webhooks/outbox.ts";
 
 type CreateDraftEnvelopeOptions = {
   database?: DbPool;
@@ -2700,6 +2701,16 @@ export async function sendDraftEnvelope(
         `,
         [envelopeId, sentAuditAt, input.senderEmail],
       );
+      // The envelope.sent webhook was waiting for the invitation to go out
+      // (see below); it did not, so there is nothing to tell.
+      await tx.query(
+        `
+          DELETE FROM webhook_deliveries
+          WHERE envelope_id = $1 AND event_type = 'envelope.sent'
+            AND status = 'pending' AND attempts = 0
+        `,
+        [envelopeId],
+      );
     }, database).catch((rollbackError) => {
       console.error(
         `Failed to roll back sent envelope ${envelopeId} after email delivery failure:`,
@@ -2720,6 +2731,8 @@ export async function sendDraftEnvelope(
     },
     database,
   );
+  // Only now that the invitation is out is the envelope really sent.
+  requestWebhookDrain();
 
   return sendEnvelopeResponseSchema.parse({
     envelopeId,

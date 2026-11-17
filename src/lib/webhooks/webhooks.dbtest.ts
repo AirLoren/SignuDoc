@@ -465,6 +465,43 @@ test("two drains at once never send the same delivery twice", async () => {
   );
 });
 
+test("a send whose invitation email fails leaves no envelope.sent webhook", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin);
+  const outbox = process.env.EMAIL_CAPTURE_DIR;
+  const { writeFile } = await import("node:fs/promises");
+  const blocker = path.join(workDir, "not-a-directory");
+
+  // Capturing the email fails: its folder is a file.
+  await writeFile(blocker, "");
+  process.env.EMAIL_CAPTURE_DIR = path.join(blocker, "outbox");
+
+  try {
+    await assert.rejects(createEnvelope(admin));
+  } finally {
+    process.env.EMAIL_CAPTURE_DIR = outbox;
+  }
+
+  assert.equal((await deliveriesFor(endpoint.id)).length, 0);
+  await drainWebhookDeliveries({ database, env });
+  assert.equal(received.length, 0);
+});
+
+test("a delivery whose audit event was taken back is dropped", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin, ["envelope.voided"]);
+  const envelope = await createEnvelope(admin);
+  const event = await recordAuditEvent(
+    { actorType: "sender", envelopeId: envelope.id, event: "voided" },
+    database,
+  );
+
+  await database.query(`delete from audit_events where id = $1`, [event.id]);
+  assert.equal((await drainWebhookDeliveries({ database, env })).dropped, 1);
+  assert.equal(received.length, 0);
+  assert.equal((await deliveriesFor(endpoint.id))[0]!.status, "failed");
+});
+
 test("a delivery for an envelope deleted before its first try is dropped", async () => {
   const admin = await createAdmin();
   const { endpoint } = await addEndpoint(admin);

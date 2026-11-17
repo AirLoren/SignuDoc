@@ -23,6 +23,11 @@ export function setWebhookDrainScheduler(scheduler: DrainScheduler | null) {
   drainScheduler = scheduler ?? scheduleWebhookDrain;
 }
 
+/** Starts sending what is due, after the response. */
+export function requestWebhookDrain() {
+  drainScheduler();
+}
+
 export async function enqueueWebhookDeliveries(
   input: {
     auditEventId: string;
@@ -67,7 +72,10 @@ export async function enqueueWebhookDeliveries(
   );
   const queued = result.rowCount ?? 0;
 
-  if (queued > 0) {
+  // A send is not finished until the invitation email has gone out, and
+  // is undone (with its delivery) if it cannot. sendDraftEnvelope starts
+  // sending once the email is out.
+  if (queued > 0 && input.event !== "sent") {
     afterCommit(database, () => {
       drainScheduler();
     });
