@@ -65,6 +65,12 @@ type ClaimedDelivery = {
   envelopeId: string | null;
   eventType: string;
   id: string;
+  /**
+   * The lease this drain took. Every write about this try checks it is
+   * still the one on the row, so a try that outlived its lease (and was
+   * taken over by a newer drain) cannot overwrite what the newer one did.
+   */
+  lockedUntil: number;
   /** The body exactly as first sent, or null before the first try. */
   payload: string | null;
   previousSecretEncrypted: string | null;
@@ -169,6 +175,7 @@ async function claimDueDeliveries(
         c.signer_id AS "signerId",
         c.payload,
         c.attempts,
+        c.locked_until AS "lockedUntil",
         c.created_at AS "createdAt",
         a.created_at AS "auditCreatedAt",
         a.metadata AS "auditMetadata",
@@ -211,9 +218,9 @@ async function recordOutcome(
         SET status = 'delivered', delivered_at = $2, last_status_code = $3,
             last_error = NULL, locked_until = NULL, next_attempt_at = NULL,
             updated_at = $2
-        WHERE id = $1
+        WHERE id = $1 AND locked_until = $4 AND status = 'pending'
       `,
-      [delivery.id, now, outcome.status],
+      [delivery.id, now, outcome.status, delivery.lockedUntil],
     );
     return;
   }
@@ -224,9 +231,9 @@ async function recordOutcome(
         UPDATE webhook_deliveries
         SET status = 'failed', last_error = $3, locked_until = NULL,
             next_attempt_at = NULL, updated_at = $2
-        WHERE id = $1
+        WHERE id = $1 AND locked_until = $4 AND status = 'pending'
       `,
-      [delivery.id, now, outcome.reason],
+      [delivery.id, now, outcome.reason, delivery.lockedUntil],
     );
     return;
   }
@@ -238,7 +245,7 @@ async function recordOutcome(
       UPDATE webhook_deliveries
       SET status = $3, next_attempt_at = $4, last_status_code = $5,
           last_error = $6, locked_until = NULL, updated_at = $2
-      WHERE id = $1
+      WHERE id = $1 AND locked_until = $7 AND status = 'pending'
     `,
     [
       delivery.id,
@@ -247,27 +254,49 @@ async function recordOutcome(
       next,
       outcome.status,
       outcome.error.slice(0, MAX_ERROR_LENGTH),
+      delivery.lockedUntil,
     ],
   );
+}
+
+async function envelopeExists(
+  delivery: ClaimedDelivery,
+  database: DbExecutor,
+): Promise<boolean> {
+  const row = await queryOne<{ id: string }>(
+    database,
+    `SELECT id FROM envelopes WHERE id = $1`,
+    [delivery.envelopeId],
+  );
+
+  return row !== null;
 }
 
 async function sendOne(
   database: DbExecutor,
   delivery: ClaimedDelivery,
   env: EnvSource,
-): Promise<"delivered" | "failed" | "dropped"> {
+): Promise<"delivered" | "failed" | "dropped" | "skipped"> {
   let body = delivery.payload;
 
-  // Its event was taken back (a send whose invitation could not go out).
-  if (
-    body === null &&
-    delivery.auditEventId &&
-    delivery.auditCreatedAt === null
-  ) {
+  // Checked before every try, the first and each retry: its event was
+  // taken back (a send whose invitation could not go out), or its
+  // envelope is gone. Either way there is nothing true left to tell.
+  if (delivery.auditEventId && delivery.auditCreatedAt === null) {
     await recordOutcome(
       database,
       delivery,
       { kind: "dropped", reason: "The change it reported was undone." },
+      nowInSeconds(),
+    );
+    return "dropped";
+  }
+
+  if (delivery.envelopeId && !(await envelopeExists(delivery, database))) {
+    await recordOutcome(
+      database,
+      delivery,
+      { kind: "dropped", reason: "The envelope was deleted." },
       nowInSeconds(),
     );
     return "dropped";
@@ -280,21 +309,28 @@ async function sendOne(
       await recordOutcome(
         database,
         delivery,
-        {
-          kind: "dropped",
-          reason: "The envelope was deleted before it was sent.",
-        },
+        { kind: "dropped", reason: "The envelope was deleted." },
         nowInSeconds(),
       );
       return "dropped";
     }
 
     body = JSON.stringify(payload);
-    // Kept, so every later try sends, and signs, the same bytes.
-    await database.query(
-      `UPDATE webhook_deliveries SET payload = $2 WHERE id = $1`,
-      [delivery.id, body],
+
+    // Kept, so every later try sends, and signs, the same bytes. Only
+    // while this drain still holds the lease: if it lost it, the newer
+    // drain sends instead.
+    const saved = await database.query(
+      `
+        UPDATE webhook_deliveries SET payload = $2
+        WHERE id = $1 AND locked_until = $3 AND payload IS NULL
+      `,
+      [delivery.id, body, delivery.lockedUntil],
     );
+
+    if ((saved.rowCount ?? 0) === 0) {
+      return "skipped";
+    }
   }
 
   const sentAt = nowInSeconds();
@@ -352,6 +388,8 @@ export type DrainSummary = {
   delivered: number;
   dropped: number;
   failed: number;
+  /** Tries that lost their lease to a newer drain, which sends instead. */
+  skipped: number;
 };
 
 /**
@@ -368,7 +406,12 @@ export async function drainWebhookDeliveries(
 ): Promise<DrainSummary> {
   const database = options.database ?? getDb();
   const env = options.env ?? process.env;
-  const summary: DrainSummary = { delivered: 0, dropped: 0, failed: 0 };
+  const summary: DrainSummary = {
+    delivered: 0,
+    dropped: 0,
+    failed: 0,
+    skipped: 0,
+  };
 
   for (let batch = 0; batch < (options.maxBatches ?? 4); batch += 1) {
     const claimed = await claimDueDeliveries(

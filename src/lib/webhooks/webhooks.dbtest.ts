@@ -37,7 +37,11 @@ import {
   resendWebhookDelivery,
 } from "./log.ts";
 import type { WebhookEventType } from "./events.ts";
-import { setWebhookDrainScheduler } from "./outbox.ts";
+import {
+  releaseSentWebhook,
+  SENT_HOLD_SECONDS,
+  setWebhookDrainScheduler,
+} from "./outbox.ts";
 import { verifyWebhook } from "./signing.ts";
 
 // Webhooks against a real Postgres and a real HTTP receiver on this
@@ -512,6 +516,7 @@ test("a delivery for an envelope deleted before its first try is dropped", async
     delivered: 0,
     dropped: 1,
     failed: 0,
+    skipped: 0,
   });
   assert.equal(received.length, 0);
   assert.equal((await deliveriesFor(endpoint.id))[0]!.status, "failed");
@@ -648,4 +653,101 @@ test("old deliveries are cleared, failed ones kept longer, and endpoints removed
   await createEnvelope(admin);
   await deleteWebhookEndpoint(admin, endpoint.id, database);
   assert.equal((await deliveriesFor(endpoint.id)).length, 0);
+});
+
+test("envelope.sent waits, unclaimable, until the invitation is out", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin, ["envelope.sent"]);
+  const envelope = await createEnvelope(admin, false);
+
+  // What sendDraftEnvelope writes when it marks the envelope sent, before
+  // the email goes.
+  await withTransaction(
+    (tx) =>
+      recordAuditEvent(
+        { actorType: "sender", envelopeId: envelope.id, event: "sent" },
+        tx,
+      ),
+    database,
+  );
+
+  const [held] = await deliveriesFor(endpoint.id);
+  const now = Math.floor(Date.now() / 1000);
+
+  assert.ok(held!.nextAttemptAt! >= now + SENT_HOLD_SECONDS - 5);
+  // Any drain meanwhile, from another request or the cron, takes nothing.
+  assert.equal((await drainWebhookDeliveries({ database, env })).delivered, 0);
+  assert.equal(received.length, 0);
+
+  await releaseSentWebhook(envelope.id, database);
+  assert.equal((await drainWebhookDeliveries({ database, env })).delivered, 1);
+  assert.equal(received.length, 1);
+});
+
+test("a try that outlived its lease cannot overwrite the newer try's result", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin);
+
+  await createEnvelope(admin);
+
+  let releaseFirst: (status: number) => void = () => undefined;
+
+  answer = () =>
+    received.length === 1
+      ? new Promise<number>((resolve) => {
+          releaseFirst = resolve;
+        })
+      : 200;
+
+  // The first drain sends and hangs waiting for the receiver.
+  const stale = drainWebhookDeliveries({ database, env });
+
+  while (received.length < 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  // Its lease runs out; a newer drain takes the delivery and succeeds.
+  await database.query(
+    `update webhook_deliveries set locked_until = 0 where endpoint_id = $1`,
+    [endpoint.id],
+  );
+  assert.equal((await drainWebhookDeliveries({ database, env })).delivered, 1);
+
+  // Then the stale one hears back with a failure, and must change nothing.
+  releaseFirst(500);
+  await stale;
+
+  const [row] = await deliveriesFor(endpoint.id);
+
+  assert.equal(received.length, 2);
+  assert.equal(received[0]!.body, received[1]!.body);
+  assert.equal(row!.status, "delivered");
+  assert.equal(row!.lastStatusCode, 200);
+});
+
+test("a retry is dropped once its envelope is deleted, even after a first try", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin);
+  const envelope = await createEnvelope(admin);
+
+  answer = () => 503;
+  await drainWebhookDeliveries({ database, env });
+
+  const [tried] = await deliveriesFor(endpoint.id);
+
+  assert.equal(tried!.status, "pending");
+  assert.ok(tried!.payload);
+
+  await database.query(`delete from envelopes where id = $1`, [envelope.id]);
+  await database.query(
+    `update webhook_deliveries set next_attempt_at = 0 where id = $1`,
+    [tried!.id],
+  );
+  assert.equal((await drainWebhookDeliveries({ database, env })).dropped, 1);
+  assert.equal(received.length, 1);
+
+  // "Send again" does not bring it back either.
+  assert.ok(await resendWebhookDelivery(tried!.id, database));
+  assert.equal((await drainWebhookDeliveries({ database, env })).dropped, 1);
+  assert.equal(received.length, 1);
 });

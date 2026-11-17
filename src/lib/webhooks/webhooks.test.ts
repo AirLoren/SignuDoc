@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { MAX_ATTEMPTS, nextAttemptAt } from "./deliver.ts";
 import { parseWebhookEventTypes, webhookEventForAuditEvent } from "./events.ts";
-import { parseWebhookUrl, privateWebhookUrlsAllowed } from "./safe-post.ts";
+import {
+  parseWebhookUrl,
+  postWebhook,
+  privateWebhookUrlsAllowed,
+} from "./safe-post.ts";
 
 test("retries back off and stop after the last try", () => {
   assert.equal(MAX_ATTEMPTS, 8);
@@ -76,4 +80,75 @@ test("private URLs are allowed only when asked for, and never on Vercel", () => 
     }).toString(),
     "http://127.0.0.1:4000/hook",
   );
+});
+
+const publicAndPrivate = [
+  { address: "203.0.113.10", family: 4 },
+  { address: "127.0.0.1", family: 4 },
+];
+
+test("a name that resolves to a private address is never called", async () => {
+  for (const addresses of [
+    [{ address: "10.0.0.5", family: 4 }],
+    [{ address: "169.254.169.254", family: 4 }],
+    [{ address: "::1", family: 6 }],
+    // One private answer among public ones is enough to refuse.
+    publicAndPrivate,
+  ]) {
+    let asked = 0;
+    const result = await postWebhook(
+      "https://hooks.example.test/signudoc",
+      { body: "{}", headers: {} },
+      {
+        env: {},
+        lookup: (_hostname, callback) => {
+          asked += 1;
+          callback(null, addresses);
+        },
+      },
+    );
+
+    assert.equal(asked, 1);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, null);
+    assert.match(
+      result.status === null ? result.error : "",
+      /private address/,
+      JSON.stringify(addresses),
+    );
+  }
+});
+
+test("the request goes to the address that was checked", async () => {
+  const { createServer } = await import("node:http");
+  const hosts: string[] = [];
+  const server = createServer((request, response) => {
+    hosts.push(request.headers.host ?? "");
+    response.writeHead(204);
+    response.end();
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  const { port } = server.address() as { port: number };
+
+  try {
+    // The name exists nowhere but in this lookup, so reaching the server
+    // proves the connection used the address the guard was given.
+    const result = await postWebhook(
+      `http://hooks.example.test:${String(port)}/signudoc`,
+      { body: "{}", headers: {} },
+      {
+        env: { WEBHOOK_ALLOW_PRIVATE_URLS: "1" },
+        lookup: (_hostname, callback) => {
+          callback(null, [{ address: "127.0.0.1", family: 4 }]);
+        },
+      },
+    );
+
+    assert.equal(result.status, 204);
+    assert.deepEqual(hosts, [`hooks.example.test:${String(port)}`]);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

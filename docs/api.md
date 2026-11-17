@@ -356,7 +356,8 @@ Answer with any `2xx` within 10 seconds, and do the slow work after. Any
 other answer, a redirect, or no answer counts as a failure, and the delivery
 is tried again 1 minute, 5 minutes, 30 minutes, 2 hours, 8 hours, 24 hours
 and 24 hours later, about two and a half days in all. After the eighth try
-it is marked failed. The delivery log in Settings shows the last 100
+it is marked failed. A delivery whose envelope has since been deleted is
+not sent again. The delivery log in Settings shows the last 100
 deliveries per endpoint, with your app's answer, and "Send again" puts a
 delivered or failed one back in line.
 
