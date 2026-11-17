@@ -436,6 +436,8 @@ async function readSigners(
           WHERE a.envelope_id = s.envelope_id
             AND a.event = 'viewed'
             AND a.metadata->>'signerId' = s.id
+            -- A corrected signer keeps the id but not the old person's view.
+            AND lower(a.metadata->>'signerEmail') = lower(s.email)
         ) AS "viewedAt"
       FROM signers s
       WHERE s.envelope_id = ANY($1)
