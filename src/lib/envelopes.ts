@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { type Branding } from "./branding.ts";
+import { removeUnclaimedEnvelopeCertificates } from "./certificate-cleanup.ts";
 import {
   type DbExecutor,
   type DbPool,
@@ -89,6 +90,7 @@ import {
 import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import { buildSigningInvitationEmail } from "./services/signing-invitation-email.ts";
 import {
+  loadInstallSealer,
   storeEnvelopeCertificatePdf,
   storeRecipientEnvelopeCertificatePdf,
 } from "./services/pdf-finalize.ts";
@@ -3321,69 +3323,74 @@ export async function voidSentEnvelope(
     voidedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
-  let certificate: { key: string; sha256: string };
-  let recipientCertificateSha256: string;
+  let failedAfterLock = false;
+  // The seal's key and the install's name, read before the transaction:
+  // sealing inside it then needs no second connection from the pool.
+  const seal = await loadInstallSealer();
 
-  try {
-    certificate = await storeEnvelopeCertificatePdf(
-      {
-        auditEvents,
-        certificate: canonicalCertificate,
-        envelope: voidedEnvelope,
-        signers: voidedSigners,
-      },
-      {
-        storageService,
-      },
+  await withTransaction(async (tx) => {
+    // Taken before the certificates are made. They have fixed keys, so a
+    // second void, a decline or the last signature at the same time waits
+    // here, then stops below: it never writes over, or deletes, the files
+    // the first one saved.
+    const locked = await queryOne<{ status: EnvelopeRecord["status"] }>(
+      tx,
+      `
+        SELECT status
+        FROM envelopes
+        WHERE id = $1 AND user_id = $2
+        -- The lock an UPDATE takes, not FOR UPDATE: storing an audit event
+        -- needs a share of this row for its foreign key.
+        FOR NO KEY UPDATE
+      `,
+      [envelopeId, userId],
     );
-    storedCertificateKeys.push(certificate.key);
 
-    const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
-      {
-        auditEvents,
-        certificate: {
-          bucketName: sourcePdfHead.bucketName,
-          key: buildEnvelopeCertificateKey({
-            ...storageIdentity,
-            audience: "recipient",
-          }),
-        },
-        envelope: voidedEnvelope,
-        signers: voidedSigners,
-      },
-      {
-        storageService,
-      },
-    );
-    storedCertificateKeys.push(recipientCertificate.key);
-    recipientCertificateSha256 = recipientCertificate.sha256;
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
-    throw error;
-  }
+    if (!locked) {
+      throw new EnvelopeMutationError("Envelope not found.", 404);
+    }
 
-  try {
-    await withTransaction(async (tx) => {
-      const persistedEnvelope = await getEnvelopeByIdForUser(
-        userId,
-        envelopeId,
-        tx,
+    if (locked.status !== "sent") {
+      throw new EnvelopeMutationError(
+        "Only sent envelopes can be voided.",
+        409,
       );
+    }
 
-      if (!persistedEnvelope) {
-        throw new EnvelopeMutationError("Envelope not found.", 404);
-      }
+    try {
+      const certificate = await storeEnvelopeCertificatePdf(
+        {
+          auditEvents,
+          certificate: canonicalCertificate,
+          envelope: voidedEnvelope,
+          signers: voidedSigners,
+        },
+        {
+          seal,
+          storageService,
+        },
+      );
+      storedCertificateKeys.push(certificate.key);
 
-      if (persistedEnvelope.status !== "sent") {
-        throw new EnvelopeMutationError(
-          "Only sent envelopes can be voided.",
-          409,
-        );
-      }
+      const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
+        {
+          auditEvents,
+          certificate: {
+            bucketName: sourcePdfHead.bucketName,
+            key: buildEnvelopeCertificateKey({
+              ...storageIdentity,
+              audience: "recipient",
+            }),
+          },
+          envelope: voidedEnvelope,
+          signers: voidedSigners,
+        },
+        {
+          seal,
+          storageService,
+        },
+      );
+      storedCertificateKeys.push(recipientCertificate.key);
 
       const updatedEnvelope = await tx.query(
         `
@@ -3406,7 +3413,7 @@ export async function voidSentEnvelope(
           envelopeId,
           userId,
           certificate.sha256,
-          recipientCertificateSha256,
+          recipientCertificate.sha256,
         ],
       );
 
@@ -3444,15 +3451,26 @@ export async function voidSentEnvelope(
         },
         tx,
       );
-    }, database);
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
+    } catch (error) {
+      failedAfterLock = true;
+      throw error;
+    }
+  }, database).catch(async (error: unknown) => {
+    // Only once the envelope was this call's to end: before that, the files
+    // under these keys are not ones it stored.
+    if (failedAfterLock) {
+      await removeUnclaimedEnvelopeCertificates(
+        {
+          envelopeId: envelopeId,
+          keys: storedCertificateKeys,
+          storageService,
+        },
+        database,
+      );
+    }
+
     throw error;
-  }
+  });
 
   const branding = await getBranding().catch(() => null);
 

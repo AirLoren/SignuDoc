@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
 import { type Branding } from "./branding.ts";
+import { removeUnclaimedEnvelopeCertificates } from "./certificate-cleanup.ts";
 import {
   type DbExecutor,
   type DbPool,
@@ -3099,90 +3100,88 @@ export async function declineSigningForToken(
     declinedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
-  let certificate: { key: string; sha256: string };
-  let recipientCertificateSha256: string;
+  let failedAfterLock = false;
+  // The seal's key and the install's name, read before the transaction:
+  // sealing inside it then needs no second connection from the pool.
+  const seal = await loadInstallSealer();
 
-  try {
-    certificate = await storeEnvelopeCertificatePdf(
-      {
-        auditEvents,
-        certificate: canonicalCertificate,
-        envelope: declinedEnvelope,
-        signers: declinedSigners,
-      },
-      {
-        storageService,
-      },
-    );
-    storedCertificateKeys.push(certificate.key);
+  await withTransaction(async (tx) => {
+    await lockSentEnvelope(context.envelope.id, tx);
+    await assertStillSignersTurn(context.envelope.id, currentSignerId, tx);
+    await lockSignerForPresentedToken(tx, {
+      envelopeId: context.envelope.id,
+      signerId: currentSignerId,
+      tokenHash: presentedTokenHash,
+    });
 
-    const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
-      {
-        auditEvents,
-        certificate: {
-          bucketName: sourcePdfHead.bucketName,
-          key: buildEnvelopeCertificateKey({
-            ...storageIdentity,
-            audience: "recipient",
-          }),
-        },
-        envelope: declinedEnvelope,
-        signers: declinedSigners,
-      },
-      {
-        storageService,
-      },
+    // The certificates below are made from the recipients read when the link
+    // was opened. If the sender corrected one of them since, they would name
+    // the old person and leave the correction out, so nothing is stored. A
+    // correction cannot commit while this lock is held, so comparing here
+    // covers the whole window.
+    const recipientsNow = await tx.query<{
+      email: string;
+      id: string;
+      name: string;
+    }>(
+      `
+        SELECT id, name, email FROM signers
+        WHERE envelope_id = $1 AND id = ANY($2::text[])
+      `,
+      [context.envelope.id, context.signers.map((signer) => signer.id)],
     );
-    storedCertificateKeys.push(recipientCertificate.key);
-    recipientCertificateSha256 = recipientCertificate.sha256;
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
-    throw error;
-  }
+    const recipientsChanged =
+      recipientsNow.rows.length !== context.signers.length ||
+      recipientsNow.rows.some((row) => {
+        const seen = context.signers.find((signer) => signer.id === row.id);
 
-  try {
-    await withTransaction(async (tx) => {
-      await lockSentEnvelope(context.envelope.id, tx);
-      await lockSignerForPresentedToken(tx, {
-        envelopeId: context.envelope.id,
-        signerId: currentSignerId,
-        tokenHash: presentedTokenHash,
+        return !seen || seen.name !== row.name || seen.email !== row.email;
       });
 
-      // The certificates above were made before the envelope lock, from the
-      // recipients read when the link was opened. If the sender corrected one
-      // of them since, they name the old person and leave the correction
-      // out, so they must not be kept. A correction cannot commit while this
-      // lock is held, so comparing here covers the whole window.
-      const recipientsNow = await tx.query<{
-        email: string;
-        id: string;
-        name: string;
-      }>(
-        `
-          SELECT id, name, email FROM signers
-          WHERE envelope_id = $1 AND id = ANY($2::text[])
-        `,
-        [context.envelope.id, context.signers.map((signer) => signer.id)],
+    if (recipientsChanged) {
+      throw new SigningMutationError(
+        "This envelope changed while you were declining. Open your signing link again.",
+        409,
       );
-      const recipientsChanged =
-        recipientsNow.rows.length !== context.signers.length ||
-        recipientsNow.rows.some((row) => {
-          const seen = context.signers.find((signer) => signer.id === row.id);
+    }
 
-          return !seen || seen.name !== row.name || seen.email !== row.email;
-        });
+    try {
+      // Made while the envelope is locked: the certificates have fixed keys,
+      // and a void, the last signature or a second decline at the same time
+      // waits, then stops above without touching the files this one saved.
+      const certificate = await storeEnvelopeCertificatePdf(
+        {
+          auditEvents,
+          certificate: canonicalCertificate,
+          envelope: declinedEnvelope,
+          signers: declinedSigners,
+        },
+        {
+          seal,
+          storageService,
+        },
+      );
+      storedCertificateKeys.push(certificate.key);
 
-      if (recipientsChanged) {
-        throw new SigningMutationError(
-          "This envelope changed while you were declining. Open your signing link again.",
-          409,
-        );
-      }
+      const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
+        {
+          auditEvents,
+          certificate: {
+            bucketName: sourcePdfHead.bucketName,
+            key: buildEnvelopeCertificateKey({
+              ...storageIdentity,
+              audience: "recipient",
+            }),
+          },
+          envelope: declinedEnvelope,
+          signers: declinedSigners,
+        },
+        {
+          seal,
+          storageService,
+        },
+      );
+      storedCertificateKeys.push(recipientCertificate.key);
 
       const declinedSignerResult = await tx.query(
         `
@@ -3235,7 +3234,7 @@ export async function declineSigningForToken(
           declinedAt,
           context.envelope.id,
           certificate.sha256,
-          recipientCertificateSha256,
+          recipientCertificate.sha256,
         ],
       );
 
@@ -3260,15 +3259,26 @@ export async function declineSigningForToken(
         },
         tx,
       );
-    }, database);
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
+    } catch (error) {
+      failedAfterLock = true;
+      throw error;
+    }
+  }, database).catch(async (error: unknown) => {
+    // Only once the envelope was this call's to end: before that, the files
+    // under these keys are not ones it stored.
+    if (failedAfterLock) {
+      await removeUnclaimedEnvelopeCertificates(
+        {
+          envelopeId: context.envelope.id,
+          keys: storedCertificateKeys,
+          storageService,
+        },
+        database,
+      );
+    }
+
     throw error;
-  }
+  });
 
   try {
     const delivery = await emailService.send(
