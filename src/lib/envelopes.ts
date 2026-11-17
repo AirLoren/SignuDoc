@@ -315,6 +315,7 @@ type ReviewFieldSummary =
   | "Date"
   | "Dropdown"
   | "Initials"
+  | "Name"
   | "Number"
   | "Radio group"
   | "Signature"
@@ -501,6 +502,7 @@ const FIELD_TYPE_SUMMARY_LABELS: Record<
   date: "Date",
   dropdown: "Dropdown",
   initials: "Initials",
+  name: "Name",
   number: "Number",
   radio: "Radio group",
   signature: "Signature",
@@ -508,14 +510,15 @@ const FIELD_TYPE_SUMMARY_LABELS: Record<
 };
 
 const FIELD_TYPE_SORT_ORDER: Record<FieldRecord["type"], number> = {
-  checkbox: 6,
+  checkbox: 7,
   date: 2,
-  dropdown: 5,
+  dropdown: 6,
   initials: 1,
-  number: 4,
-  radio: 7,
+  name: 3,
+  number: 5,
+  radio: 8,
   signature: 0,
-  text: 3,
+  text: 4,
 };
 
 const TIMELINE_TONE_MAP: Record<
