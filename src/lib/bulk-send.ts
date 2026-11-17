@@ -19,6 +19,8 @@ import {
 } from "./db/connection.ts";
 import {
   deleteDraftEnvelope,
+  draftRecipientsChangedMessage,
+  draftRecipientsMatch,
   EnvelopeMutationError,
   getPrepareEnvelopeDataForUser,
   replaceDraftEnvelopeSigners,
@@ -526,6 +528,20 @@ async function sendOneRow(
       progress.envelopeId = null;
     } else if (prepared.status !== "draft") {
       throw new BulkSendError(bulkSendInvitationUnconfirmedMessage, 409);
+    } else if (
+      // The sender can edit a saved draft before retrying. Only the people
+      // on the confirmed row are sent to, so a changed draft is left alone.
+      !draftRecipientsMatch(
+        {
+          copyRecipients: [],
+          signers: [...prepared.signers].sort(
+            (left, right) => left.order - right.order,
+          ),
+        },
+        { copyRecipients: [], signers: row.signers },
+      )
+    ) {
+      throw new EnvelopeMutationError(draftRecipientsChangedMessage, 409);
     }
   }
 
@@ -625,7 +641,10 @@ async function sendOneRow(
         signatureLevel: "simple",
         userAgent: sender.userAgent,
       },
-      { database },
+      {
+        database,
+        expectedRecipients: { copyRecipients, signers: row.signers },
+      },
     );
   } catch (error) {
     if (

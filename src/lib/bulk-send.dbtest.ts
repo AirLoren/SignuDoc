@@ -22,6 +22,7 @@ import { MAX_BULK_SEND_ROWS } from "./bulk-send-csv.ts";
 import { openTestDatabase } from "./db/test-database.ts";
 import {
   createDraftEnvelope,
+  draftRecipientsChangedMessage,
   getEnvelopeDetailDataForUser,
   getPrepareEnvelopeDataForUser,
   replaceDraftEnvelopeFields,
@@ -1258,4 +1259,237 @@ test("a request that loses its claim before sending does not send, and the retry
   assert.equal(retry.rows[0]?.envelopeId, stored.rows[0]?.envelopeId);
   assert.equal(await countSent(userId), 1);
   assert.equal(await countEnvelopes(userId), 2);
+});
+
+/** Loses the claim right after the row's draft is saved, as a slow request would. */
+async function leaveProcessingDraft(
+  userId: string,
+  templateId: string,
+  body: Record<string, unknown>,
+): Promise<string> {
+  const slowDatabase = new Proxy(database, {
+    get(target, property, receiver) {
+      if (property !== "query") {
+        return Reflect.get(target, property, receiver);
+      }
+
+      return async (text: string, values?: unknown[]) => {
+        const result = await target.query(text, values);
+
+        if (
+          typeof text === "string" &&
+          text.includes("INSERT INTO bulk_send_batch_rows") &&
+          values?.[2] === "processing"
+        ) {
+          await takeOverBatch(userId, body.batchKey);
+        }
+
+        return result;
+      };
+    },
+  });
+
+  await assert.rejects(
+    bulkSendFromTemplate(userId, templateId, body, {
+      database: slowDatabase,
+      sender: senderFor(userId),
+      storageService,
+    }),
+    (error: unknown) =>
+      error instanceof BulkSendError &&
+      error.message === bulkSendBatchBusyMessage,
+  );
+
+  const stored = await database.query<{ envelopeId: string }>(
+    `
+      select r.envelope_id as "envelopeId"
+      from bulk_send_batch_rows r
+      join bulk_send_batches b on b.id = r.batch_id
+      where b.user_id = $1 and b.batch_key = $2 and r.status = 'processing'
+    `,
+    [userId, body.batchKey],
+  );
+
+  await database.query(
+    `
+      update bulk_send_batches
+      set claimed_at = extract(epoch from now())::bigint - $3
+      where user_id = $1 and batch_key = $2
+    `,
+    [userId, body.batchKey, BULK_SEND_CLAIM_STALE_SECONDS + 1],
+  );
+
+  return stored.rows[0]!.envelopeId;
+}
+
+test("a retry does not send a saved draft whose signer was changed", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const body = confirmBody(
+    `name,email\nAnn,ann-${randomUUID()}@example.test\n`,
+  );
+  const envelopeId = await leaveProcessingDraft(userId, template.id, body);
+  const prepared = await getPrepareEnvelopeDataForUser(userId, envelopeId, {
+    database,
+  });
+  const otherEmail = `other-${randomUUID()}@example.test`;
+
+  await replaceDraftEnvelopeSigners(
+    userId,
+    envelopeId,
+    {
+      signers: [
+        { email: otherEmail, id: prepared!.signers[0]!.id, name: "Other" },
+      ],
+    },
+    database,
+  );
+
+  const retry = await bulkSendFromTemplate(userId, template.id, body, {
+    ...options(),
+    sender: senderFor(userId),
+  });
+
+  assert.equal(retry.rows[0]?.status, "failed");
+  assert.equal(retry.rows[0]?.reason, draftRecipientsChangedMessage);
+  assert.equal(retry.rows[0]?.envelopeId, envelopeId);
+  assert.equal(await countSent(userId), 0);
+  assert.ok(
+    !(await capturedInvitations()).some((email) =>
+      email.to.includes(otherEmail),
+    ),
+  );
+});
+
+test("a retry does not send a saved two-role draft that lost a signer", async () => {
+  const userId = await createUser();
+  const template = await createTwoRoleTemplate(userId);
+  const tenantEmail = `tenant-${randomUUID()}@example.test`;
+  const body = confirmBody(
+    twoRoleCsv([
+      [
+        "Tia Tenant",
+        tenantEmail,
+        "Lou Landlord",
+        `landlord-${randomUUID()}@example.test`,
+        "Lease",
+      ],
+    ]),
+  );
+  const envelopeId = await leaveProcessingDraft(userId, template.id, body);
+  const prepared = await getPrepareEnvelopeDataForUser(userId, envelopeId, {
+    database,
+  });
+  const tenant = prepared!.signers.find((signer) => signer.order === 1)!;
+
+  await replaceDraftEnvelopeSigners(
+    userId,
+    envelopeId,
+    { signers: [{ email: tenant.email, id: tenant.id, name: tenant.name }] },
+    database,
+  );
+
+  const retry = await bulkSendFromTemplate(userId, template.id, body, {
+    ...options(),
+    sender: senderFor(userId),
+  });
+
+  assert.equal(retry.rows[0]?.status, "failed");
+  assert.equal(retry.rows[0]?.reason, draftRecipientsChangedMessage);
+  assert.equal(await countSent(userId), 0);
+  assert.ok(
+    !(await capturedInvitations()).some((email) =>
+      email.to.includes(tenantEmail),
+    ),
+  );
+});
+
+test("a draft changed after the row is checked and before it is sent is not sent", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const body = confirmBody(
+    `name,email\nAnn,ann-${randomUUID()}@example.test\n`,
+  );
+  const otherEmail = `other-${randomUUID()}@example.test`;
+  let draftSaved = false;
+  let edited = false;
+  // The sender edits the draft between the row's last claim refresh and
+  // the send, after every check in the batch code has run.
+  const editingDatabase = new Proxy(database, {
+    get(target, property, receiver) {
+      if (property !== "query") {
+        return Reflect.get(target, property, receiver);
+      }
+
+      return async (text: string, values?: unknown[]) => {
+        const result = await target.query(text, values);
+
+        if (
+          typeof text === "string" &&
+          text.includes("INSERT INTO bulk_send_batch_rows") &&
+          values?.[2] === "processing"
+        ) {
+          draftSaved = true;
+        } else if (
+          draftSaved &&
+          !edited &&
+          typeof text === "string" &&
+          text.includes("SET claimed_at") &&
+          !text.includes("INSERT")
+        ) {
+          edited = true;
+
+          const envelopeId = (
+            await target.query<{ envelopeId: string }>(
+              `
+                select r.envelope_id as "envelopeId"
+                from bulk_send_batch_rows r
+                join bulk_send_batches b on b.id = r.batch_id
+                where b.user_id = $1 and b.batch_key = $2
+              `,
+              [userId, body.batchKey],
+            )
+          ).rows[0]!.envelopeId;
+          const prepared = await getPrepareEnvelopeDataForUser(
+            userId,
+            envelopeId,
+            { database: target },
+          );
+
+          await replaceDraftEnvelopeSigners(
+            userId,
+            envelopeId,
+            {
+              signers: [
+                {
+                  email: otherEmail,
+                  id: prepared!.signers[0]!.id,
+                  name: "Other",
+                },
+              ],
+            },
+            target,
+          );
+        }
+
+        return result;
+      };
+    },
+  });
+
+  const result = await bulkSendFromTemplate(userId, template.id, body, {
+    database: editingDatabase,
+    sender: senderFor(userId),
+    storageService,
+  });
+
+  assert.ok(edited);
+  assert.equal(result.rows[0]?.status, "failed");
+  assert.equal(result.rows[0]?.reason, draftRecipientsChangedMessage);
+  assert.equal(await countSent(userId), 0);
+  assert.ok(
+    !(await capturedInvitations()).some((email) =>
+      email.to.includes(otherEmail),
+    ),
+  );
 });
