@@ -189,9 +189,17 @@ function signEnvelope(envelope: Envelope, pool: pg.Pool = database) {
   );
 }
 
-/** Resolves once another session is held up behind a lock. */
-async function waitForLockWaiter() {
+/**
+ * Resolves once another session is held up behind a lock, or once `isOver()`
+ * says the one expected to wait has finished without waiting. Anything else
+ * means the two never overlapped, and the test would prove nothing.
+ */
+async function waitForLockWaiter(isOver: () => boolean) {
   for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (isOver()) {
+      return;
+    }
+
     const waiting = await database.query(
       `
         select 1
@@ -207,6 +215,25 @@ async function waitForLockWaiter() {
 
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+
+  throw new Error("Nothing came to wait for the envelope.");
+}
+
+/** Starts the rival, and waits until it is over or held up behind a lock. */
+async function startRival(start: () => Promise<unknown>) {
+  let over = false;
+  const rival = start();
+
+  rival.then(
+    () => {
+      over = true;
+    },
+    () => {
+      over = true;
+    },
+  );
+
+  return { rival, waiting: waitForLockWaiter(() => over) };
 }
 
 /**
@@ -224,18 +251,96 @@ function withRivalAfter(
     database,
     (text) => !started.rival && text.includes(`status = '${status}'`),
     async () => {
-      started.rival = start();
-      await Promise.race([
-        started.rival.then(
-          () => undefined,
-          () => undefined,
-        ),
-        waitForLockWaiter(),
-      ]);
+      const { rival, waiting } = await startRival(start);
+
+      started.rival = rival;
+      await waiting;
     },
   );
 
   return { pool, started };
+}
+
+type QueryFunction = (text: unknown, values?: unknown[]) => Promise<unknown>;
+
+/**
+ * The same database, except that the one using it fails right after it has
+ * written `status`: Postgres refuses a statement of its, which ends its
+ * transaction there and frees the envelope before the failure is reported.
+ * `start()` was waiting for the envelope by then, and is left to finish
+ * first.
+ */
+function withFailureAfter(
+  status: "declined" | "voided",
+  start: () => Promise<unknown>,
+) {
+  const started: { rival?: Promise<unknown> } = {};
+
+  function bound(object: object, property: string | symbol): unknown {
+    const value: unknown = Reflect.get(object, property);
+
+    return typeof value === "function"
+      ? (value.bind(object) as unknown)
+      : value;
+  }
+
+  const pool = new Proxy(database, {
+    get(target, property) {
+      if (property !== "connect") {
+        return bound(target, property);
+      }
+
+      return async () => {
+        const client = await target.connect();
+
+        return new Proxy(client, {
+          get(object, name) {
+            if (name !== "query") {
+              return bound(object, name);
+            }
+
+            const query = bound(object, name) as QueryFunction;
+            const failing: QueryFunction = async (text, values) => {
+              const result = await query(text, values);
+
+              if (
+                started.rival ||
+                typeof text !== "string" ||
+                !text.includes(`status = '${status}'`)
+              ) {
+                return result;
+              }
+
+              const { rival, waiting } = await startRival(start);
+
+              started.rival = rival;
+              await waiting;
+              await assert.rejects(query("select 1 / 0"));
+              await rival.catch(() => undefined);
+
+              throw new Error("The statement failed.");
+            };
+
+            return failing;
+          },
+        });
+      };
+    },
+  });
+
+  return { pool, started };
+}
+
+async function certificatesStored(envelope: Envelope) {
+  const stored = await Promise.all(
+    (["internal", "recipient"] as const).map(async (audience) => {
+      const key = buildEnvelopeCertificateKey({ ...envelope, audience });
+
+      return (await storageService.headObject(key)).exists;
+    }),
+  );
+
+  return stored;
 }
 
 /**
@@ -358,4 +463,45 @@ test("a void that loses to the last signature leaves the finished certificates a
 
   await assertRefused(started.rival, EnvelopeMutationError);
   await assertCertificatesKept(envelope, "completed");
+});
+
+test("a void that fails after storing its certificates leaves alone those of the void that went through", async () => {
+  const envelope = await createSignableEnvelope();
+  const { pool, started } = withFailureAfter("voided", () =>
+    voidEnvelope(envelope),
+  );
+
+  await assert.rejects(voidEnvelope(envelope, pool), /The statement failed/);
+
+  assert.ok(started.rival, "the failing void never wrote its status");
+  await started.rival;
+  await assertCertificatesKept(envelope, "voided");
+});
+
+test("a decline that fails after storing its certificates leaves alone those of the void that went through", async () => {
+  const envelope = await createSignableEnvelope();
+  const { pool, started } = withFailureAfter("declined", () =>
+    voidEnvelope(envelope),
+  );
+
+  await assert.rejects(declineEnvelope(envelope, pool), /The statement failed/);
+
+  assert.ok(started.rival, "the failing decline never wrote its status");
+  await started.rival;
+  await assertCertificatesKept(envelope, "voided");
+});
+
+test("a void that fails with nothing else ending the envelope removes the certificates it stored", async () => {
+  const envelope = await createSignableEnvelope();
+  const { pool } = withFailureAfter("voided", async () => undefined);
+
+  await assert.rejects(voidEnvelope(envelope, pool), /The statement failed/);
+
+  const row = await database.query<{ status: string }>(
+    `select status from envelopes where id = $1`,
+    [envelope.envelopeId],
+  );
+
+  assert.equal(row.rows[0]?.status, "sent");
+  assert.deepEqual(await certificatesStored(envelope), [false, false]);
 });

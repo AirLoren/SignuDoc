@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
 import { type Branding } from "./branding.ts";
+import { removeUnclaimedEnvelopeCertificates } from "./certificate-cleanup.ts";
 import {
   type DbExecutor,
   type DbPool,
@@ -2940,6 +2941,7 @@ export async function declineSigningForToken(
     declinedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
+  let failedAfterLock = false;
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
   const seal = await loadInstallSealer();
@@ -3061,16 +3063,25 @@ export async function declineSigningForToken(
         tx,
       );
     } catch (error) {
-      // Removed while the envelope is still locked, so these can only be the
-      // files this call wrote.
-      await Promise.all(
-        storedCertificateKeys.map((key) =>
-          storageService.deleteObject(key).catch(() => undefined),
-        ),
-      );
+      failedAfterLock = true;
       throw error;
     }
-  }, database);
+  }, database).catch(async (error: unknown) => {
+    // Only once the envelope was this call's to end: before that, the files
+    // under these keys are not ones it stored.
+    if (failedAfterLock) {
+      await removeUnclaimedEnvelopeCertificates(
+        {
+          envelopeId: context.envelope.id,
+          keys: storedCertificateKeys,
+          storageService,
+        },
+        database,
+      );
+    }
+
+    throw error;
+  });
 
   try {
     const delivery = await emailService.send(
