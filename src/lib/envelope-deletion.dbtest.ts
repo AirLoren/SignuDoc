@@ -11,7 +11,11 @@ import type pg from "pg";
 import { openTestDatabase } from "./db/test-database.ts";
 import { deleteFinishedEnvelope } from "./envelope-deletion.ts";
 import { EnvelopeMutationError } from "./envelopes.ts";
-import { runRetentionSweep } from "./retention.ts";
+import {
+  deletePendingFiles,
+  queueFileDeletions,
+  runRetentionSweep,
+} from "./retention.ts";
 import { getRecipientCertificateKey } from "./services/storage-keys.ts";
 import {
   createStorageService,
@@ -464,4 +468,51 @@ test("a deletion running while the administrator's handed-over envelopes move do
   }
 
   assert.equal(await envelopeExists(envelope.envelopeId), true);
+});
+
+test("a file that keeps failing goes to the back of the queue, so the others are still reached", async () => {
+  const envelopeId = randomUUID();
+  const stuck = `test/${envelopeId}/stuck.pdf`;
+  const healthy = `test/${envelopeId}/healthy.pdf`;
+  // Older than anything else in the queue, so both come first.
+  const longAgo = 1;
+
+  for (const key of [stuck, healthy]) {
+    await storageService.putObject({
+      body: new Uint8Array([37, 80, 68, 70]),
+      contentType: "application/pdf",
+      key,
+    });
+  }
+  await queueFileDeletions(envelopeId, [stuck], longAgo, database);
+  await queueFileDeletions(envelopeId, [healthy], longAgo + 1, database);
+
+  const stuckStorage = {
+    ...storageService,
+    deleteObject: async (key: string) => {
+      if (key === stuck) {
+        throw new Error("Storage refuses this one.");
+      }
+
+      return storageService.deleteObject(key);
+    },
+  } as StorageService;
+  const originalConsoleError = console.error;
+
+  console.error = () => {};
+
+  try {
+    // One at a time: the stuck file first, then, as it was just tried, the
+    // healthy one.
+    assert.equal(await deletePendingFiles(database, stuckStorage, 1), 0);
+    assert.equal(await deletePendingFiles(database, stuckStorage, 1), 1);
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.deepEqual(await filesExist([stuck, healthy]), [true, false]);
+  assert.deepEqual(await pendingFileDeletions(envelopeId), [stuck]);
+
+  await deletePendingFiles(database, storageService);
+  assert.deepEqual(await pendingFileDeletions(envelopeId), []);
 });

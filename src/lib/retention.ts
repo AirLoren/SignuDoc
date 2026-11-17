@@ -1002,24 +1002,39 @@ export async function deletePendingFile(
       `Failed to delete stored file ${key}; it stays queued for the next cleanup:`,
       error,
     );
+    // To the back of the queue, so that files which keep failing do not
+    // stop the cleanup from reaching the others.
+    await database
+      .query(
+        `UPDATE pending_file_deletions SET last_tried_at = $2 WHERE storage_key = $1`,
+        [key, getCurrentUnixTimestamp()],
+      )
+      .catch((updateError: unknown) => {
+        console.error(
+          `Failed to note the failed deletion of stored file ${key}:`,
+          updateError,
+        );
+      });
 
     return false;
   }
 }
 
-async function deletePendingFiles(
+/** Tries the queued file deletions, least recently tried first. */
+export async function deletePendingFiles(
   database: DbExecutor,
   storageService: StorageService,
+  limit = PENDING_FILE_DELETIONS_PER_SWEEP,
 ): Promise<number> {
   const pending = await queryMany<{ storageKey: string }>(
     database,
     `
       SELECT storage_key AS "storageKey"
       FROM pending_file_deletions
-      ORDER BY queued_at ASC, storage_key ASC
+      ORDER BY last_tried_at ASC NULLS FIRST, queued_at ASC, storage_key ASC
       LIMIT $1
     `,
-    [PENDING_FILE_DELETIONS_PER_SWEEP],
+    [limit],
   );
   let done = 0;
 

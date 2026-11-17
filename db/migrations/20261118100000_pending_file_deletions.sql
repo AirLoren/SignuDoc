@@ -7,8 +7,12 @@
 create table if not exists public.pending_file_deletions (
   storage_key text primary key,
   envelope_id text not null,
-  queued_at bigint not null
+  queued_at bigint not null,
+  -- When a deletion was last tried and failed. The cleanup tries the least
+  -- recently tried first, so files that keep failing do not hold up the
+  -- rest.
+  last_tried_at bigint
 );
 
-create index if not exists pending_file_deletions_queued_at_idx
-  on public.pending_file_deletions (queued_at);
+create index if not exists pending_file_deletions_order_idx
+  on public.pending_file_deletions (last_tried_at nulls first, queued_at);
