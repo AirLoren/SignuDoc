@@ -44,6 +44,7 @@ type PageCase = {
 // the page wide and a tenth of it high.
 const FIELD_RECT = { height: 0.1, width: 0.5, x: 0.1, y: 0.05 };
 const VALUE = "Stamped";
+const SIGNATURE = "Alice Example";
 
 const PAGE_CASES: PageCase[] = [
   {
@@ -240,6 +241,100 @@ async function findText(pdfBytes: Uint8Array, text: string) {
   return placed;
 }
 
+/** The value is in the field and upright, on the page as pdf.js shows it. */
+function assertShownInField(placed: PlacedText, pageCase: PageCase) {
+  assert.deepEqual(placed.viewportSize, pageCase.displayed);
+  assertInside(placed.user, pageCase.fieldBox, "in the page's coordinates");
+
+  // On the shown page y runs down from the top, as it does for the field.
+  const { height, width } = pageCase.displayed;
+
+  assertInside(
+    { x: placed.viewport[4]!, y: placed.viewport[5]! },
+    [
+      FIELD_RECT.x * width,
+      FIELD_RECT.y * height,
+      (FIELD_RECT.x + FIELD_RECT.width) * width,
+      (FIELD_RECT.y + FIELD_RECT.height) * height,
+    ],
+    "on the shown page",
+  );
+
+  // Upright as shown: it runs left to right and is not turned.
+  assert.ok(placed.viewport[0]! > 0 && placed.viewport[3]! < 0);
+  assert.ok(Math.abs(placed.viewport[1]!) < 0.001);
+  assert.ok(Math.abs(placed.viewport[2]!) < 0.001);
+}
+
+/**
+ * The page with nothing on it but one annotation's appearance, drawn the way
+ * a reader draws it: the appearance's box, moved by its own matrix, is fitted
+ * to the annotation's rectangle (PDF 32000-1, 12.5.5). pdf.js does not read
+ * text out of annotations, so this is how the tests see what one shows.
+ */
+async function showAppearanceAlone(
+  revisionBytes: Uint8Array,
+  annotationIndex: number,
+): Promise<Uint8Array> {
+  const document = await PDFDocument.load(revisionBytes);
+  const page = document.getPage(0);
+  const annotation = document.context.lookup(
+    page.node.Annots()!.asArray()[annotationIndex],
+    PDFDict,
+  );
+  const appearanceRef = annotation
+    .lookup(PDFName.of("AP"), PDFDict)
+    .get(PDFName.of("N"));
+  const appearance = document.context.lookup(appearanceRef, PDFRawStream);
+  const numbers = (array: PDFArray | undefined) =>
+    array?.asArray().map((entry) => Number(entry.toString()));
+  const [left, bottom, right, top] = numbers(
+    appearance.dict.lookup(PDFName.of("BBox"), PDFArray),
+  )!;
+  const [a, b, c, d, e, f] = numbers(
+    appearance.dict.lookupMaybe(PDFName.of("Matrix"), PDFArray),
+  ) ?? [1, 0, 0, 1, 0, 0];
+  const corners = [
+    [left, bottom],
+    [left, top],
+    [right, bottom],
+    [right, top],
+  ].map(([x, y]) => [a! * x! + c! * y! + e!, b! * x! + d! * y! + f!]);
+  const xs = corners.map(([x]) => x!);
+  const ys = corners.map(([, y]) => y!);
+  const moved = [
+    Math.min(...xs),
+    Math.min(...ys),
+    Math.max(...xs),
+    Math.max(...ys),
+  ];
+  const rect = numbers(annotation.lookup(PDFName.of("Rect"), PDFArray))!;
+  const scaleX = (rect[2]! - rect[0]!) / (moved[2]! - moved[0]!);
+  const scaleY = (rect[3]! - rect[1]!) / (moved[3]! - moved[1]!);
+  const fit = [
+    scaleX,
+    0,
+    0,
+    scaleY,
+    rect[0]! - moved[0]! * scaleX,
+    rect[1]! - moved[1]! * scaleY,
+  ];
+
+  page.node.delete(PDFName.of("Annots"));
+  page.node.set(
+    PDFName.of("Resources"),
+    document.context.obj({ XObject: { Shown: appearanceRef } }),
+  );
+  page.node.set(
+    PDFName.of("Contents"),
+    document.context.register(
+      document.context.stream(`q ${fit.join(" ")} cm /Shown Do Q`),
+    ),
+  );
+
+  return document.save();
+}
+
 function assertInside(
   point: { x: number; y: number },
   [left, bottom, right, top]: Box,
@@ -291,27 +386,7 @@ for (const pageCase of PAGE_CASES) {
     const placed = await findText(pdfBytes, VALUE);
 
     assert.ok(placed, "the value was not found on the page");
-    assert.deepEqual(placed.viewportSize, pageCase.displayed);
-    assertInside(placed.user, pageCase.fieldBox, "in the page's coordinates");
-
-    // On the shown page y runs down from the top, as it does for the field.
-    const { height, width } = pageCase.displayed;
-
-    assertInside(
-      { x: placed.viewport[4]!, y: placed.viewport[5]! },
-      [
-        FIELD_RECT.x * width,
-        FIELD_RECT.y * height,
-        (FIELD_RECT.x + FIELD_RECT.width) * width,
-        (FIELD_RECT.y + FIELD_RECT.height) * height,
-      ],
-      "on the shown page",
-    );
-
-    // Upright as shown: it runs left to right and is not turned.
-    assert.ok(placed.viewport[0]! > 0 && placed.viewport[3]! < 0);
-    assert.ok(Math.abs(placed.viewport[1]!) < 0.001);
-    assert.ok(Math.abs(placed.viewport[2]!) < 0.001);
+    assertShownInField(placed, pageCase);
   });
 
   test(`a signer's revision puts its annotations over the fields on ${pageCase.name}`, async () => {
@@ -325,7 +400,7 @@ for (const pageCase of PAGE_CASES) {
             id: "field-2",
             inputMethod: "typed",
             type: "signature",
-            value: "Alice Example",
+            value: SIGNATURE,
           }),
         ],
         images: new Map(),
@@ -344,6 +419,17 @@ for (const pageCase of PAGE_CASES) {
 
     // The text field's stamp and the signature's widget.
     assert.equal(annotations.length, 2);
+
+    // Each shows its value, in the field and upright.
+    for (const [index, value] of [VALUE, SIGNATURE].entries()) {
+      const placed = await findText(
+        await showAppearanceAlone(revision.bytes, index),
+        value,
+      );
+
+      assert.ok(placed, `annotation ${index + 1} does not show "${value}"`);
+      assertShownInField(placed, pageCase);
+    }
 
     for (const annotation of annotations) {
       const appearance = annotation
