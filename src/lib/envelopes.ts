@@ -3323,7 +3323,6 @@ export async function voidSentEnvelope(
     voidedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
-  let failedAfterLock = false;
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
   const seal = await loadInstallSealer();
@@ -3357,108 +3356,104 @@ export async function voidSentEnvelope(
       );
     }
 
-    try {
-      const certificate = await storeEnvelopeCertificatePdf(
-        {
-          auditEvents,
-          certificate: canonicalCertificate,
-          envelope: voidedEnvelope,
-          signers: voidedSigners,
-        },
-        {
-          seal,
-          storageService,
-        },
-      );
-      storedCertificateKeys.push(certificate.key);
+    const certificate = await storeEnvelopeCertificatePdf(
+      {
+        auditEvents,
+        certificate: canonicalCertificate,
+        envelope: voidedEnvelope,
+        signers: voidedSigners,
+      },
+      {
+        seal,
+        storageService,
+      },
+    );
+    storedCertificateKeys.push(certificate.key);
 
-      const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
-        {
-          auditEvents,
-          certificate: {
-            bucketName: sourcePdfHead.bucketName,
-            key: buildEnvelopeCertificateKey({
-              ...storageIdentity,
-              audience: "recipient",
-            }),
-          },
-          envelope: voidedEnvelope,
-          signers: voidedSigners,
+    const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
+      {
+        auditEvents,
+        certificate: {
+          bucketName: sourcePdfHead.bucketName,
+          key: buildEnvelopeCertificateKey({
+            ...storageIdentity,
+            audience: "recipient",
+          }),
         },
-        {
-          seal,
-          storageService,
-        },
-      );
-      storedCertificateKeys.push(recipientCertificate.key);
+        envelope: voidedEnvelope,
+        signers: voidedSigners,
+      },
+      {
+        seal,
+        storageService,
+      },
+    );
+    storedCertificateKeys.push(recipientCertificate.key);
 
-      const updatedEnvelope = await tx.query(
-        `
-          UPDATE envelopes
-          SET
-            status = 'voided',
-            evidence_key = $1,
-            voided_at = $2,
-            updated_at = $3,
-            evidence_sha256 = $6,
-            recipient_evidence_sha256 = $7
-          WHERE id = $4
-            AND user_id = $5
-            AND status = 'sent'
-        `,
-        [
-          certificate.key,
-          voidedAt,
-          voidedAt,
-          envelopeId,
-          userId,
-          certificate.sha256,
-          recipientCertificate.sha256,
-        ],
-      );
+    const updatedEnvelope = await tx.query(
+      `
+        UPDATE envelopes
+        SET
+          status = 'voided',
+          evidence_key = $1,
+          voided_at = $2,
+          updated_at = $3,
+          evidence_sha256 = $6,
+          recipient_evidence_sha256 = $7
+        WHERE id = $4
+          AND user_id = $5
+          AND status = 'sent'
+      `,
+      [
+        certificate.key,
+        voidedAt,
+        voidedAt,
+        envelopeId,
+        userId,
+        certificate.sha256,
+        recipientCertificate.sha256,
+      ],
+    );
 
-      if (updatedEnvelope.rowCount !== 1) {
-        throw new EnvelopeMutationError(
-          "This envelope can no longer be voided.",
-          409,
-        );
-      }
-
-      await tx.query(
-        `
-          UPDATE signers
-          SET
-            signing_token_hash = NULL,
-            signing_token_expires_at = NULL,
-            updated_at = $1
-          WHERE envelope_id = $2
-            AND status = 'notified'
-        `,
-        [voidedAt, envelopeId],
+    if (updatedEnvelope.rowCount !== 1) {
+      throw new EnvelopeMutationError(
+        "This envelope can no longer be voided.",
+        409,
       );
-
-      await recordAuditEvent(
-        {
-          actorEmail: voidedAuditEvent.actorEmail,
-          actorType: voidedAuditEvent.actorType,
-          id: voidedAuditEvent.id,
-          createdAt: voidedAuditEvent.createdAt,
-          envelopeId: voidedAuditEvent.envelopeId,
-          event: voidedAuditEvent.event,
-          ipAddress: voidedAuditEvent.ipAddress,
-          metadata: voidedAuditEvent.metadata,
-          userAgent: voidedAuditEvent.userAgent,
-        },
-        tx,
-      );
-    } catch (error) {
-      failedAfterLock = true;
-      throw error;
     }
+
+    await tx.query(
+      `
+        UPDATE signers
+        SET
+          signing_token_hash = NULL,
+          signing_token_expires_at = NULL,
+          updated_at = $1
+        WHERE envelope_id = $2
+          AND status = 'notified'
+      `,
+      [voidedAt, envelopeId],
+    );
+
+    await recordAuditEvent(
+      {
+        actorEmail: voidedAuditEvent.actorEmail,
+        actorType: voidedAuditEvent.actorType,
+        id: voidedAuditEvent.id,
+        createdAt: voidedAuditEvent.createdAt,
+        envelopeId: voidedAuditEvent.envelopeId,
+        event: voidedAuditEvent.event,
+        ipAddress: voidedAuditEvent.ipAddress,
+        metadata: voidedAuditEvent.metadata,
+        userAgent: voidedAuditEvent.userAgent,
+      },
+      tx,
+    );
   }, database).catch(async (error: unknown) => {
-    // Only once the envelope was this call's to end: before that, the files
-    // under these keys are not ones it stored.
-    if (failedAfterLock) {
+    // Only files this call stored, so only once the envelope was its to end.
+    // That includes a failed COMMIT: the cleanup keeps the files if the
+    // envelope did end after all.
+    if (storedCertificateKeys.length > 0) {
       await removeUnclaimedEnvelopeCertificates(
         {
           envelopeId: envelopeId,

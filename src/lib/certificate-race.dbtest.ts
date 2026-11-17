@@ -505,3 +505,88 @@ test("a void that fails with nothing else ending the envelope removes the certif
   assert.equal(row.rows[0]?.status, "sent");
   assert.deepEqual(await certificatesStored(envelope), [false, false]);
 });
+
+/**
+ * The same database, except that the first COMMIT sent through it fails:
+ * the transaction is rolled back instead, as when the connection drops
+ * before Postgres gets the COMMIT.
+ */
+function withFailingCommit() {
+  let failed = false;
+
+  function bound(object: object, property: string | symbol): unknown {
+    const value: unknown = Reflect.get(object, property);
+
+    return typeof value === "function"
+      ? (value.bind(object) as unknown)
+      : value;
+  }
+
+  return new Proxy(database, {
+    get(target, property) {
+      if (property !== "connect") {
+        return bound(target, property);
+      }
+
+      return async () => {
+        const client = await target.connect();
+
+        return new Proxy(client, {
+          get(object, name) {
+            if (name !== "query") {
+              return bound(object, name);
+            }
+
+            const query = bound(object, name) as QueryFunction;
+            const failing: QueryFunction = async (text, values) => {
+              if (failed || text !== "COMMIT") {
+                return query(text, values);
+              }
+
+              failed = true;
+              await query("ROLLBACK");
+
+              throw new Error("The commit failed.");
+            };
+
+            return failing;
+          },
+        });
+      };
+    },
+  });
+}
+
+test("a void whose commit fails removes the certificates it stored", async () => {
+  const envelope = await createSignableEnvelope();
+
+  await assert.rejects(
+    voidEnvelope(envelope, withFailingCommit()),
+    /The commit failed/,
+  );
+
+  const row = await database.query<{ status: string }>(
+    `select status from envelopes where id = $1`,
+    [envelope.envelopeId],
+  );
+
+  assert.equal(row.rows[0]?.status, "sent");
+  assert.deepEqual(await certificatesStored(envelope), [false, false]);
+});
+
+test("a decline whose commit fails removes the certificates it stored", async () => {
+  const envelope = await createSignableEnvelope();
+
+  await assert.rejects(
+    declineEnvelope(envelope, withFailingCommit()),
+    /The commit failed/,
+  );
+
+  const row = await database.query<{ status: string }>(
+    `select status from envelopes where id = $1`,
+    [envelope.envelopeId],
+  );
+
+  assert.equal(row.rows[0]?.status, "sent");
+  assert.deepEqual(await certificatesStored(envelope), [false, false]);
+});

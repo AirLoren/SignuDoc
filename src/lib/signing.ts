@@ -3100,7 +3100,6 @@ export async function declineSigningForToken(
     declinedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
-  let failedAfterLock = false;
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
   const seal = await loadInstallSealer();
@@ -3145,128 +3144,124 @@ export async function declineSigningForToken(
       );
     }
 
-    try {
-      // Made while the envelope is locked: the certificates have fixed keys,
-      // and a void, the last signature or a second decline at the same time
-      // waits, then stops above without touching the files this one saved.
-      const certificate = await storeEnvelopeCertificatePdf(
-        {
-          auditEvents,
-          certificate: canonicalCertificate,
-          envelope: declinedEnvelope,
-          signers: declinedSigners,
+    // Made while the envelope is locked: the certificates have fixed keys,
+    // and a void, the last signature or a second decline at the same time
+    // waits, then stops above without touching the files this one saved.
+    const certificate = await storeEnvelopeCertificatePdf(
+      {
+        auditEvents,
+        certificate: canonicalCertificate,
+        envelope: declinedEnvelope,
+        signers: declinedSigners,
+      },
+      {
+        seal,
+        storageService,
+      },
+    );
+    storedCertificateKeys.push(certificate.key);
+
+    const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
+      {
+        auditEvents,
+        certificate: {
+          bucketName: sourcePdfHead.bucketName,
+          key: buildEnvelopeCertificateKey({
+            ...storageIdentity,
+            audience: "recipient",
+          }),
         },
-        {
-          seal,
-          storageService,
-        },
+        envelope: declinedEnvelope,
+        signers: declinedSigners,
+      },
+      {
+        seal,
+        storageService,
+      },
+    );
+    storedCertificateKeys.push(recipientCertificate.key);
+
+    const declinedSignerResult = await tx.query(
+      `
+        UPDATE signers
+        SET
+          status = 'declined',
+          signing_token_hash = NULL,
+          signing_token_expires_at = NULL,
+          declined_at = $1,
+          decline_reason = $2,
+          updated_at = $3
+        WHERE id = $4
+          AND envelope_id = $5
+          AND status = 'notified'
+          AND signing_token_hash = $6
+      `,
+      [
+        declinedAt,
+        declineReason ?? null,
+        declinedAt,
+        currentSignerId,
+        context.envelope.id,
+        presentedTokenHash,
+      ],
+    );
+
+    if (declinedSignerResult.rowCount !== 1) {
+      throw new SigningMutationError(
+        "This signing link is no longer active.",
+        409,
       );
-      storedCertificateKeys.push(certificate.key);
-
-      const recipientCertificate = await storeRecipientEnvelopeCertificatePdf(
-        {
-          auditEvents,
-          certificate: {
-            bucketName: sourcePdfHead.bucketName,
-            key: buildEnvelopeCertificateKey({
-              ...storageIdentity,
-              audience: "recipient",
-            }),
-          },
-          envelope: declinedEnvelope,
-          signers: declinedSigners,
-        },
-        {
-          seal,
-          storageService,
-        },
-      );
-      storedCertificateKeys.push(recipientCertificate.key);
-
-      const declinedSignerResult = await tx.query(
-        `
-          UPDATE signers
-          SET
-            status = 'declined',
-            signing_token_hash = NULL,
-            signing_token_expires_at = NULL,
-            declined_at = $1,
-            decline_reason = $2,
-            updated_at = $3
-          WHERE id = $4
-            AND envelope_id = $5
-            AND status = 'notified'
-            AND signing_token_hash = $6
-        `,
-        [
-          declinedAt,
-          declineReason ?? null,
-          declinedAt,
-          currentSignerId,
-          context.envelope.id,
-          presentedTokenHash,
-        ],
-      );
-
-      if (declinedSignerResult.rowCount !== 1) {
-        throw new SigningMutationError(
-          "This signing link is no longer active.",
-          409,
-        );
-      }
-
-      const declinedEnvelopeResult = await tx.query(
-        `
-          UPDATE envelopes
-          SET
-            status = 'declined',
-            evidence_key = $1,
-            declined_at = $2,
-            updated_at = $3,
-            evidence_sha256 = $5,
-            recipient_evidence_sha256 = $6
-          WHERE id = $4
-            AND status = 'sent'
-        `,
-        [
-          certificate.key,
-          declinedAt,
-          declinedAt,
-          context.envelope.id,
-          certificate.sha256,
-          recipientCertificate.sha256,
-        ],
-      );
-
-      if (declinedEnvelopeResult.rowCount !== 1) {
-        throw new SigningMutationError(
-          "This signing link is no longer active.",
-          409,
-        );
-      }
-
-      await recordAuditEvent(
-        {
-          actorEmail: declinedAuditEvent.actorEmail,
-          actorType: declinedAuditEvent.actorType,
-          id: declinedAuditEvent.id,
-          createdAt: declinedAuditEvent.createdAt,
-          envelopeId: declinedAuditEvent.envelopeId,
-          event: declinedAuditEvent.event,
-          ipAddress: declinedAuditEvent.ipAddress,
-          metadata: declinedAuditEvent.metadata,
-          userAgent: declinedAuditEvent.userAgent,
-        },
-        tx,
-      );
-    } catch (error) {
-      failedAfterLock = true;
-      throw error;
     }
+
+    const declinedEnvelopeResult = await tx.query(
+      `
+        UPDATE envelopes
+        SET
+          status = 'declined',
+          evidence_key = $1,
+          declined_at = $2,
+          updated_at = $3,
+          evidence_sha256 = $5,
+          recipient_evidence_sha256 = $6
+        WHERE id = $4
+          AND status = 'sent'
+      `,
+      [
+        certificate.key,
+        declinedAt,
+        declinedAt,
+        context.envelope.id,
+        certificate.sha256,
+        recipientCertificate.sha256,
+      ],
+    );
+
+    if (declinedEnvelopeResult.rowCount !== 1) {
+      throw new SigningMutationError(
+        "This signing link is no longer active.",
+        409,
+      );
+    }
+
+    await recordAuditEvent(
+      {
+        actorEmail: declinedAuditEvent.actorEmail,
+        actorType: declinedAuditEvent.actorType,
+        id: declinedAuditEvent.id,
+        createdAt: declinedAuditEvent.createdAt,
+        envelopeId: declinedAuditEvent.envelopeId,
+        event: declinedAuditEvent.event,
+        ipAddress: declinedAuditEvent.ipAddress,
+        metadata: declinedAuditEvent.metadata,
+        userAgent: declinedAuditEvent.userAgent,
+      },
+      tx,
+    );
   }, database).catch(async (error: unknown) => {
-    // Only once the envelope was this call's to end: before that, the files
-    // under these keys are not ones it stored.
-    if (failedAfterLock) {
+    // Only files this call stored, so only once the envelope was its to end.
+    // That includes a failed COMMIT: the cleanup keeps the files if the
+    // envelope did end after all.
+    if (storedCertificateKeys.length > 0) {
       await removeUnclaimedEnvelopeCertificates(
         {
           envelopeId: context.envelope.id,
