@@ -38,6 +38,7 @@ import {
 import { escapeHtml } from "./utils/html.ts";
 
 type ReminderEnvelopeRow = {
+  delivery: "email" | "embedded";
   expiresAt: number | null;
   id: string;
   ownerEmail: string;
@@ -157,6 +158,7 @@ async function getReminderEnvelope(
         e.user_id AS "userId",
         e.title,
         e.status,
+        e.delivery,
         e.expires_at AS "expiresAt",
         e.reminder_interval_days AS "reminderIntervalDays",
         e.updated_at AS "updatedAt",
@@ -340,6 +342,16 @@ async function persistReminder(
     if (persistedEnvelope.status !== "sent") {
       throw new ReminderMutationError(
         "Only sent envelopes can receive reminders.",
+        409,
+      );
+    }
+
+    // Checked again under the lock: the envelope may have been sent for
+    // another app to sign since the early check, and a reminder would
+    // retire the link that app holds.
+    if (persistedEnvelope.delivery === "embedded") {
+      throw new ReminderMutationError(
+        "This envelope is signed in another app, so SignuDoc does not email its signers.",
         409,
       );
     }
