@@ -294,14 +294,59 @@ test("a reason that is not text, or too long, is refused", async () => {
   assert.equal(await envelopeExists(envelope.envelopeId), true);
 });
 
-test("when a file cannot be deleted, nothing is deleted and nothing is recorded", async () => {
+test("when a file cannot be deleted, the envelope is still deleted and recorded, and the file is logged", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "completed" });
-  const before = await listSystemAuditEvents({ limit: 1 }, database);
   const failingStorage = {
     ...storageService,
     deleteObject: async () => {
       throw new Error("Storage is down.");
+    },
+  } as StorageService;
+  const logged: unknown[][] = [];
+  const originalConsoleError = console.error;
+
+  console.error = (...args: unknown[]) => {
+    logged.push(args);
+  };
+
+  try {
+    await deleteFinishedEnvelope(
+      envelope.envelopeId,
+      { actor: admin },
+      { database, storageService: failingStorage },
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(await envelopeExists(envelope.envelopeId), false);
+
+  const [event] = await listSystemAuditEvents({ limit: 1 }, database);
+
+  assert.equal(event?.event, "envelope_deleted");
+  assert.equal(event?.metadata?.envelopeId, envelope.envelopeId);
+  // Every file it held is named in the log, so it can be removed by hand.
+  for (const key of envelope.stored) {
+    assert.ok(
+      logged.some((args) => String(args[0]).includes(key)),
+      `expected ${key} to be logged`,
+    );
+  }
+});
+
+test("when the deletion fails before it commits, no file is touched", async () => {
+  const admin = await createUser("admin");
+  const envelope = await createEnvelope(admin.userId, {
+    part11: true,
+    status: "completed",
+  });
+  let deletes = 0;
+  const countingStorage = {
+    ...storageService,
+    deleteObject: async (key: string) => {
+      deletes += 1;
+      return storageService.deleteObject(key);
     },
   } as StorageService;
 
@@ -309,10 +354,11 @@ test("when a file cannot be deleted, nothing is deleted and nothing is recorded"
     deleteFinishedEnvelope(
       envelope.envelopeId,
       { actor: admin },
-      { database, storageService: failingStorage },
+      { database, storageService: countingStorage },
     ),
-    /Storage is down/,
+    rejectsWith(400),
   );
+  assert.equal(deletes, 0);
   assert.equal(await envelopeExists(envelope.envelopeId), true);
-  assert.deepEqual(await listSystemAuditEvents({ limit: 1 }, database), before);
+  assert.ok((await filesExist(envelope.stored)).every(Boolean));
 });

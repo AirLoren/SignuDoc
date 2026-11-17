@@ -901,17 +901,11 @@ async function applyRetentionPeriod(
   }
 }
 
-/** Deletes these envelopes and their stored files. Returns how many went. */
-export async function deleteEnvelopesAndFiles(
+async function listEnvelopeArtifacts(
   envelopeIds: readonly string[],
-  database: DbExecutor = getDb(),
-  storageService: StorageService = createStorageService(),
-): Promise<number> {
-  if (envelopeIds.length === 0) {
-    return 0;
-  }
-
-  const envelopes = await queryMany<EnvelopeArtifactRow>(
+  database: DbExecutor,
+): Promise<EnvelopeArtifactRow[]> {
+  return queryMany<EnvelopeArtifactRow>(
     database,
     `
       SELECT
@@ -927,6 +921,45 @@ export async function deleteEnvelopesAndFiles(
     `,
     [envelopeIds],
   );
+}
+
+/**
+ * Every stored file of an envelope: its PDFs, certificates, first-page
+ * picture, drawn signatures and signing-provider revisions. Read it before
+ * the row goes, as the row is what names them.
+ */
+export async function listEnvelopeStorageKeys(
+  envelopeId: string,
+  database: DbExecutor,
+): Promise<string[]> {
+  const [envelope] = await listEnvelopeArtifacts([envelopeId], database);
+
+  if (!envelope) {
+    return [];
+  }
+
+  const fieldImagesByEnvelopeId = await listFieldImagesForEnvelopeIds(
+    [envelope.id],
+    database,
+  );
+
+  return buildEnvelopeStorageKeys(
+    envelope,
+    fieldImagesByEnvelopeId.get(envelope.id) ?? [],
+  );
+}
+
+/** Deletes these envelopes and their stored files. Returns how many went. */
+export async function deleteEnvelopesAndFiles(
+  envelopeIds: readonly string[],
+  database: DbExecutor = getDb(),
+  storageService: StorageService = createStorageService(),
+): Promise<number> {
+  if (envelopeIds.length === 0) {
+    return 0;
+  }
+
+  const envelopes = await listEnvelopeArtifacts(envelopeIds, database);
   const fieldImagesByEnvelopeId = await listFieldImagesForEnvelopeIds(
     envelopes.map((envelope) => envelope.id),
     database,

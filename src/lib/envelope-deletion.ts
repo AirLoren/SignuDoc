@@ -5,7 +5,7 @@ import {
   withTransaction,
 } from "./db/connection.ts";
 import { EnvelopeMutationError } from "./envelopes.ts";
-import { deleteEnvelopesAndFiles } from "./retention.ts";
+import { listEnvelopeStorageKeys } from "./retention.ts";
 import {
   createStorageService,
   type StorageService,
@@ -84,12 +84,13 @@ export async function deleteFinishedEnvelope(
     storageService?: StorageService;
   } = {},
 ): Promise<{ deletedEnvelopeId: string }> {
-  return withTransaction(async (tx) => {
-    // The envelope row first, as everything that changes an envelope takes
-    // it; the install's audit trail lock comes after.
-    const envelope = await queryOne<FinishedEnvelopeRow>(
-      tx,
-      `
+  const { deletedEnvelopeId, storageKeys } = await withTransaction(
+    async (tx) => {
+      // The envelope row first, as everything that changes an envelope takes
+      // it; the install's audit trail lock comes after.
+      const envelope = await queryOne<FinishedEnvelopeRow>(
+        tx,
+        `
         SELECT
           id,
           title,
@@ -103,74 +104,87 @@ export async function deleteFinishedEnvelope(
         WHERE id = $1 AND user_id = $2
         FOR UPDATE
       `,
-      [envelopeId, actor.userId],
-    );
-
-    if (!envelope) {
-      throw new EnvelopeMutationError("Envelope not found.", 404);
-    }
-
-    if (!(FINISHED_STATUSES as readonly string[]).includes(envelope.status)) {
-      throw new EnvelopeMutationError(
-        envelope.status === "sent"
-          ? "This envelope is still out for signature. Void it first."
-          : "Only finished envelopes can be deleted this way.",
-        409,
+        [envelopeId, actor.userId],
       );
-    }
 
-    // Asked again here, not only by the route: the role is read from the
-    // database, and a change since the page loaded is honored.
-    const actorRole = await queryOne<{ role: string }>(
-      tx,
-      `SELECT role FROM public."user" WHERE id = $1`,
-      [actor.userId],
-    );
+      if (!envelope) {
+        throw new EnvelopeMutationError("Envelope not found.", 404);
+      }
 
-    if (actorRole?.role !== "admin") {
-      throw new EnvelopeMutationError(
-        "Only an administrator can delete a finished envelope.",
-        403,
+      if (!(FINISHED_STATUSES as readonly string[]).includes(envelope.status)) {
+        throw new EnvelopeMutationError(
+          envelope.status === "sent"
+            ? "This envelope is still out for signature. Void it first."
+            : "Only finished envelopes can be deleted this way.",
+          409,
+        );
+      }
+
+      // Asked again here, not only by the route: the role is read from the
+      // database, and a change since the page loaded is honored.
+      const actorRole = await queryOne<{ role: string }>(
+        tx,
+        `SELECT role FROM public."user" WHERE id = $1`,
+        [actor.userId],
       );
-    }
 
-    const deletionReason = parseReason(reason, envelope.part11);
+      if (actorRole?.role !== "admin") {
+        throw new EnvelopeMutationError(
+          "Only an administrator can delete a finished envelope.",
+          403,
+        );
+      }
 
-    await recordSystemAuditEvent(
-      {
-        actorEmail: actor.email,
-        actorUserId: actor.userId,
-        event: "envelope_deleted",
-        ipAddress,
-        metadata: {
-          envelopeId: envelope.id,
-          evidenceSha256: envelope.evidenceSha256,
-          finishedAt: envelope.finishedAt,
-          part11: envelope.part11,
-          reason: deletionReason,
-          signedPdfSha256: envelope.signedPdfSha256,
-          sourcePdfHash: envelope.sourcePdfHash,
-          status: envelope.status,
-          title: envelope.title,
+      const deletionReason = parseReason(reason, envelope.part11);
+
+      await recordSystemAuditEvent(
+        {
+          actorEmail: actor.email,
+          actorUserId: actor.userId,
+          event: "envelope_deleted",
+          ipAddress,
+          metadata: {
+            envelopeId: envelope.id,
+            evidenceSha256: envelope.evidenceSha256,
+            finishedAt: envelope.finishedAt,
+            part11: envelope.part11,
+            reason: deletionReason,
+            signedPdfSha256: envelope.signedPdfSha256,
+            sourcePdfHash: envelope.sourcePdfHash,
+            status: envelope.status,
+            title: envelope.title,
+          },
+          userAgent,
         },
-        userAgent,
-      },
-      tx,
-    );
+        tx,
+      );
 
-    // Files first, then the row, all while the row is held: if a file
-    // cannot be deleted, the whole deletion rolls back and can be tried
-    // again.
-    const deleted = await deleteEnvelopesAndFiles(
-      [envelope.id],
-      tx,
-      storageService,
-    );
+      // The row and the record of its deletion commit together. The files
+      // cannot roll back with them, so they go only after the commit: a file
+      // left behind by a failure is logged, never an envelope that lost its
+      // files without a record of why.
+      const storageKeys = await listEnvelopeStorageKeys(envelope.id, tx);
+      const deleted = await tx.query(`DELETE FROM envelopes WHERE id = $1`, [
+        envelope.id,
+      ]);
 
-    if (deleted !== 1) {
-      throw new EnvelopeMutationError("Envelope not found.", 404);
-    }
+      if (deleted.rowCount !== 1) {
+        throw new EnvelopeMutationError("Envelope not found.", 404);
+      }
 
-    return { deletedEnvelopeId: envelope.id };
-  }, database);
+      return { deletedEnvelopeId: envelope.id, storageKeys };
+    },
+    database,
+  );
+
+  for (const key of storageKeys) {
+    await storageService.deleteObject(key).catch((error: unknown) => {
+      console.error(
+        `Failed to delete stored file ${key} of deleted envelope ${deletedEnvelopeId}:`,
+        error,
+      );
+    });
+  }
+
+  return { deletedEnvelopeId };
 }

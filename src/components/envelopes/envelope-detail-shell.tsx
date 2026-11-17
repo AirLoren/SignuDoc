@@ -440,6 +440,11 @@ export function EnvelopeDetailShell({
       }
 
       window.location.assign(payload?.redirectPath ?? "/dashboard");
+    } catch {
+      // The request may or may not have reached the server.
+      setActionError(
+        "Could not reach the server. Reload the page to see whether the envelope was deleted.",
+      );
     } finally {
       setIsDeletingFinished(false);
     }
