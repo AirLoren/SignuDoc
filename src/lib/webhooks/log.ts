@@ -110,7 +110,10 @@ function decodeCursor(
   const createdAt = Number(decoded.slice(0, separator));
   const id = decoded.slice(separator + 1);
 
-  return separator > 0 && Number.isInteger(createdAt) && id.startsWith("msg_")
+  return separator > 0 &&
+    Number.isSafeInteger(createdAt) &&
+    createdAt >= 0 &&
+    id.startsWith("msg_")
     ? { createdAt, id }
     : null;
 }

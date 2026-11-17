@@ -598,6 +598,19 @@ test("a test event is sent at once, tried once, and left out of the API list", a
     await listApiWebhookDeliveries({ cursor: "nonsense", limit: 10 }, database),
     null,
   );
+  // Too large for Postgres: refused, not a server error.
+  assert.equal(
+    await listApiWebhookDeliveries(
+      {
+        cursor: Buffer.from("100000000000000000000:msg_x").toString(
+          "base64url",
+        ),
+        limit: 10,
+      },
+      database,
+    ),
+    null,
+  );
 });
 
 test("the API list pages with a cursor", async () => {
