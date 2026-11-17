@@ -715,11 +715,21 @@ test("a try that outlived its lease cannot overwrite the newer try's result", as
       : 200;
 
   // The first drain sends and hangs waiting for the receiver.
-  const stale = drainWebhookDeliveries({ database, env });
+  let staleFinished = false;
+  const stale = drainWebhookDeliveries({ database, env }).finally(() => {
+    staleFinished = true;
+  });
+  const deadline = Date.now() + 5_000;
 
-  while (received.length < 1) {
+  while (received.length < 1 && !staleFinished && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+
+  assert.equal(
+    received.length,
+    1,
+    "the first request never reached the receiver",
+  );
 
   // Its lease runs out; a newer drain takes the delivery and succeeds.
   await database.query(
