@@ -525,3 +525,41 @@ test("numbers and dropdown choices are stamped as text, radio buttons as rings",
   assert.ok(pdfBytes.byteLength > chosenOnly.byteLength);
   assert.ok(chosenOnly.byteLength > withoutRadios.byteLength);
 });
+
+test("a name field is stamped with the name it was filled in with", async () => {
+  const fixture = await makeFixture();
+  // Not the name on the fixture's signatures, so only the name field can
+  // put it on the page.
+  const printedName = "Zofia Nowak-Wiśniewska";
+  const nameField: FieldRecord = {
+    createdAt: 1_800_000_000,
+    envelopeId: fixture.envelope.id,
+    height: 0.03,
+    id: "name-1",
+    inputMethod: "auto",
+    page: 1,
+    required: true,
+    signerId: "signer-1",
+    submittedAt: 1_800_000_000,
+    type: "name",
+    updatedAt: 1_800_000_000,
+    value: printedName,
+    width: 0.3,
+    x: 0.1,
+    y: 0.5,
+  };
+  const pdfBytes = await renderFinalizedEnvelopePdf(
+    {
+      auditEvents: fixture.auditEvents,
+      completedAt: fixture.envelope.completedAt!,
+      envelope: fixture.envelope,
+      fields: [...fixture.fields, nameField],
+      signers: fixture.signers,
+      sourcePdfKey: fixture.envelope.sourcePdfKey,
+    },
+    { seal: saveUnsealed, storageService: fixture.storageService },
+  );
+  const text = (await extractText(pdfBytes)).replace(/\s+/g, " ");
+
+  assert.ok(text.includes(printedName));
+});

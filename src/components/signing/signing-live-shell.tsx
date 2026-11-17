@@ -135,6 +135,8 @@ function getCanvasFieldLabel(
       return "Initial";
     case "date":
       return "Date";
+    case "name":
+      return "Name";
     case "text":
       return "Text";
     case "checkbox":
@@ -174,6 +176,8 @@ function getFieldLabel(
       return "Initial here";
     case "date":
       return "Date";
+    case "name":
+      return "Name";
     case "text":
       return "Enter text";
     case "checkbox":
@@ -229,6 +233,8 @@ function getSummaryLabel(field: SigningCurrentField) {
       return "Initials";
     case "date":
       return "Date";
+    case "name":
+      return "Name";
     case "text":
       return "Text input";
     case "checkbox":
@@ -271,11 +277,16 @@ function getCompletionValue(
     checkboxValues,
     localDateLabel,
     signatureValues,
+    signerName,
     textValues,
-  }: EnteredValues & { localDateLabel: string },
+  }: EnteredValues & { localDateLabel: string; signerName: string },
 ) {
   if (field.type === "signature" || field.type === "initials") {
     return signatureValues[field.id]?.value ?? "Tap to sign";
+  }
+
+  if (field.type === "name") {
+    return signerName;
   }
 
   if (field.type === "text") {
@@ -951,6 +962,7 @@ export function SigningLiveShell({
                               key={field.id}
                               localDateLabel={localDateLabel}
                               isInvalid={hasInvalidNumber(field, textValues)}
+                              signerName={record.signer.name}
                               onCheckboxChange={(checked) => {
                                 setSubmitError(null);
                                 setCheckboxValues((current) => {
@@ -1098,7 +1110,11 @@ export function SigningLiveShell({
                     value={getCompletionValue(
                       field,
                       record.currentSignerFields,
-                      { ...enteredValues, localDateLabel },
+                      {
+                        ...enteredValues,
+                        localDateLabel,
+                        signerName: record.signer.name,
+                      },
                     )}
                   />
                 ))}
@@ -1439,6 +1455,7 @@ function CurrentSignerField({
   onSignatureClick,
   onTextChange,
   signatureEntry,
+  signerName,
   textValue,
 }: {
   checkboxValue: boolean;
@@ -1450,6 +1467,8 @@ function CurrentSignerField({
   onSignatureClick: () => void;
   onTextChange: (value: string) => void;
   signatureEntry?: SignatureEntry;
+  /** What a name field shows: the name the sender gave this signer. */
+  signerName: string;
   textValue: string;
 }) {
   const frame = getFieldFrame(field);
@@ -1508,7 +1527,8 @@ function CurrentSignerField({
     );
   }
 
-  if (field.type === "date") {
+  // Filled in for the signer: the day they sign, or their name.
+  if (field.type === "date" || field.type === "name") {
     return (
       <div
         className="absolute z-2 overflow-hidden rounded-[0.375rem] border border-(--border-strong) bg-white/92 text-sm text-(--fg)"
@@ -1517,7 +1537,7 @@ function CurrentSignerField({
       >
         {showInlineValue ? (
           <p className="flex h-full items-center truncate px-2 text-[12px] font-semibold">
-            {localDateLabel}
+            {field.type === "date" ? localDateLabel : signerName}
           </p>
         ) : null}
       </div>

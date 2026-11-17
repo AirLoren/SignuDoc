@@ -459,6 +459,7 @@ export async function stampFieldValue(
       return;
     }
     case "date":
+    case "name":
     case "text":
     case "number":
     case "dropdown": {

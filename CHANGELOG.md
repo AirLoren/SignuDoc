@@ -8,6 +8,17 @@ release says when it does.
 
 ## [Unreleased]
 
+### Envelopes
+
+- A name field. Place it where the signer's printed name belongs, and it is
+  filled in with the name the sender gave that signer when they sign, the
+  way a date field is filled in with the day. It is always required, and the
+  signer does not type it.
+
+This release changes the database (`20261118090000_name_field.sql`). On
+Vercel the production build applies it. On other hosts, run
+`npm run db:migrate` as on every deploy.
+
 ## [0.3.0] - 2026-11-16
 
 Sign-in security and audit features for organizations that need them, and
