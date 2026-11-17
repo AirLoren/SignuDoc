@@ -7,6 +7,7 @@ import type { AuditEventRecord, EnvelopeRecord } from "../schemas/envelope.ts";
 import type { FieldRecord } from "../schemas/field.ts";
 import type { SignerRecord } from "../schemas/signer.ts";
 import {
+  describeAuditActor,
   renderEnvelopeCertificatePdf,
   renderFinalizedEnvelopePdf,
 } from "./pdf-finalize.ts";
@@ -524,4 +525,110 @@ test("numbers and dropdown choices are stamped as text, radio buttons as rings",
 
   assert.ok(pdfBytes.byteLength > chosenOnly.byteLength);
   assert.ok(chosenOnly.byteLength > withoutRadios.byteLength);
+});
+
+test("a sent row names the sender, not the first signer (issue #52)", async () => {
+  const fixture = await makeFixture();
+  const auditEvents: AuditEventRecord[] = [
+    {
+      actorEmail: "sam@sender.example",
+      actorType: "sender",
+      createdAt: 1_799_999_000,
+      envelopeId: fixture.envelope.id,
+      event: "sent",
+      id: "event-sent",
+      metadata: {
+        signerEmail: "lukasz@example.com",
+        signerId: "signer-1",
+        signerName: SIGNER_NAME,
+      },
+    },
+    {
+      actorType: "system",
+      createdAt: 1_799_999_100,
+      envelopeId: fixture.envelope.id,
+      event: "reminded_auto",
+      id: "event-reminded",
+      metadata: {
+        signerEmail: "lukasz@example.com",
+        signerId: "signer-1",
+        signerName: SIGNER_NAME,
+      },
+    },
+    {
+      actorEmail: "lukasz@example.com",
+      actorType: "signer",
+      createdAt: 1_799_999_200,
+      envelopeId: fixture.envelope.id,
+      event: "viewed",
+      id: "event-viewed",
+      metadata: { signerId: "signer-1", signerName: SIGNER_NAME },
+    },
+  ];
+  const render = async (redactForRecipients: boolean) =>
+    (
+      await extractText(
+        await renderEnvelopeCertificatePdf(
+          {
+            auditEvents,
+            envelope: fixture.envelope,
+            redactForRecipients,
+            signers: fixture.signers,
+          },
+          { seal: saveUnsealed },
+        ),
+      )
+    ).replace(/\s+/g, " ");
+
+  for (const redacted of [false, true]) {
+    const text = await render(redacted);
+
+    assert.ok(!text.includes(`${SIGNER_NAME} <sam@sender.example>`), text);
+    assert.match(text, /sent \| sam@sender\.example/);
+    assert.match(text, /reminded_auto \| system/);
+    assert.ok(
+      text.includes(
+        `viewed | ${SIGNER_NAME} <${redacted ? "signer" : "lukasz@example.com"}>`,
+      ),
+      text,
+    );
+  }
+});
+
+test("describeAuditActor keeps the signer's name on the signer's own rows", () => {
+  const base = {
+    createdAt: 1,
+    envelopeId: "envelope-1",
+    id: "event-1",
+  } as const;
+
+  assert.equal(
+    describeAuditActor({
+      ...base,
+      actorEmail: "sam@sender.example",
+      actorType: "sender",
+      event: "reminded_manual",
+      metadata: { signerEmail: "p@example.com", signerName: "Priya Patel" },
+    }),
+    "sam@sender.example",
+  );
+  assert.equal(
+    describeAuditActor({
+      ...base,
+      actorEmail: "p@example.com",
+      actorType: "signer",
+      event: "signed",
+      metadata: { signerName: "Priya Patel" },
+    }),
+    "Priya Patel <p@example.com>",
+  );
+  assert.equal(
+    describeAuditActor({
+      ...base,
+      actorType: "system",
+      event: "expired",
+      metadata: { signerEmail: "p@example.com", signerName: "Priya Patel" },
+    }),
+    "system",
+  );
 });
