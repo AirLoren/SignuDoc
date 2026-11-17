@@ -32,6 +32,7 @@ import {
   hashRequest,
   readIdempotencyKey,
   releaseIdempotencyKey,
+  rememberIdempotentResource,
 } from "./idempotency.ts";
 
 // The frame every /api/v1 route runs in: the key is checked, errors the
@@ -143,16 +144,24 @@ export async function handleApi(
   }
 }
 
+type ApiResult = { body: unknown; status: number };
+
 /**
  * Runs `run` once per Idempotency-Key. Without the header it simply runs.
  * Only a response the caller can act on is kept: a 5xx lets the key go, so
  * a retry runs again.
+ *
+ * Except once `run` has done what cannot be undone: it calls `remember`
+ * with the envelope's id as soon as the envelope is made (and sent, if
+ * asked). From then on a failure keeps the key, and a retry gets
+ * `recover(id)`, the envelope as it is, instead of a second envelope.
  */
 export async function runIdempotently(
   context: ApiContext,
   route: string,
   body: Uint8Array | string,
-  run: () => Promise<{ body: unknown; status: number }>,
+  run: (remember: (resourceId: string) => Promise<void>) => Promise<ApiResult>,
+  recover?: (resourceId: string) => Promise<ApiResult>,
 ): Promise<Response> {
   const key = readIdempotencyKey(context.request.headers);
 
@@ -165,7 +174,7 @@ export async function runIdempotently(
   }
 
   if (key === null) {
-    const result = await runCatching(run);
+    const result = await runCatching(() => run(async () => {}));
 
     return apiJson(result.body, { status: result.status });
   }
@@ -196,21 +205,62 @@ export async function runIdempotently(
         headers: { "idempotent-replayed": "true" },
         status: previous.statusCode,
       });
+    case "recover": {
+      if (!recover) {
+        return apiError(
+          409,
+          "wrong_state",
+          "A request with this Idempotency-Key is still being worked on. Try again shortly.",
+          { "retry-after": "2" },
+        );
+      }
+
+      const recovered = await runCatching(() => recover(previous.resourceId));
+
+      if (recovered.status < 500) {
+        await completeIdempotencyKey({
+          apiKeyId: claim.apiKeyId,
+          key,
+          response: recovered.body,
+          statusCode: recovered.status,
+        });
+      }
+
+      return apiJson(recovered.body, {
+        headers: { "idempotent-replayed": "true" },
+        status: recovered.status,
+      });
+    }
     case "new":
       break;
   }
 
-  let result: { body: unknown; status: number };
+  let remembered = false;
+  const remember = async (resourceId: string) => {
+    await rememberIdempotentResource({
+      apiKeyId: claim.apiKeyId,
+      key,
+      resourceId,
+    });
+    remembered = true;
+  };
+  let result: ApiResult;
 
   try {
-    result = await runCatching(run);
+    result = await runCatching(() => run(remember));
   } catch (error) {
-    await releaseIdempotencyKey(claim).catch(() => undefined);
+    // Once the envelope exists, the key stays with it (see above).
+    if (!remembered) {
+      await releaseIdempotencyKey(claim).catch(() => undefined);
+    }
+
     throw error;
   }
 
   if (result.status >= 500) {
-    await releaseIdempotencyKey(claim).catch(() => undefined);
+    if (!remembered) {
+      await releaseIdempotencyKey(claim).catch(() => undefined);
+    }
   } else {
     await completeIdempotencyKey({
       apiKeyId: claim.apiKeyId,
@@ -224,9 +274,7 @@ export async function runIdempotently(
 }
 
 /** Known errors become a kept response; anything else is thrown on. */
-async function runCatching(
-  run: () => Promise<{ body: unknown; status: number }>,
-): Promise<{ body: unknown; status: number }> {
+async function runCatching(run: () => Promise<ApiResult>): Promise<ApiResult> {
   try {
     return await run();
   } catch (error) {
@@ -239,6 +287,23 @@ async function runCatching(
     return { body: await known.json(), status: known.status };
   }
 }
+
+/** Creating envelopes: per key, every 10 minutes. */
+export const API_CREATE_LIMIT = {
+  key: "api-envelope-create",
+  limit: 60,
+  windowMs: 10 * 60 * 1000,
+};
+
+/**
+ * Sending envelopes, whichever route sends them: per key, every hour. A
+ * create or template call that also sends counts here too.
+ */
+export const API_SEND_LIMIT = {
+  key: "api-envelope-send",
+  limit: 100,
+  windowMs: 60 * 60 * 1000,
+};
 
 /**
  * Counts this request against a per-key limit on creating or sending. These

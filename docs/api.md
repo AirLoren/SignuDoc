@@ -89,9 +89,10 @@ stands:
 - `RateLimit-Reset`: seconds until the window starts again.
 
 On top of that, each key may create 60 envelopes in 10 minutes and send 100
-in an hour. Your email provider's own limits usually bite first: Resend's
-free plan sends 100 emails a day. An address that sends 30 bad keys in 10 minutes is turned away until
-the 10 minutes are up.
+in an hour, counting creates and template calls that also send. Your email
+provider's own limits usually bite first: Resend's free plan sends 100
+emails a day. An address that sends 30 bad keys in 10 minutes is turned
+away until the 10 minutes are up.
 
 ## A first envelope in one call
 
@@ -154,8 +155,10 @@ Things to know:
 - **`Idempotency-Key`** makes a retry safe. A request with a key SignuDoc has
   seen in the last 24 hours gets the first answer again (with the header
   `Idempotent-Replayed: true`) instead of making a second envelope. The same
-  key with a different request is refused with 422. Use one key per thing
-  you mean to send, such as the invoice number.
+  key with a different request is refused with 422. If the install fails
+  after the envelope was made, a retry with the same key gets that envelope
+  rather than a second one. Use one key per thing you mean to send, such as
+  the invoice number.
 
 ### PDFs over 4 MB
 
@@ -359,7 +362,8 @@ Answer with any `2xx` within 10 seconds, and do the slow work after. Any
 other answer, a redirect, or no answer counts as a failure, and the delivery
 is tried again 1 minute, 5 minutes, 30 minutes, 2 hours, 8 hours, 24 hours
 and 24 hours later, about two and a half days in all. After the eighth try
-it is marked failed. The delivery log in Settings shows the last 100
+it is marked failed. A delivery whose envelope has since been deleted is
+not sent again. The delivery log in Settings shows the last 100
 deliveries per endpoint, with your app's answer, and "Send again" puts a
 delivered or failed one back in line.
 

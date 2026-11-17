@@ -125,7 +125,7 @@ import { PERMITTED_USE_VERSION } from "./permitted-uses.ts";
 import { hashAccessCode } from "./signer-checks.ts";
 import { escapeHtml } from "./utils/html.ts";
 import { hasEmbedOrigins, isEmbeddedEnvelope } from "./embedding.ts";
-import { requestWebhookDrain } from "./webhooks/outbox.ts";
+import { releaseSentWebhook } from "./webhooks/outbox.ts";
 
 type CreateDraftEnvelopeOptions = {
   database?: DbPool;
@@ -2681,8 +2681,14 @@ export async function sendDraftEnvelope(
 
   if (delivery === "embedded") {
     // No invitation: the app asks the API for a link for each signer in
-    // turn (see embedding.ts). The envelope is out for signature now.
-    requestWebhookDrain();
+    // turn (see embedding.ts). The envelope is out for signature now, so
+    // its envelope.sent webhook can go.
+    await releaseSentWebhook(envelopeId, database).catch((error: unknown) => {
+      console.error(
+        `Releasing the envelope.sent webhook of ${envelopeId} failed:`,
+        error,
+      );
+    });
 
     return sendEnvelopeResponseSchema.parse({
       envelopeId,
@@ -2767,13 +2773,14 @@ export async function sendDraftEnvelope(
         `,
         [envelopeId, sentAuditAt, input.senderEmail],
       );
-      // The envelope.sent webhook was waiting for the invitation to go out
-      // (see below); it did not, so there is nothing to tell.
+      // The envelope.sent webhook was held for the invitation (see
+      // releaseSentWebhook below); it did not go out, so there is nothing
+      // to tell, whatever happened to the delivery meanwhile.
       await tx.query(
         `
           DELETE FROM webhook_deliveries
           WHERE envelope_id = $1 AND event_type = 'envelope.sent'
-            AND status = 'pending' AND attempts = 0
+            AND status = 'pending'
         `,
         [envelopeId],
       );
@@ -2798,7 +2805,13 @@ export async function sendDraftEnvelope(
     database,
   );
   // Only now that the invitation is out is the envelope really sent.
-  requestWebhookDrain();
+  await releaseSentWebhook(envelopeId, database).catch((error: unknown) => {
+    // Then it goes out when its hold runs out instead.
+    console.error(
+      `Releasing the envelope.sent webhook of ${envelopeId} failed:`,
+      error,
+    );
+  });
 
   return sendEnvelopeResponseSchema.parse({
     envelopeId,

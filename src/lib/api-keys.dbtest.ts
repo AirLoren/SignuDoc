@@ -9,11 +9,13 @@ import {
   authenticateApiKey,
   createApiKey,
   listApiKeys,
+  LISTED_REVOKED_API_KEYS,
   MAX_API_KEYS_PER_USER,
   revokeApiKey,
 } from "./api-keys.ts";
 import { openTestDatabase } from "./db/test-database.ts";
 import { setPersonRole } from "./people.ts";
+import { SYSTEM_AUDIT_LOCK_ID } from "./services/system-audit.ts";
 
 // API keys against a real Postgres. Run with `npm run test:db`.
 
@@ -214,4 +216,73 @@ test("an administrator can have only so many keys at once", async () => {
     (error: unknown) =>
       error instanceof ApiKeyError && error.statusCode === 409,
   );
+});
+
+test("every key that is not revoked stays in the list, however many are revoked after it", async () => {
+  const admin = await createUser();
+  const { summary: old } = await createApiKey(
+    admin,
+    { expiresInDays: null, name: "Oldest app", scope: "read" },
+    database,
+  );
+
+  for (let index = 0; index < LISTED_REVOKED_API_KEYS + 10; index += 1) {
+    const { summary } = await createApiKey(
+      admin,
+      { expiresInDays: null, name: `Spent ${String(index)}`, scope: "read" },
+      database,
+    );
+
+    await revokeApiKey(admin, summary.id, database);
+  }
+
+  const listed = await listApiKeys(database);
+
+  assert.ok(listed.some((row) => row.id === old.id));
+  assert.equal(
+    listed.filter((row) => row.revokedAt !== null).length,
+    LISTED_REVOKED_API_KEYS,
+  );
+});
+
+test("removing an administrator takes the key rows before the audit lock, as revoking a key does", async () => {
+  // revokeApiKey locks a key row and then the audit chain. Hold a key row
+  // the way it does, and the role change must wait for it without already
+  // holding the audit chain, or the two would deadlock.
+  const stays = await createUser();
+  const leaves = await createUser();
+  const { summary } = await createApiKey(
+    leaves,
+    { expiresInDays: null, name: "Contested app", scope: "write" },
+    database,
+  );
+  const holder = await database.connect();
+
+  try {
+    await holder.query("begin");
+    await holder.query(`select id from api_keys where id = $1 for update`, [
+      summary.id,
+    ]);
+
+    const roleChange = setPersonRole(
+      stays.userId,
+      leaves.userId,
+      "user",
+      database,
+    );
+
+    // Give it time to reach the key row.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const free = await holder.query<{ locked: boolean }>(
+      `select pg_try_advisory_xact_lock($1) as locked`,
+      [SYSTEM_AUDIT_LOCK_ID],
+    );
+
+    assert.equal(free.rows[0]?.locked, true);
+    await holder.query("rollback");
+    await roleChange;
+  } finally {
+    holder.release();
+  }
 });
