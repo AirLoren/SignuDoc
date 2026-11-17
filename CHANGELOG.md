@@ -8,6 +8,21 @@ release says when it does.
 
 ## [Unreleased]
 
+Send the same template to many people at once from a CSV. This needs a
+migration step (`20261118090000_bulk_send_batches.sql`): a confirmed batch
+stores its results so a retry does not send the same envelopes again.
+
+### Templates
+
+- **Send to many** on a template: upload or paste a CSV of names and email
+  addresses and send one envelope per row, with a preview that flags missing
+  or invalid addresses, duplicate rows and batches over 200 before anything
+  is created. Each row is sent on its own, so one failure does not take the
+  others with it. Confirming is idempotent: the same batch key returns the
+  stored results instead of sending again. After sending, the results can be
+  downloaded as a CSV. In Part 11 mode, a row is skipped when the signer
+  does not have a verified, identity-checked account.
+
 ## [0.3.0] - 2026-11-16
 
 Sign-in security and audit features for organizations that need them, and
