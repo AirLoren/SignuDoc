@@ -47,7 +47,9 @@ What to know about keys:
 - **Keys skip two-step sign-in.** They are for servers, so keep them in your
   app's secret settings (for example a Vercel environment variable), never
   in a browser or a mobile app, and revoke a key as soon as it may have
-  leaked. The `sdk_` prefix lets secret scanners such as GitHub's spot one.
+  leaked. The `sdk_` prefix makes a leaked key easy to search for. Secret
+  scanners do not know it out of the box, but one that takes custom
+  patterns can be given `sdk_[A-Za-z0-9_-]{43}`.
 - Each administrator can have up to 25 keys that have not been revoked or
   expired.
 - Making and revoking keys is recorded in the site audit trail (Settings,
@@ -88,8 +90,8 @@ stands:
 - `RateLimit-Reset`: seconds until the window starts again.
 
 The limits the web app has on creating and sending envelopes apply to keys
-too. An address that sends 30 bad keys in 10 minutes is turned away until
-the 10 minutes are up.
+too. An address that sends 30 bad keys in 10 minutes gets 429 for any more
+bad keys until the 10 minutes are up. Good keys from it keep working.
 
 ## Endpoints
 

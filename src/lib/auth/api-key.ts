@@ -13,7 +13,7 @@ import { getClientIpAddress, getRequestPathname } from "../security/request.ts";
 /** Requests one key may make in a window, across every endpoint. */
 export const API_KEY_RATE_LIMIT = 600;
 export const API_KEY_RATE_WINDOW_MS = 10 * 60 * 1000;
-/** Failed attempts one address may make before it is turned away. */
+/** Bad keys one address may send before more of them get 429. */
 const FAILED_ATTEMPT_LIMIT = 30;
 const FAILED_ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 
@@ -39,42 +39,14 @@ export async function requireApiKey(
     });
   }
 
-  const failureKey = `api-key-failures:${ipAddress ?? "unknown"}`;
-  const failures = await peekRateLimit({
-    key: failureKey,
-    limit: FAILED_ATTEMPT_LIMIT,
-  });
-
-  // An address that keeps sending bad keys is turned away before the
-  // database is asked about another one.
-  if (!failures.allowed) {
-    return apiError(
-      429,
-      "rate_limited",
-      "Too many requests with a bad key. Try again later.",
-      { "retry-after": String(failures.retryAfterSeconds) },
-    );
-  }
-
+  // The key is looked up first, so bad keys from an address never turn
+  // away a good one from it: another worker of an app still sending a key
+  // that was revoked, or, off Vercel, a stranger who forged the address in
+  // X-Forwarded-For to lock an integration out.
   const principal = await authenticateApiKey(presented);
 
   if (!principal) {
-    await consumeRateLimit({
-      key: failureKey,
-      limit: FAILED_ATTEMPT_LIMIT,
-      windowMs: FAILED_ATTEMPT_WINDOW_MS,
-    });
-    logSecurityEvent("warn", {
-      category: "api_key_rejected",
-      ipAddress,
-      message:
-        "Refused an API request with an unknown, revoked or expired key.",
-      path: getRequestPathname(request),
-    });
-
-    return apiError(401, "unauthorized", UNAUTHORIZED_MESSAGE, {
-      "www-authenticate": 'Bearer realm="signudoc", error="invalid_token"',
-    });
+    return refuseBadKey(request, ipAddress);
   }
 
   const decision = await consumeRateLimit({
@@ -121,6 +93,47 @@ export async function requireApiKey(
   }
 
   return { ...principal, rateLimit };
+}
+
+/**
+ * The answer to a key that does not work. Bad keys are counted per
+ * address. Once an address has sent too many, it gets 429 instead of 401
+ * until the window ends, and nothing more is written or logged for it.
+ */
+async function refuseBadKey(
+  request: Request,
+  ipAddress: string | null,
+): Promise<Response> {
+  const failureKey = `api-key-failures:${ipAddress ?? "unknown"}`;
+  const failures = await peekRateLimit({
+    key: failureKey,
+    limit: FAILED_ATTEMPT_LIMIT,
+  });
+
+  if (!failures.allowed) {
+    return apiError(
+      429,
+      "rate_limited",
+      "Too many requests with a bad key. Try again later.",
+      { "retry-after": String(failures.retryAfterSeconds) },
+    );
+  }
+
+  await consumeRateLimit({
+    key: failureKey,
+    limit: FAILED_ATTEMPT_LIMIT,
+    windowMs: FAILED_ATTEMPT_WINDOW_MS,
+  });
+  logSecurityEvent("warn", {
+    category: "api_key_rejected",
+    ipAddress,
+    message: "Refused an API request with an unknown, revoked or expired key.",
+    path: getRequestPathname(request),
+  });
+
+  return apiError(401, "unauthorized", UNAUTHORIZED_MESSAGE, {
+    "www-authenticate": 'Bearer realm="signudoc", error="invalid_token"',
+  });
 }
 
 export type RateLimitState = {
