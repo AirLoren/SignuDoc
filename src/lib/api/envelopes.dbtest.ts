@@ -23,6 +23,7 @@ import {
   completeIdempotencyKey,
   deleteExpiredIdempotencyKeys,
   IDEMPOTENCY_WINDOW_SECONDS,
+  rememberIdempotentResource,
 } from "./idempotency.ts";
 
 // The public API's envelopes against a real Postgres and real files. Run
@@ -429,4 +430,80 @@ test("an idempotency key replays the first response and refuses a different requ
       later + IDEMPOTENCY_WINDOW_SECONDS,
     )) >= 1,
   );
+});
+
+test("once the envelope is made and sent, a retry is told about it instead of making another", async () => {
+  const actor = await createActor();
+  const claim = {
+    apiKeyId: actor.apiKeyId,
+    key: `order-${randomUUID()}`,
+    requestHash: "d".repeat(64),
+  };
+  const remembered: string[] = [];
+
+  assert.deepEqual(await claimIdempotencyKey(claim, database), { kind: "new" });
+
+  const envelope = await createEnvelopeForApi(
+    actor,
+    request({ send: { permittedUseConfirmed: true } }),
+    source(),
+    database,
+    {
+      onCreated: async (envelopeId) => {
+        // Only once the send has happened.
+        const row = await database.query<{ status: string }>(
+          `select status from envelopes where id = $1`,
+          [envelopeId],
+        );
+
+        assert.equal(row.rows[0]?.status, "sent");
+        remembered.push(envelopeId);
+        await rememberIdempotentResource(
+          { apiKeyId: claim.apiKeyId, key: claim.key, resourceId: envelopeId },
+          database,
+        );
+      },
+    },
+  );
+
+  assert.deepEqual(remembered, [envelope.id]);
+  // Say the answer could not be read back and the request failed here: the
+  // key is kept, and the retry is pointed at the envelope.
+  assert.deepEqual(await claimIdempotencyKey(claim, database), {
+    kind: "recover",
+    resourceId: envelope.id,
+  });
+});
+
+test("a create that fails is not remembered, so its retry runs for real", async () => {
+  const actor = await createActor();
+  let called = false;
+
+  await assert.rejects(
+    createEnvelopeForApi(
+      actor,
+      request({
+        fields: [
+          {
+            height: 0.05,
+            page: 9,
+            signer: "client",
+            type: "signature",
+            width: 0.3,
+            x: 0.1,
+            y: 0.7,
+          },
+        ],
+      }),
+      source(),
+      database,
+      {
+        onCreated: async () => {
+          called = true;
+        },
+      },
+    ),
+    EnvelopeMutationError,
+  );
+  assert.equal(called, false);
 });

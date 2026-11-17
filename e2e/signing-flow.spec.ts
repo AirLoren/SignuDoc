@@ -1384,6 +1384,14 @@ test("an administrator makes an API key, an app sends and downloads an envelope 
     await expect(signerPage).toHaveURL(/\/sign\/[^/]+\/done/);
     await signer.close();
 
+    // A cut-off body is refused, never read as "no reason given".
+    const cutOff = await api.post(`/api/v1/envelopes/${envelope.id}/void`, {
+      data: '{"reason":',
+      headers: { ...auth, "content-type": "application/json" },
+    });
+
+    expect(cutOff.status()).toBe(400);
+
     const finished = await api.get(`/api/v1/envelopes/${envelope.id}`, {
       headers: auth,
     });

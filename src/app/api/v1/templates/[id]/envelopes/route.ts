@@ -9,7 +9,13 @@ import {
   MAX_API_METADATA_BYTES,
   sendEnvelopeForApi,
 } from "@/lib/api/envelopes";
-import { applyAccountLimit, handleApi, runIdempotently } from "@/lib/api/route";
+import {
+  API_CREATE_LIMIT,
+  API_SEND_LIMIT,
+  applyAccountLimit,
+  handleApi,
+  runIdempotently,
+} from "@/lib/api/route";
 import { deleteDraftEnvelope } from "@/lib/envelopes";
 import { createDraftFromTemplate } from "@/lib/templates";
 
@@ -40,11 +46,7 @@ export async function POST(request: Request, context: Context) {
     "write",
     "api_template_use_failure",
     async (api) => {
-      const limited = await applyAccountLimit(api, {
-        key: "api-envelope-create",
-        limit: 60,
-        windowMs: 10 * 60 * 1000,
-      });
+      const limited = await applyAccountLimit(api, API_CREATE_LIMIT);
 
       if (limited) {
         return limited;
@@ -65,11 +67,32 @@ export async function POST(request: Request, context: Context) {
         return apiError(400, "invalid_request", describeZodError(body.error));
       }
 
+      if (body.data.send) {
+        const sendLimited = await applyAccountLimit(api, API_SEND_LIMIT);
+
+        if (sendLimited) {
+          return sendLimited;
+        }
+      }
+
+      const readBack = async (envelopeId: string) => {
+        const envelope = await getApiEnvelope(api.actor.userId, envelopeId);
+
+        return envelope
+          ? { body: envelope, status: 201 }
+          : {
+              body: {
+                error: { code: "not_found", message: "Envelope not found." },
+              },
+              status: 404,
+            };
+      };
+
       return runIdempotently(
         api,
         `POST /api/v1/templates/${id}/envelopes`,
         text,
-        async () => {
+        async (remember) => {
           const draft = await createDraftFromTemplate(api.actor.userId, id, {
             signers: body.data.signers,
             title: body.data.title,
@@ -96,11 +119,10 @@ export async function POST(request: Request, context: Context) {
             throw error;
           }
 
-          return {
-            body: await getApiEnvelope(api.actor.userId, draft.envelopeId),
-            status: 201,
-          };
+          await remember(draft.envelopeId);
+          return readBack(draft.envelopeId);
         },
+        readBack,
       );
     },
   );

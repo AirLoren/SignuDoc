@@ -15,7 +15,23 @@ export async function POST(request: Request, context: Context) {
     "write",
     "api_envelope_void_failure",
     async ({ actor }) => {
-      const body = (await request.json().catch(() => ({}))) as unknown;
+      // No body is fine; a body that is not JSON is refused, so a cut-off
+      // request never voids without the reason it meant to give.
+      const text = await request.text();
+      let body: unknown = {};
+
+      if (text.trim()) {
+        try {
+          body = JSON.parse(text) as unknown;
+        } catch {
+          return apiError(
+            400,
+            "invalid_request",
+            "The body is not valid JSON.",
+          );
+        }
+      }
+
       const reason =
         typeof body === "object" && body !== null
           ? (body as { reason?: unknown }).reason

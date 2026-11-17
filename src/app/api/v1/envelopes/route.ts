@@ -6,9 +6,17 @@ import {
   apiListQuerySchema,
   createEnvelopeForApi,
   describeZodError,
+  getApiEnvelope,
   listApiEnvelopes,
 } from "@/lib/api/envelopes";
-import { applyAccountLimit, handleApi, runIdempotently } from "@/lib/api/route";
+import {
+  API_CREATE_LIMIT,
+  API_SEND_LIMIT,
+  apiErrorFor,
+  applyAccountLimit,
+  handleApi,
+  runIdempotently,
+} from "@/lib/api/route";
 import { pendingUploadKeyFor } from "@/lib/api/uploads";
 import {
   discardPendingUpload,
@@ -56,11 +64,7 @@ export async function POST(request: Request) {
     "write",
     "api_envelope_create_failure",
     async (context) => {
-      const limited = await applyAccountLimit(context, {
-        key: "api-envelope-create",
-        limit: 60,
-        windowMs: 10 * 60 * 1000,
-      });
+      const limited = await applyAccountLimit(context, API_CREATE_LIMIT);
 
       if (limited) {
         return limited;
@@ -167,23 +171,59 @@ export async function POST(request: Request) {
         return apiError(400, "invalid_request", describeZodError(input.error));
       }
 
-      try {
-        return await runIdempotently(
-          context,
-          "POST /api/v1/envelopes",
-          fingerprint,
-          async () => ({
-            body: await createEnvelopeForApi(
+      if (input.data.send) {
+        const sendLimited = await applyAccountLimit(context, API_SEND_LIMIT);
+
+        if (sendLimited) {
+          return sendLimited;
+        }
+      }
+
+      return runIdempotently(
+        context,
+        "POST /api/v1/envelopes",
+        fingerprint,
+        async (remember) => {
+          let envelope;
+
+          try {
+            envelope = await createEnvelopeForApi(
               context.actor,
               input.data,
               await readPdf(),
-            ),
-            status: 201,
-          }),
-        );
-      } finally {
-        await cleanUp();
-      }
+              undefined,
+              { onCreated: remember },
+            );
+          } catch (error) {
+            // Only the request that did the work removes the upload, and
+            // only when a retry would get the same refusal. After a failure
+            // of the install's own, the retry needs the upload again.
+            if (apiErrorFor(error)) {
+              await cleanUp();
+            }
+
+            throw error;
+          }
+
+          await cleanUp();
+          return { body: envelope, status: 201 };
+        },
+        async (envelopeId) => {
+          const envelope = await getApiEnvelope(
+            context.actor.userId,
+            envelopeId,
+          );
+
+          return envelope
+            ? { body: envelope, status: 201 }
+            : {
+                body: {
+                  error: { code: "not_found", message: "Envelope not found." },
+                },
+                status: 404,
+              };
+        },
+      );
     },
   );
 }
