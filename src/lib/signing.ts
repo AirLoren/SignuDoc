@@ -768,6 +768,46 @@ async function lockSentEnvelope(
   }
 }
 
+/**
+ * Confirms this request still holds the waiting signer's current link
+ * before any of their rows are written. The token is read once when the
+ * page is opened; a correction can replace the hash in the meantime and
+ * leave status as notified, which the later UPDATE used to treat as enough.
+ */
+async function lockSignerForPresentedToken(
+  tx: DbExecutor,
+  {
+    envelopeId,
+    signerId,
+    tokenHash,
+  }: {
+    envelopeId: string;
+    signerId: string;
+    tokenHash: string;
+  },
+): Promise<void> {
+  const locked = await queryOne<{ id: string }>(
+    tx,
+    `
+      SELECT id
+      FROM signers
+      WHERE id = $1
+        AND envelope_id = $2
+        AND status = 'notified'
+        AND signing_token_hash = $3
+      FOR NO KEY UPDATE
+    `,
+    [signerId, envelopeId, tokenHash],
+  );
+
+  if (!locked) {
+    throw new SigningMutationError(
+      "This signing link is no longer active.",
+      409,
+    );
+  }
+}
+
 async function recordViewedEventOnce(
   context: Pick<ResolvedSigningContext, "envelope" | "signer">,
   meta: SigningRequestMeta,
@@ -782,9 +822,12 @@ async function recordViewedEventOnce(
         WHERE envelope_id = $1
           AND event = 'viewed'
           AND metadata->>'signerId' = $2
+          -- A corrected signer keeps the row id, so the first view by the
+          -- person now at that address is recorded too.
+          AND lower(metadata->>'signerEmail') = lower($3)
         LIMIT 1
       `,
-      [context.envelope.id, context.signer.id],
+      [context.envelope.id, context.signer.id, context.signer.email],
     );
 
     if (existing) {
@@ -892,6 +935,7 @@ function isFieldSubmissionComplete(
     case "signature":
     case "initials":
     case "date":
+    case "name":
       return typeof update.submittedAt === "number";
     case "text":
     case "number":
@@ -1308,6 +1352,7 @@ export async function sendSignerEmailCode(
   const branding = await getBranding();
   // Claim the resend window and save the code in one statement, so two
   // tabs cannot both send, leaving one emailed code already replaced.
+  const presentedTokenHash = hashOpaqueToken(token);
   const claimed = await database.query(
     `
       UPDATE signers
@@ -1317,6 +1362,7 @@ export async function sendSignerEmailCode(
         email_code_attempts = 0,
         email_code_sent_at = $3
       WHERE id = $4
+        AND signing_token_hash = $6
         AND (
           email_code_hash IS NULL
           OR email_code_sent_at IS NULL
@@ -1329,10 +1375,28 @@ export async function sendSignerEmailCode(
       now,
       context.signer.id,
       now - EMAIL_CODE_RESEND_SECONDS,
+      presentedTokenHash,
     ],
   );
 
   if (claimed.rowCount !== 1) {
+    const stillThisLink = await queryOne<{ id: string }>(
+      database,
+      `
+        SELECT id
+        FROM signers
+        WHERE id = $1 AND signing_token_hash = $2
+      `,
+      [context.signer.id, presentedTokenHash],
+    );
+
+    if (!stillThisLink) {
+      throw new SigningMutationError(
+        "This signing link is no longer active.",
+        409,
+      );
+    }
+
     const current = await getSignerCheckState(context.signer.id!, database);
 
     return {
@@ -1490,12 +1554,13 @@ export async function verifySignerCheck(
         UPDATE signers
         SET email_code_attempts = email_code_attempts + 1
         WHERE id = $1
+          AND signing_token_hash = $4
           AND email_code_hash IS NOT NULL
           AND email_code_expires_at >= $2
           AND email_code_attempts < $3
         RETURNING email_code_hash AS hash, email_code_attempts AS attempts
       `,
-      [context.signer.id, now, EMAIL_CODE_MAX_ATTEMPTS],
+      [context.signer.id, now, EMAIL_CODE_MAX_ATTEMPTS, hashOpaqueToken(token)],
     );
     const current = attempt.rows[0];
 
@@ -1580,18 +1645,44 @@ export async function recordSignerConsent(
   }
 
   const consentedAt = Math.floor(Date.now() / 1000);
+  const presentedTokenHash = hashOpaqueToken(token);
 
   await withTransaction(async (tx) => {
     const updated = await tx.query(
       `
         UPDATE signers
         SET consented_at = $1
-        WHERE id = $2 AND consented_at IS NULL
+        WHERE id = $2
+          AND consented_at IS NULL
+          AND status = 'notified'
+          AND signing_token_hash = $3
       `,
-      [consentedAt, context.signer.id],
+      [consentedAt, context.signer.id, presentedTokenHash],
     );
 
     if (updated.rowCount !== 1) {
+      const current = await queryOne<{
+        consentedAt: number | null;
+        signingTokenHash: string | null;
+      }>(
+        tx,
+        `
+          SELECT
+            consented_at AS "consentedAt",
+            signing_token_hash AS "signingTokenHash"
+          FROM signers
+          WHERE id = $1
+        `,
+        [context.signer.id],
+      );
+
+      if (!current || current.signingTokenHash !== presentedTokenHash) {
+        throw new SigningMutationError(
+          "This signing link is no longer active.",
+          409,
+        );
+      }
+
       return;
     }
 
@@ -2145,6 +2236,19 @@ function buildSignerSubmission(
       continue;
     }
 
+    // The name the sender gave this signer, as it stands when they sign.
+    if (field.type === "name") {
+      fieldUpdates.set(field.id, {
+        checked: null,
+        fieldId: field.id,
+        imageKey: null,
+        inputMethod: "auto",
+        submittedAt,
+        value: context.signer.name,
+      });
+      continue;
+    }
+
     if (
       field.type === "text" ||
       field.type === "number" ||
@@ -2278,6 +2382,7 @@ export async function submitSigningForToken(
     drawnSignatureUploads,
     fieldUpdates,
   } = buildSignerSubmission(context, parsedInput, submittedAt);
+  const presentedTokenHash = hashOpaqueToken(token);
 
   let signingStatePersisted = false;
 
@@ -2290,6 +2395,9 @@ export async function submitSigningForToken(
         ? context.signers[currentSignerIndex + 1]
         : undefined;
     let nextSignerLink: IssuedSigningLink | undefined;
+    let nextSignerDelivery:
+      { email: string; id: string; name: string } | undefined;
+    const nextSignerId = nextSigner?.id;
 
     if (nextSigner) {
       if (nextSigner.status !== "pending") {
@@ -2299,7 +2407,7 @@ export async function submitSigningForToken(
         );
       }
 
-      if (!nextSigner.id) {
+      if (!nextSignerId) {
         throw new SigningMutationError(
           "Envelope routing is out of sync for the next signer.",
           500,
@@ -2348,6 +2456,13 @@ export async function submitSigningForToken(
     });
 
     if (nextSigner && nextSignerLink) {
+      if (!nextSignerId) {
+        throw new SigningMutationError(
+          "Envelope routing is out of sync for the next signer.",
+          500,
+        );
+      }
+
       // The deadline the next signer is given. The sender can move it while
       // this signer submits, and moving it only reaches the signer whose
       // turn it is then. So it is read here, where this update holds the
@@ -2385,6 +2500,12 @@ export async function submitSigningForToken(
             routedAt,
           );
         }
+
+        await lockSignerForPresentedToken(tx, {
+          envelopeId: context.envelope.id,
+          signerId: currentSignerId,
+          tokenHash: presentedTokenHash,
+        });
 
         for (const update of fieldUpdates.values()) {
           const result = await tx.query(
@@ -2434,8 +2555,15 @@ export async function submitSigningForToken(
             WHERE id = $3
               AND envelope_id = $4
               AND status = 'notified'
+              AND signing_token_hash = $5
           `,
-          [submittedAt, submittedAt, currentSignerId, context.envelope.id],
+          [
+            submittedAt,
+            submittedAt,
+            currentSignerId,
+            context.envelope.id,
+            presentedTokenHash,
+          ],
         );
 
         if (signedSignerResult.rowCount !== 1) {
@@ -2445,7 +2573,11 @@ export async function submitSigningForToken(
           );
         }
 
-        const nextSignerResult = await tx.query(
+        const activatedNextSigner = await queryOne<{
+          email: string;
+          name: string;
+        }>(
+          tx,
           `
             UPDATE signers
             SET
@@ -2458,6 +2590,7 @@ export async function submitSigningForToken(
             WHERE id = $6
               AND envelope_id = $7
               AND status = 'pending'
+            RETURNING name, email
           `,
           [
             nextSignerLink.tokenHash,
@@ -2465,17 +2598,23 @@ export async function submitSigningForToken(
             routedAt,
             routedAt,
             routedAt,
-            nextSigner.id,
+            nextSignerId,
             context.envelope.id,
           ],
         );
 
-        if (nextSignerResult.rowCount !== 1) {
+        if (!activatedNextSigner) {
           throw new SigningMutationError(
             "Unable to activate the next signer for this envelope.",
             500,
           );
         }
+
+        nextSignerDelivery = {
+          email: activatedNextSigner.email,
+          id: nextSignerId,
+          name: activatedNextSigner.name,
+        };
 
         await recordAuditEvent(
           {
@@ -2495,6 +2634,13 @@ export async function submitSigningForToken(
       signingStatePersisted = true;
       await deleteReplacedRevision(replacedRevisionKey, storageService);
 
+      if (!nextSignerDelivery) {
+        throw new SigningMutationError(
+          "Unable to activate the next signer for this envelope.",
+          500,
+        );
+      }
+
       try {
         const delivery = await emailService.send(
           buildSigningInvitationEmail({
@@ -2502,8 +2648,8 @@ export async function submitSigningForToken(
             envelopeTitle: context.envelope.title,
             expiresAt: nextSignerDeadline,
             senderName: normalizeSenderName(context.sender),
-            signerEmail: nextSigner.email,
-            signerName: nextSigner.name,
+            signerEmail: nextSignerDelivery.email,
+            signerName: nextSignerDelivery.name,
             signingUrl: nextSignerLink.url,
           }),
         );
@@ -2512,15 +2658,15 @@ export async function submitSigningForToken(
           {
             envelopeId: context.envelope.id,
             messageId: delivery.messageId,
-            recipient: nextSigner.email,
-            signerId: nextSigner.id,
+            recipient: nextSignerDelivery.email,
+            signerId: nextSignerDelivery.id,
             template: "signing_invitation",
           },
           database,
         );
       } catch (error) {
         console.error(
-          `Failed to send next signer invitation for envelope ${context.envelope.id} to ${nextSigner.email}:`,
+          `Failed to send next signer invitation for envelope ${context.envelope.id} to ${nextSignerDelivery.email}:`,
           error,
         );
       }
@@ -2588,6 +2734,11 @@ export async function submitSigningForToken(
       finalArtifacts = await withTransaction(async (tx) => {
         await lockSentEnvelope(context.envelope.id, tx);
         await assertStillSignersTurn(context.envelope.id, currentSignerId, tx);
+        await lockSignerForPresentedToken(tx, {
+          envelopeId: context.envelope.id,
+          signerId: currentSignerId,
+          tokenHash: presentedTokenHash,
+        });
 
         // Made while the envelope is locked: the files have fixed keys, and
         // a second submission at the same time waits, then stops above.
@@ -2669,8 +2820,15 @@ export async function submitSigningForToken(
             WHERE id = $3
               AND envelope_id = $4
               AND status = 'notified'
+              AND signing_token_hash = $5
           `,
-          [submittedAt, submittedAt, currentSignerId, context.envelope.id],
+          [
+            submittedAt,
+            submittedAt,
+            currentSignerId,
+            context.envelope.id,
+            presentedTokenHash,
+          ],
         );
 
         if (signedSignerResult.rowCount !== 1) {
@@ -2884,6 +3042,7 @@ export async function declineSigningForToken(
   const emailService = createEmailService();
   const storageService = createStorageService();
   const currentSignerId = context.signer.id;
+  const presentedTokenHash = hashOpaqueToken(token);
 
   if (!currentSignerId) {
     throw new SigningMutationError(
@@ -2949,6 +3108,42 @@ export async function declineSigningForToken(
   await withTransaction(async (tx) => {
     await lockSentEnvelope(context.envelope.id, tx);
     await assertStillSignersTurn(context.envelope.id, currentSignerId, tx);
+    await lockSignerForPresentedToken(tx, {
+      envelopeId: context.envelope.id,
+      signerId: currentSignerId,
+      tokenHash: presentedTokenHash,
+    });
+
+    // The certificates below are made from the recipients read when the link
+    // was opened. If the sender corrected one of them since, they would name
+    // the old person and leave the correction out, so nothing is stored. A
+    // correction cannot commit while this lock is held, so comparing here
+    // covers the whole window.
+    const recipientsNow = await tx.query<{
+      email: string;
+      id: string;
+      name: string;
+    }>(
+      `
+        SELECT id, name, email FROM signers
+        WHERE envelope_id = $1 AND id = ANY($2::text[])
+      `,
+      [context.envelope.id, context.signers.map((signer) => signer.id)],
+    );
+    const recipientsChanged =
+      recipientsNow.rows.length !== context.signers.length ||
+      recipientsNow.rows.some((row) => {
+        const seen = context.signers.find((signer) => signer.id === row.id);
+
+        return !seen || seen.name !== row.name || seen.email !== row.email;
+      });
+
+    if (recipientsChanged) {
+      throw new SigningMutationError(
+        "This envelope changed while you were declining. Open your signing link again.",
+        409,
+      );
+    }
 
     try {
       // Made while the envelope is locked: the certificates have fixed keys,
@@ -3001,6 +3196,7 @@ export async function declineSigningForToken(
           WHERE id = $4
             AND envelope_id = $5
             AND status = 'notified'
+            AND signing_token_hash = $6
         `,
         [
           declinedAt,
@@ -3008,6 +3204,7 @@ export async function declineSigningForToken(
           declinedAt,
           currentSignerId,
           context.envelope.id,
+          presentedTokenHash,
         ],
       );
 
