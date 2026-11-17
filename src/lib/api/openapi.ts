@@ -103,6 +103,12 @@ export function buildOpenApiDocument(serverUrl: string) {
                   requireEmailCode: { type: "boolean" },
                   signatureMeaning: {
                     description: "Part 11 installs only.",
+                    enum: [
+                      "approval",
+                      "review",
+                      "responsibility",
+                      "authorship",
+                    ],
                     type: "string",
                   },
                 },
@@ -205,7 +211,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               description: "Radio buttons in one group.",
               type: "string",
             },
-            height: { maximum: 1, type: "number" },
+            height: { exclusiveMinimum: 0, maximum: 1, type: "number" },
             label: { maxLength: 120, type: "string" },
             options: {
               description: "Dropdowns only.",
@@ -228,7 +234,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               ],
               type: "string",
             },
-            width: { maximum: 1, type: "number" },
+            width: { exclusiveMinimum: 0, maximum: 1, type: "number" },
             x: { maximum: 1, minimum: 0, type: "number" },
             y: { maximum: 1, minimum: 0, type: "number" },
           },
@@ -250,7 +256,12 @@ export function buildOpenApiDocument(serverUrl: string) {
               description:
                 "Confirms the envelope is an ordinary business agreement, as the web app's send button does.",
             },
-            reminderIntervalDays: { maximum: 30, minimum: 1, type: "integer" },
+            reminderIntervalDays: {
+              description: "Days between reminders, or null for none.",
+              maximum: 30,
+              minimum: 1,
+              type: ["integer", "null"],
+            },
             signatureLevel: {
               enum: ["simple", "advanced", "qualified"],
               type: "string",

@@ -114,8 +114,14 @@ export async function POST(request: Request) {
         const fileBytes = new Uint8Array(await file.arrayBuffer());
 
         // A multipart body differs on every send (its boundary is random),
-        // so a retry is recognised by what it carries instead.
-        fingerprint = `${json}\n${createHash("sha256").update(fileBytes).digest("hex")}`;
+        // so a retry is recognised by what it carries instead, file name
+        // and type included.
+        fingerprint = JSON.stringify([
+          json,
+          file.name,
+          file.type,
+          createHash("sha256").update(fileBytes).digest("hex"),
+        ]);
         readPdf = async () => ({
           body: fileBytes,
           contentType: file.type || "application/pdf",
