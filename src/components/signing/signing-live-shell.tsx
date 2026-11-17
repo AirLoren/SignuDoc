@@ -1937,12 +1937,9 @@ function SignatureModal({
         <div className="well p-3">
           <SignatureDrawCanvas
             emptyMessage={drawPreviewMessage}
-            initialDataUrl={
-              drawnSignatureVersion === 0 &&
-              existingEntry?.inputMethod === "drawn"
-                ? (existingEntry.imageDataUrl ?? null)
-                : null
-            }
+            // The canvas unmounts while the Type tab is shown, so it is seeded
+            // from the drawing that Apply would use, never a stale one.
+            initialDataUrl={drawnSignatureDataUrl}
             key={drawnSignatureVersion}
             onChange={setDrawnSignatureDataUrl}
           />
