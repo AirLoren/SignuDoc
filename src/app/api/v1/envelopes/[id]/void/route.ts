@@ -15,8 +15,8 @@ export async function POST(request: Request, context: Context) {
     "write",
     "api_envelope_void_failure",
     async ({ actor }) => {
-      // No body is fine; a body that is not JSON is refused, so a cut-off
-      // request never voids without the reason it meant to give.
+      // No body is fine; a body that is not a JSON object is refused, so a
+      // cut-off request never voids without the reason it meant to give.
       const text = await request.text();
       let body: unknown = {};
 
@@ -32,10 +32,15 @@ export async function POST(request: Request, context: Context) {
         }
       }
 
-      const reason =
-        typeof body === "object" && body !== null
-          ? (body as { reason?: unknown }).reason
-          : undefined;
+      if (typeof body !== "object" || body === null || Array.isArray(body)) {
+        return apiError(
+          400,
+          "invalid_request",
+          'The body must be a JSON object, such as {"reason": "..."}.',
+        );
+      }
+
+      const reason = (body as { reason?: unknown }).reason;
 
       if (
         reason !== undefined &&
