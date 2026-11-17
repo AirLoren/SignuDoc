@@ -2548,6 +2548,24 @@ export async function sendDraftEnvelope(
         );
       }
 
+      // Access codes and emailed codes are not part of that snapshot, and
+      // an embedded signer has no way to enter one. Checked again here,
+      // under the same lock that a save of the signers takes.
+      if (delivery === "embedded") {
+        const lockedChecks = await listSignerCheckSettings(envelopeId, tx);
+
+        if (
+          [...lockedChecks.values()].some(
+            (check) => check.hasAccessCode || check.requireEmailCode,
+          )
+        ) {
+          throw new EnvelopeMutationError(
+            "Embedded signers are identified by your app, so leave out access codes and emailed codes.",
+            400,
+          );
+        }
+      }
+
       await tx.query(
         `
           UPDATE signers
