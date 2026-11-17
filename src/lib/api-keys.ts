@@ -274,23 +274,44 @@ async function getApiKeySummary(
   );
 }
 
+/** How many revoked keys Settings still lists, newest first. */
+export const LISTED_REVOKED_API_KEYS = 50;
+
 /**
- * Every key on the install, newest first. Administrators manage each
- * other's keys, since a key acts for the organization.
+ * Every key on the install that is not revoked (expired ones too, so none
+ * that could still matter is ever out of sight), newest first, then the
+ * most recently revoked. Administrators manage each other's keys, since a
+ * key acts for the organization.
  */
 export async function listApiKeys(
   database: DbExecutor = getDb(),
 ): Promise<ApiKeySummary[]> {
-  return queryMany<ApiKeySummary>(
-    database,
-    `
-      SELECT ${SUMMARY_COLUMNS}
-      FROM api_keys k
-      JOIN "user" u ON u.id = k.user_id
-      ORDER BY k.revoked_at IS NOT NULL, k.created_at DESC
-      LIMIT 200
-    `,
-  );
+  const [live, revoked] = await Promise.all([
+    queryMany<ApiKeySummary>(
+      database,
+      `
+        SELECT ${SUMMARY_COLUMNS}
+        FROM api_keys k
+        JOIN "user" u ON u.id = k.user_id
+        WHERE k.revoked_at IS NULL
+        ORDER BY k.created_at DESC, k.id
+      `,
+    ),
+    queryMany<ApiKeySummary>(
+      database,
+      `
+        SELECT ${SUMMARY_COLUMNS}
+        FROM api_keys k
+        JOIN "user" u ON u.id = k.user_id
+        WHERE k.revoked_at IS NOT NULL
+        ORDER BY k.revoked_at DESC, k.id
+        LIMIT $1
+      `,
+      [LISTED_REVOKED_API_KEYS],
+    ),
+  ]);
+
+  return [...live, ...revoked];
 }
 
 /** Revokes a key for the administrator `actor`. Revoking twice is fine. */
