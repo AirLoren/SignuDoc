@@ -45,6 +45,16 @@ const idempotencyKey = {
 
 const isoTime = { format: "date-time", type: ["string", "null"] };
 
+/** A {"object": "list", "data": [...]} answer of `item`s. */
+const listOf = (item: Record<string, unknown>) => ({
+  properties: {
+    data: { items: item, type: "array" },
+    object: { const: "list", type: "string" },
+  },
+  required: ["object", "data"],
+  type: "object",
+});
+
 export function buildOpenApiDocument(serverUrl: string) {
   return {
     components: {
@@ -261,6 +271,39 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
           type: "object",
         },
+        Template: {
+          properties: {
+            id: { type: "string" },
+            name: { type: "string" },
+            object: { const: "template", type: "string" },
+            roles: {
+              description: "Its roles, in signing order.",
+              items: { type: "string" },
+              type: "array",
+            },
+          },
+          required: ["object", "id", "name", "roles"],
+          type: "object",
+        },
+        Upload: {
+          properties: {
+            expiresAt: { format: "date-time", type: "string" },
+            headers: {
+              additionalProperties: { type: "string" },
+              description: "Send these headers with the PUT.",
+              type: "object",
+            },
+            maxBytes: { type: "integer" },
+            method: { const: "PUT", type: "string" },
+            uploadId: {
+              description: "Pass it to POST /envelopes once the PUT is done.",
+              type: "string",
+            },
+            url: { format: "uri", type: "string" },
+          },
+          required: ["uploadId", "url", "method", "headers", "expiresAt"],
+          type: "object",
+        },
       },
       securitySchemes: {
         apiKey: {
@@ -371,7 +414,31 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           parameters: [idParameter],
           responses: {
-            "200": { description: "The audit trail, oldest first." },
+            "200": {
+              content: {
+                "application/json": {
+                  schema: listOf({
+                    properties: {
+                      actor: {
+                        properties: {
+                          email: { type: ["string", "null"] },
+                          type: { type: "string" },
+                        },
+                        type: "object",
+                      },
+                      at: { format: "date-time", type: "string" },
+                      event: { type: "string" },
+                      id: { type: "string" },
+                      ipAddress: { type: ["string", "null"] },
+                      metadata: { type: ["object", "null"] },
+                    },
+                    required: ["id", "event", "at", "actor"],
+                    type: "object",
+                  }),
+                },
+              },
+              description: "The audit trail, oldest first.",
+            },
             ...errors,
           },
           summary: "Get an envelope's audit trail",
@@ -447,7 +514,34 @@ export function buildOpenApiDocument(serverUrl: string) {
       "/me": {
         get: {
           responses: {
-            "200": { description: "The key and its administrator." },
+            "200": {
+              content: {
+                "application/json": {
+                  schema: {
+                    properties: {
+                      key: {
+                        properties: {
+                          id: { type: "string" },
+                          name: { type: "string" },
+                          scope: { enum: ["read", "write"], type: "string" },
+                        },
+                        type: "object",
+                      },
+                      user: {
+                        properties: {
+                          email: { type: "string" },
+                          id: { type: "string" },
+                          name: { type: "string" },
+                        },
+                        type: "object",
+                      },
+                    },
+                    type: "object",
+                  },
+                },
+              },
+              description: "The key and its administrator.",
+            },
             ...errors,
           },
           summary: "Check a key",
@@ -462,7 +556,17 @@ export function buildOpenApiDocument(serverUrl: string) {
       },
       "/templates": {
         get: {
-          responses: { "200": { description: "Saved templates." }, ...errors },
+          responses: {
+            "200": {
+              content: {
+                "application/json": {
+                  schema: listOf({ $ref: "#/components/schemas/Template" }),
+                },
+              },
+              description: "Saved templates.",
+            },
+            ...errors,
+          },
           summary: "List templates",
         },
       },
@@ -551,6 +655,11 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           responses: {
             "201": {
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/Upload" },
+                },
+              },
               description:
                 "Where to PUT the PDF (url, method, headers) and the uploadId to create the envelope with. Only on installs that store files in Vercel Blob.",
             },

@@ -13,6 +13,7 @@ export const IDEMPOTENCY_WINDOW_SECONDS = 24 * 60 * 60;
 export type IdempotencyClaim =
   | { kind: "new" }
   | { kind: "replay"; response: unknown; statusCode: number }
+  | { kind: "recover"; resourceId: string }
   | { kind: "in_progress" }
   | { kind: "mismatch" };
 
@@ -70,12 +71,14 @@ export async function claimIdempotencyKey(
 
   const existing = await queryOne<{
     requestHash: string;
+    resourceId: string | null;
     response: unknown;
     statusCode: number | null;
   }>(
     database,
     `
-      SELECT request_hash AS "requestHash", status_code AS "statusCode", response
+      SELECT request_hash AS "requestHash", status_code AS "statusCode",
+        response, resource_id AS "resourceId"
       FROM api_idempotency
       WHERE api_key_id = $1 AND idempotency_key = $2
     `,
@@ -92,7 +95,11 @@ export async function claimIdempotencyKey(
   }
 
   if (existing.statusCode === null) {
-    return { kind: "in_progress" };
+    // The first request made its envelope and then failed, or is still
+    // finishing: either way the answer is that envelope.
+    return existing.resourceId
+      ? { kind: "recover", resourceId: existing.resourceId }
+      : { kind: "in_progress" };
   }
 
   return {
@@ -124,6 +131,24 @@ export async function completeIdempotencyKey(
       input.statusCode,
       JSON.stringify(input.response),
     ],
+  );
+}
+
+/**
+ * Notes what the request has made, as soon as it has made it, so a later
+ * failure cannot lead a retry to make it again.
+ */
+export async function rememberIdempotentResource(
+  input: { apiKeyId: string; key: string; resourceId: string },
+  database: DbExecutor = getDb(),
+) {
+  await database.query(
+    `
+      UPDATE api_idempotency
+      SET resource_id = $3
+      WHERE api_key_id = $1 AND idempotency_key = $2
+    `,
+    [input.apiKeyId, input.key, input.resourceId],
   );
 }
 

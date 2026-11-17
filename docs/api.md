@@ -89,9 +89,10 @@ stands:
 - `RateLimit-Reset`: seconds until the window starts again.
 
 On top of that, each key may create 60 envelopes in 10 minutes and send 100
-in an hour. Your email provider's own limits usually bite first: Resend's
-free plan sends 100 emails a day. An address that sends 30 bad keys in 10 minutes is turned away until
-the 10 minutes are up.
+in an hour, counting creates and template calls that also send. Your email
+provider's own limits usually bite first: Resend's free plan sends 100
+emails a day. An address that sends 30 bad keys in 10 minutes is turned
+away until the 10 minutes are up.
 
 ## A first envelope in one call
 
@@ -152,8 +153,10 @@ Things to know:
 - **`Idempotency-Key`** makes a retry safe. A request with a key SignuDoc has
   seen in the last 24 hours gets the first answer again (with the header
   `Idempotent-Replayed: true`) instead of making a second envelope. The same
-  key with a different request is refused with 422. Use one key per thing
-  you mean to send, such as the invoice number.
+  key with a different request is refused with 422. If the install fails
+  after the envelope was made, a retry with the same key gets that envelope
+  rather than a second one. Use one key per thing you mean to send, such as
+  the invoice number.
 
 ### PDFs over 4 MB
 

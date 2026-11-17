@@ -197,6 +197,10 @@ export async function createEnvelopeForApi(
   input: ApiCreateEnvelopeInput,
   sourcePdf: { body: Uint8Array; contentType: string; filename: string },
   database: DbPool = getDb(),
+  options: {
+    /** Called once the envelope is made, and sent if asked, for good. */
+    onCreated?: (envelopeId: string) => Promise<void>;
+  } = {},
 ): Promise<ApiEnvelope> {
   const draft = await createDraftEnvelope(
     actor.userId,
@@ -289,6 +293,8 @@ export async function createEnvelopeForApi(
     );
     throw error;
   }
+
+  await options.onCreated?.(envelopeId);
 
   const envelope = await getApiEnvelope(actor.userId, envelopeId, database);
 

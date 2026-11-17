@@ -76,7 +76,7 @@ export type RecordSystemAuditEventInput = {
 };
 
 /** One key for the whole chain: writers take turns. */
-const SYSTEM_AUDIT_LOCK_ID = 746108325;
+export const SYSTEM_AUDIT_LOCK_ID = 746108325;
 
 type ChainedFields = Omit<SystemAuditEvent, never>;
 

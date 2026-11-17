@@ -5,7 +5,12 @@ import {
   getApiEnvelope,
   sendEnvelopeForApi,
 } from "@/lib/api/envelopes";
-import { applyAccountLimit, handleApi, runIdempotently } from "@/lib/api/route";
+import {
+  API_SEND_LIMIT,
+  applyAccountLimit,
+  handleApi,
+  runIdempotently,
+} from "@/lib/api/route";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -18,11 +23,7 @@ export async function POST(request: Request, context: Context) {
     "write",
     "api_envelope_send_failure",
     async (api) => {
-      const limited = await applyAccountLimit(api, {
-        key: "api-envelope-send",
-        limit: 100,
-        windowMs: 60 * 60 * 1000,
-      });
+      const limited = await applyAccountLimit(api, API_SEND_LIMIT);
 
       if (limited) {
         return limited;
@@ -47,24 +48,29 @@ export async function POST(request: Request, context: Context) {
         );
       }
 
+      const readBack = async () => {
+        const envelope = await getApiEnvelope(api.actor.userId, id);
+
+        return envelope
+          ? { body: envelope, status: 200 }
+          : {
+              body: {
+                error: { code: "not_found", message: "Envelope not found." },
+              },
+              status: 404,
+            };
+      };
+
       return runIdempotently(
         api,
         `POST /api/v1/envelopes/${id}/send`,
         text,
-        async () => {
+        async (remember) => {
           await sendEnvelopeForApi(api.actor, id, options.data);
-
-          const envelope = await getApiEnvelope(api.actor.userId, id);
-
-          return envelope
-            ? { body: envelope, status: 200 }
-            : {
-                body: {
-                  error: { code: "not_found", message: "Envelope not found." },
-                },
-                status: 404,
-              };
+          await remember(id);
+          return readBack();
         },
+        readBack,
       );
     },
   );
