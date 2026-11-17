@@ -211,7 +211,7 @@ SAML is not supported. Okta, Entra ID and Google all offer OIDC for the same app
 
 ## Your responsibilities
 
-Your install carries your organization's name, not SignuDoc's. In Settings, link your own terms and privacy policy (without a privacy link, signers see a notice built from your settings at `/signer-privacy`; check it), keep the support address you gave at setup pointed at a mailbox someone reads, and choose how long finished documents are kept. Under GDPR your organization is the controller; Settings, Organization has the tools to answer a signer who asks for their data or for its erasure.
+Your install carries your organization's name, not SignuDoc's. In Settings, link your own terms and privacy policy (without a privacy link, signers see a notice built from your settings at `/signer-privacy`; check it), keep the support address you gave at setup pointed at a mailbox someone reads, and choose how long finished documents are kept. An administrator can also delete a finished envelope by hand, from its page; the deletion is recorded in the install's audit log (Settings, Organization, "Site audit trail"), with the document's fingerprints and the reason given. Under GDPR your organization is the controller; Settings, Organization has the tools to answer a signer who asks for their data or for its erasure.
 
 ## FDA 21 CFR Part 11
 

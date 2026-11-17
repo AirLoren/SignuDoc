@@ -37,6 +37,8 @@ import {
 import { getSignerPalette } from "./signer-palette";
 
 type EnvelopeDetailShellProps = {
+  /** An administrator may delete a finished envelope. */
+  canDeleteFinished?: boolean;
   envelopeId: string;
   initialState?: "error" | "not-found";
   record?: EnvelopeDetailData;
@@ -75,6 +77,7 @@ type ModalState =
   | "copy-draft"
   | "correct-signer"
   | "delete-draft"
+  | "delete-finished"
   | "save-template"
   | "void-envelope"
   | null;
@@ -124,6 +127,7 @@ const timelineToneClasses: Record<TimelineTone, string> = {
 };
 
 export function EnvelopeDetailShell({
+  canDeleteFinished = false,
   envelopeId,
   initialState,
   record,
@@ -135,6 +139,8 @@ export function EnvelopeDetailShell({
   const [isCopyingDraft, setIsCopyingDraft] = useState(false);
   const [isCorrectingSigner, setIsCorrectingSigner] = useState(false);
   const [isDeletingDraft, setIsDeletingDraft] = useState(false);
+  const [isDeletingFinished, setIsDeletingFinished] = useState(false);
+  const [deleteReason, setDeleteReason] = useState("");
   const [isSendingReminder, setIsSendingReminder] = useState(false);
   const [isVoidingEnvelope, setIsVoidingEnvelope] = useState(false);
   const [correctingSigner, setCorrectingSigner] =
@@ -413,6 +419,32 @@ export function EnvelopeDetailShell({
     }
   }
 
+  async function handleConfirmDeleteFinished() {
+    setActionError(null);
+    setIsDeletingFinished(true);
+
+    try {
+      const response = await fetch(`/api/envelopes/${envelopeId}/delete`, {
+        body: JSON.stringify({ reason: deleteReason }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        error?: string;
+        redirectPath?: string;
+      } | null;
+
+      if (!response.ok) {
+        setActionError(payload?.error ?? "Unable to delete this envelope.");
+        return;
+      }
+
+      window.location.assign(payload?.redirectPath ?? "/dashboard");
+    } finally {
+      setIsDeletingFinished(false);
+    }
+  }
+
   async function handleConfirmVoidEnvelope() {
     setActionError(null);
     setIsVoidingEnvelope(true);
@@ -583,6 +615,21 @@ export function EnvelopeDetailShell({
                   Export audit trail
                 </ShellButton>
               </>
+            ) : null}
+
+            {canDeleteFinished &&
+            (activeRecord.status === "completed" ||
+              activeRecord.status === "declined" ||
+              activeRecord.status === "voided") ? (
+              <ShellButton
+                onClick={() => {
+                  setActionError(null);
+                  setActiveModal("delete-finished");
+                }}
+                variant="secondary"
+              >
+                Delete envelope
+              </ShellButton>
             ) : null}
           </div>
         </div>
@@ -908,6 +955,39 @@ export function EnvelopeDetailShell({
           processing={isDeletingDraft}
           title="Delete this draft?"
         />
+      ) : null}
+
+      {activeModal === "delete-finished" ? (
+        <ConfirmationDialog
+          confirmDisabled={record.part11 && deleteReason.trim().length === 0}
+          confirmLabel="Delete envelope"
+          description={[
+            "This permanently deletes the envelope, its signed PDF, its certificate and its audit trail. Download links already sent to signers stop working.",
+            "The install's audit log keeps a record of the deletion, with the document's fingerprints.",
+            "This action cannot be undone.",
+          ]}
+          errorMessage={actionError}
+          onCancel={() => setActiveModal(null)}
+          onConfirm={handleConfirmDeleteFinished}
+          processing={isDeletingFinished}
+          title="Delete this envelope?"
+        >
+          <label className="grid gap-2 text-sm">
+            <span className="text-[0.8125rem] font-semibold text-(--secondary)">
+              {record.part11 ? "Reason (required)" : "Reason (optional)"}
+            </span>
+            <Textarea
+              disabled={isDeletingFinished}
+              maxLength={1000}
+              onChange={(event) => setDeleteReason(event.target.value)}
+              rows={3}
+              value={deleteReason}
+            />
+            <span className="text-xs leading-5 text-(--tertiary)">
+              Kept in the install&apos;s audit log.
+            </span>
+          </label>
+        </ConfirmationDialog>
       ) : null}
 
       {activeModal === "void-envelope" ? (
