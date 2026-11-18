@@ -769,6 +769,13 @@ async function listFinishedEnvelopesToHandle(
         -- Part 11 records are kept for as long as the rules that apply to
         -- them say, never by this timer.
         AND NOT e.part11
+        -- An administrator's scheduled deletion has its own notice and
+        -- wait, which this timer must not cut short.
+        AND NOT EXISTS (
+          SELECT 1
+          FROM scheduled_envelope_deletions s
+          WHERE s.envelope_id = e.id AND s.cancelled_at IS NULL
+        )
         AND (
           (
             e.retention_warned_at IS NULL
