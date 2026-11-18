@@ -405,19 +405,32 @@ function buildCertificateAuditEvents(input: {
   envelope: EnvelopeRecord;
   terminalTimestamp: number;
 }): AuditEventRecord[] {
-  const baseAuditEvents =
-    input.envelope.status === "completed"
-      ? stripCompletedAuditEvents(input.auditEvents)
-      : input.auditEvents;
-  const terminalAuditEvents =
-    input.envelope.status === "completed"
-      ? [buildCompletedAuditEvent(input.envelope.id, input.terminalTimestamp)]
-      : [];
+  // The rows come in the order they were recorded: the audit query reads
+  // them by the chain's sequence, and a caller adds the event it is about to
+  // record at the end. They are printed in that order and never re-sorted.
+  // created_at is in whole seconds and ids are random, so sorting by time and
+  // then id would shuffle events from the same second (issue #97).
+  if (input.envelope.status !== "completed") {
+    return [...input.auditEvents];
+  }
 
-  return [...baseAuditEvents, ...terminalAuditEvents].sort(
-    (left, right) =>
-      left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+  // A completed envelope shows one completed row. A recorded one keeps its
+  // place, so events recorded after it stay after it. Before it is recorded,
+  // as when the last signature seals the envelope, it goes last.
+  const recordedCompletion = input.auditEvents.find(
+    (event) => event.event === "completed",
   );
+
+  if (recordedCompletion) {
+    return input.auditEvents.filter(
+      (event) => event.event !== "completed" || event === recordedCompletion,
+    );
+  }
+
+  return [
+    ...input.auditEvents,
+    buildCompletedAuditEvent(input.envelope.id, input.terminalTimestamp),
+  ];
 }
 
 export async function stampFieldValue(
