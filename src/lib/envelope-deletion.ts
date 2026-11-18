@@ -722,38 +722,40 @@ const CANCELLED_KEPT_SECONDS = DAY_IN_SECONDS;
 const CANCELLED_GIVE_UP_SECONDS = 30 * DAY_IN_SECONDS;
 
 /**
- * Claims a notice the row was read as owing, if it is still owed as things
- * are now: a request rescheduled or cancelled since the list was read is
- * owed something else, or nothing. The attempt is recorded either way it
- * ends, so a notice that keeps failing goes behind the others next time.
+ * Locks the request for a notice the row was read as owing, if it is still
+ * owed as things are now: a request rescheduled or cancelled since the list
+ * was read is owed something else, or nothing. The lock is held while the
+ * email goes out, so a reschedule or cancellation waits for it and its own
+ * email comes after.
  */
-async function claimOwedNotice(
+async function lockOwedNotice(
   row: PendingNoticeRow,
-  now: number,
-  database: DbExecutor,
+  tx: DbExecutor,
 ): Promise<boolean> {
   const result =
     row.cancelledAt === null
-      ? await database.query(
+      ? await tx.query(
           `
-            UPDATE scheduled_envelope_deletions
-            SET last_attempt_at = $3
+            SELECT 1
+            FROM scheduled_envelope_deletions
             WHERE envelope_id = $1
               AND requested_at = $2
               AND cancelled_at IS NULL
               AND sender_notified_at IS NULL
+            FOR UPDATE
           `,
-          [row.envelopeId, row.requestedAt, now],
+          [row.envelopeId, row.requestedAt],
         )
-      : await database.query(
+      : await tx.query(
           `
-            UPDATE scheduled_envelope_deletions
-            SET last_attempt_at = $3
+            SELECT 1
+            FROM scheduled_envelope_deletions
             WHERE envelope_id = $1
               AND cancelled_at = $2
               AND cancel_notified_at IS NULL
+            FOR UPDATE
           `,
-          [row.envelopeId, row.cancelledAt, now],
+          [row.envelopeId, row.cancelledAt],
         );
 
   return result.rowCount === 1;
@@ -816,28 +818,40 @@ export async function runScheduledEnvelopeDeletions({
 
   for (const row of owed) {
     try {
-      if (!(await claimOwedNotice(row, now, database))) {
-        continue;
+      // Recorded first, and kept if the email fails, so a notice that
+      // keeps failing goes behind the others next time.
+      await database.query(
+        `UPDATE scheduled_envelope_deletions SET last_attempt_at = $2 WHERE envelope_id = $1`,
+        [row.envelopeId, now],
+      );
+
+      const emailService = (service ??= createEmailService());
+      const notified = await withTransaction(async (tx) => {
+        if (!(await lockOwedNotice(row, tx))) {
+          return false;
+        }
+
+        if (row.cancelledAt === null) {
+          await sendDeletionNotice(row, now, tx, emailService);
+        } else {
+          await sendCancellationNotice(
+            {
+              ...row,
+              cancelledAt: row.cancelledAt,
+              cancelledByEmail: row.cancelledByEmail ?? "",
+            },
+            now,
+            tx,
+            emailService,
+          );
+        }
+
+        return true;
+      }, database);
+
+      if (notified) {
+        summary.noticesSent += 1;
       }
-
-      service ??= createEmailService();
-
-      if (row.cancelledAt === null) {
-        await sendDeletionNotice(row, now, database, service);
-      } else {
-        await sendCancellationNotice(
-          {
-            ...row,
-            cancelledAt: row.cancelledAt,
-            cancelledByEmail: row.cancelledByEmail ?? "",
-          },
-          now,
-          database,
-          service,
-        );
-      }
-
-      summary.noticesSent += 1;
     } catch (error) {
       summary.noticeFailures.push(row.envelopeId);
       console.error(

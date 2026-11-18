@@ -755,6 +755,57 @@ test("a cancellation email still owed is not sent once the deletion is scheduled
   assert.equal(emailsTo(second.owner.email).length, 2);
 });
 
+test("a deletion scheduled again while its cancellation email is going out waits, so its own notice comes after", async () => {
+  sent = [];
+  const admin = await createUser("admin");
+  const owner = await createUser("user");
+  const envelope = await createEnvelope(owner.userId, { status: "completed" });
+  const start = 1_100_000_000;
+
+  await scheduleAs(admin, envelope.envelopeId, undefined, { now: start });
+  await quietly(() =>
+    cancelAs(admin, envelope.envelopeId, {
+      emailService: createOutbox(true),
+      now: start + 1,
+    }),
+  );
+
+  // As the daily run sends the cancellation, an administrator schedules it
+  // again; that waits for the email, then sends its own.
+  const outbox = createOutbox();
+  let rescheduling: Promise<unknown> | undefined;
+  const reschedulingOutbox: EmailService = {
+    ...outbox,
+    async send(message, options) {
+      if (!rescheduling && message.to === owner.email) {
+        rescheduling = scheduleAs(admin, envelope.envelopeId, "Again.", {
+          now: start + DAY,
+        });
+        await delay(300);
+      }
+
+      return outbox.send(message, options);
+    },
+  };
+
+  await runDaily(start + DAY, reschedulingOutbox);
+  await rescheduling;
+
+  assert.deepEqual(
+    emailsTo(owner.email)
+      .map((message) => message.subject)
+      .slice(1),
+    [
+      '"Lease" will not be deleted',
+      `"Lease" will be deleted on ${new Date((start + DAY + WAIT) * 1000).toISOString().slice(0, 10)}`,
+    ],
+  );
+  assert.equal(
+    (await getScheduledEnvelopeDeletion(envelope.envelopeId, database))?.reason,
+    "Again.",
+  );
+});
+
 test("notices that keep failing go behind the others, so later senders are still told", async () => {
   sent = [];
   const admin = await createUser("admin");
