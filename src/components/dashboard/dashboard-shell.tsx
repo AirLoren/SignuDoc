@@ -9,6 +9,7 @@ import {
   DashboardDocumentsPanel,
   dashboardStatusFilterMap,
   type DashboardFilter,
+  type DashboardPagination,
   type DashboardShellState,
   type DashboardView,
 } from "@/components/dashboard/dashboard-documents-surface";
@@ -17,17 +18,22 @@ import { ShellButton } from "@/components/shared/form-shell";
 
 type DashboardShellProps = {
   envelopes?: readonly DashboardEnvelopeListItem[];
+  /** The search the page was loaded with, run on the server. */
+  initialSearch?: string;
   initialState?: DashboardShellState;
+  pagination?: DashboardPagination;
   /** For an administrator: their own envelopes, or everyone's. */
   view?: DashboardView;
 };
 
 export function DashboardShell({
   envelopes: providedEnvelopes,
+  initialSearch = "",
   initialState = "default",
+  pagination,
   view,
 }: DashboardShellProps) {
-  const [searchValue, setSearchValue] = useState("");
+  const [searchValue, setSearchValue] = useState(initialSearch);
   const [selectedFilter, setSelectedFilter] = useState<DashboardFilter>("All");
 
   const envelopes =
@@ -43,6 +49,8 @@ export function DashboardShell({
     const matchesSearch =
       normalizedSearchValue.length === 0 ||
       envelope.title.toLowerCase().includes(normalizedSearchValue) ||
+      (envelope.senderLabel?.toLowerCase().includes(normalizedSearchValue) ??
+        false) ||
       envelope.searchableEmails.some((email) =>
         email.toLowerCase().includes(normalizedSearchValue),
       );
@@ -60,6 +68,14 @@ export function DashboardShell({
   }
 
   function handleResetFilters() {
+    if (initialSearch || pagination?.newerHref) {
+      // The list itself was searched, or is a later page: load the start.
+      window.location.assign(
+        view === "all" ? "/dashboard?view=all" : "/dashboard",
+      );
+      return;
+    }
+
     setSearchValue("");
     setSelectedFilter("All");
   }
@@ -87,7 +103,9 @@ export function DashboardShell({
           onReset={handleResetFilters}
           onRetry={handleRetry}
           onSearchChange={handleSearchChange}
+          pagination={pagination}
           searchValue={searchValue}
+          view={view}
           selectedFilter={selectedFilter}
         />
       )}

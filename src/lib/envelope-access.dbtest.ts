@@ -113,7 +113,9 @@ test("an administrator's list of every envelope names each sender", async () => 
   const secondEnvelope = await createEnvelope(second.userId, "Second lease");
 
   const all = await listAllEnvelopesForAdmin({ limit: 100 }, database);
-  const byId = new Map(all.map((envelope) => [envelope.id, envelope]));
+  const byId = new Map(
+    all.envelopes.map((envelope) => [envelope.id, envelope]),
+  );
 
   assert.equal(
     byId.get(firstEnvelope)?.senderLabel,
@@ -121,13 +123,71 @@ test("an administrator's list of every envelope names each sender", async () => 
   );
   // No name: the address alone.
   assert.equal(byId.get(secondEnvelope)?.senderLabel, second.email);
+  // The sender's address is searchable on the page too.
+  assert.ok(byId.get(firstEnvelope)?.searchableEmails.includes(first.email));
 
   // A sender's own list stays theirs, without the sender on each card.
   const own = await listEnvelopesForUser(first.userId, {}, database);
 
   assert.deepEqual(
-    own.map((envelope) => envelope.id),
+    own.envelopes.map((envelope) => envelope.id),
     [firstEnvelope],
   );
-  assert.equal(own[0]?.senderLabel, undefined);
+  assert.equal(own.envelopes[0]?.senderLabel, undefined);
+  assert.equal(own.hasMore, false);
+});
+
+test("every envelope can be reached, a page at a time", async () => {
+  const sender = await createUser("user", "Paige Pager");
+  const ids: string[] = [];
+
+  for (let index = 0; index < 5; index += 1) {
+    ids.push(await createEnvelope(sender.userId, `Page test ${String(index)}`));
+  }
+
+  const seen: string[] = [];
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const result = await listEnvelopesForUser(
+      sender.userId,
+      { limit: 2, page },
+      database,
+    );
+
+    assert.ok(result.envelopes.length <= 2);
+    seen.push(...result.envelopes.map((envelope) => envelope.id));
+    hasMore = result.hasMore;
+    page += 1;
+  }
+
+  assert.deepEqual([...seen].sort(), [...ids].sort());
+  assert.equal(page - 1, 3);
+});
+
+test("searching every envelope finds a sender by name or address", async () => {
+  const sender = await createUser("user", "Quentin Quarry");
+  const envelopeId = await createEnvelope(sender.userId, "Unrelated title");
+
+  for (const search of ["quentin quarry", sender.email.slice(0, 12)]) {
+    const result = await listAllEnvelopesForAdmin(
+      { limit: 100, search },
+      database,
+    );
+
+    assert.ok(
+      result.envelopes.some((envelope) => envelope.id === envelopeId),
+      `expected "${search}" to find the envelope`,
+    );
+  }
+
+  // A sender's own search does not look at the sender.
+  const own = await listEnvelopesForUser(
+    sender.userId,
+    { search: "quentin" },
+    database,
+  );
+
+  assert.deepEqual(own.envelopes, []);
 });

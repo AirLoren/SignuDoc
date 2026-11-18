@@ -1378,6 +1378,16 @@ test("a signer who declines is told the decline was recorded, not that the link 
     const card = page.getByRole("link").filter({ hasText: "Terms to decline" });
 
     await expect(card).toContainText(senderLabel);
+
+    // Enter searches every envelope, the sender's address included.
+    const search = page.getByRole("searchbox", {
+      name: "Search by title or email...",
+    });
+
+    await search.fill(memberEmail);
+    await search.press("Enter");
+    await expect(page).toHaveURL(/\/dashboard\?view=all&q=/);
+    await expect(card).toBeVisible();
     await card.click();
     await expect(page).toHaveURL(new RegExp(`/envelopes/${envelopeId}$`));
     await expect(page.getByText(`Sent by ${senderLabel}`)).toBeVisible();

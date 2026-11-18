@@ -1785,11 +1785,18 @@ function buildDetailSignerMetaLabel(
   return `${pluralize(assignedFieldCount, "field")} assigned`;
 }
 
+/** One page of a dashboard list, newest first. */
+export type DashboardEnvelopePage = {
+  envelopes: DashboardEnvelopeListItem[];
+  /** There are older envelopes on the next page. */
+  hasMore: boolean;
+};
+
 export async function listEnvelopesForUser(
   userId: string,
   filters: Partial<EnvelopeListFilters> = {},
   database: DbExecutor = getDb(),
-): Promise<DashboardEnvelopeListItem[]> {
+): Promise<DashboardEnvelopePage> {
   return listEnvelopes(userId, filters, database);
 }
 
@@ -1800,7 +1807,7 @@ export async function listEnvelopesForUser(
 export async function listAllEnvelopesForAdmin(
   filters: Partial<EnvelopeListFilters> = {},
   database: DbExecutor = getDb(),
-): Promise<DashboardEnvelopeListItem[]> {
+): Promise<DashboardEnvelopePage> {
   return listEnvelopes(null, filters, database);
 }
 
@@ -1808,7 +1815,7 @@ async function listEnvelopes(
   ownerUserId: string | null,
   filters: Partial<EnvelopeListFilters>,
   database: DbExecutor,
-): Promise<DashboardEnvelopeListItem[]> {
+): Promise<DashboardEnvelopePage> {
   const parsedFilters = envelopeListFiltersSchema.parse(filters);
   const values: unknown[] = ownerUserId === null ? [] : [ownerUserId];
   const clauses = ownerUserId === null ? ["TRUE"] : ["user_id = $1"];
@@ -1830,7 +1837,21 @@ async function listEnvelopes(
           FROM signers
           WHERE signers.envelope_id = envelopes.id
             AND lower(signers.email) LIKE ${searchPlaceholder} ESCAPE '\\'
-        )
+        )${
+          // Across the install, the sender too.
+          ownerUserId === null
+            ? `
+        OR EXISTS (
+          SELECT 1
+          FROM public."user" sender
+          WHERE sender.id = envelopes.user_id
+            AND (
+              lower(sender.email) LIKE ${searchPlaceholder} ESCAPE '\\'
+              OR lower(sender.name) LIKE ${searchPlaceholder} ESCAPE '\\'
+            )
+        )`
+            : ""
+        }
       )`,
     );
     values.push(`%${escapeLike(parsedFilters.search.toLowerCase())}%`);
@@ -1838,7 +1859,8 @@ async function listEnvelopes(
   }
 
   const limitPlaceholder = `$${String(nextParamIndex)}`;
-  values.push(parsedFilters.limit);
+  // One more than a page, to tell whether there is a next one.
+  values.push(parsedFilters.limit + 1);
   nextParamIndex += 1;
   const offsetPlaceholder = `$${String(nextParamIndex)}`;
   values.push((parsedFilters.page - 1) * parsedFilters.limit);
@@ -1877,7 +1899,8 @@ async function listEnvelopes(
     values,
   );
 
-  const envelopes = rows.map(mapEnvelopeRow);
+  const hasMore = rows.length > parsedFilters.limit;
+  const envelopes = rows.slice(0, parsedFilters.limit).map(mapEnvelopeRow);
   const envelopeIds = envelopes.map((envelope) => envelope.id);
   const [signersByEnvelope, fieldsByEnvelope, copyRecipientsByEnvelope] =
     await Promise.all([
@@ -1893,7 +1916,7 @@ async function listEnvelopes(
         )
       : null;
 
-  return envelopes.map((envelope) => {
+  const items = envelopes.map((envelope) => {
     const signers = signersByEnvelope.get(envelope.id) ?? [];
     const fields = fieldsByEnvelope.get(envelope.id) ?? [];
     const sender = sendersById?.get(envelope.userId);
@@ -1917,12 +1940,16 @@ async function listEnvelopes(
       searchableEmails: [
         ...signers,
         ...(copyRecipientsByEnvelope.get(envelope.id) ?? []),
+        // Across the install, the sender too.
+        ...(sender ? [sender] : []),
       ].map((recipient) => recipient.email),
       status: envelope.status,
       statusLabel: buildDashboardStatusLabel(envelope, signers),
       title: envelope.title,
     };
   });
+
+  return { envelopes: items, hasMore };
 }
 
 type SenderRow = { email: string; id: string; name: string | null };

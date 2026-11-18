@@ -39,8 +39,8 @@ const privateNoStore = { "cache-control": "private, no-store" };
 const privateRevalidate = { "cache-control": "private, no-cache" };
 
 // The picture of a document's first page that the dashboard shows. The
-// account that owns the envelope can read and write it; an administrator,
-// who sees every envelope, can read it.
+// account that owns the envelope can read and write it, and so can an
+// administrator, who sees every envelope.
 export async function GET(
   request: Request,
   context: EnvelopeThumbnailRouteContext,
@@ -55,8 +55,7 @@ export async function GET(
   const { id } = await context.params;
 
   try {
-    // Its sender's, or any envelope for an administrator. Saving a picture
-    // (POST) stays with the sender.
+    // Its sender's, or any envelope for an administrator.
     const access = await resolveEnvelopeViewerAccess(
       session.user.id,
       id,
@@ -165,9 +164,20 @@ export async function PUT(
       );
     }
 
-    await saveEnvelopeThumbnailForUser(session.user.id, id, body, {
-      database: getDb(),
-    });
+    // An administrator's browser draws a missing picture too, and keeps it
+    // for everyone, so it is not drawn again on every visit.
+    const access = await resolveEnvelopeViewerAccess(
+      session.user.id,
+      id,
+      getDb(),
+    );
+
+    await saveEnvelopeThumbnailForUser(
+      access?.ownerUserId ?? session.user.id,
+      id,
+      body,
+      { database: getDb() },
+    );
 
     return new Response(null, { headers: privateNoStore, status: 204 });
   } catch (error) {
