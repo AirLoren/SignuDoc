@@ -1341,7 +1341,7 @@ test("a signer who declines is told the decline was recorded, not that the link 
     ).toBeVisible();
   });
 
-  await test.step("an administrator sees another member's envelope and deletes it for good", async () => {
+  await test.step("an administrator sees another member's envelope and schedules its deletion", async () => {
     // The envelope becomes a plain member's, as if they had sent it.
     const memberId = `member-${runId}`;
     const memberEmail = `member+${runId}@example.com`;
@@ -1402,23 +1402,62 @@ test("a signer who declines is told the decline was recorded, not that the link 
     await page.getByRole("button", { name: "Download certificate" }).click();
     expect((await download).suggestedFilename()).toMatch(/\.pdf$/);
 
-    await page.getByRole("button", { name: "Delete envelope" }).click();
+    // Nothing goes at once: the deletion is scheduled, and the sender is
+    // emailed a link to download it.
+    async function scheduleDeletion(reason: string) {
+      await page.getByRole("button", { name: "Delete envelope" }).click();
 
-    const confirm = page.getByRole("dialog", {
-      name: "Delete this envelope?",
+      const confirm = page.getByRole("dialog", {
+        name: "Schedule this envelope for deletion?",
+      });
+
+      await confirm.getByLabel("Reason (optional)").fill(reason);
+      await confirm.getByRole("button", { name: "Schedule deletion" }).click();
+      await expect(page.getByText(/Scheduled to be deleted on/)).toBeVisible();
+      await expect(page.getByText(`Reason: ${reason}`)).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Delete envelope" }),
+      ).toHaveCount(0);
+    }
+
+    await scheduleDeletion("Changed my mind.");
+
+    const notice = await waitForEmail({
+      template: "deletion_notice",
+      to: memberEmail,
     });
 
-    await confirm.getByLabel("Reason (optional)").fill("Never agreed.");
-    await confirm.getByRole("button", { name: "Delete envelope" }).click();
-    await expect(page).toHaveURL(/\/dashboard\?view=all$/);
+    expect(notice.subject).toMatch(/^"Terms to decline" will be deleted on /);
+    expect(notice.text).toContain(`/envelopes/${envelopeId}`);
 
-    await page.goto(`/envelopes/${envelopeId}`);
+    // Any administrator can cancel until then; the sender is told.
+    await page.getByRole("button", { name: "Cancel deletion" }).click();
+    await page
+      .getByRole("dialog", { name: "Cancel this deletion?" })
+      .getByRole("button", { name: "Cancel deletion" })
+      .click();
+    await expect(page.getByText(/Scheduled to be deleted on/)).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const latest = await waitForEmail({
+          template: "deletion_notice",
+          to: memberEmail,
+        });
+
+        return latest.subject;
+      })
+      .toBe('"Terms to decline" will not be deleted');
+
+    await scheduleDeletion("Never agreed.");
+
+    // The envelope itself stays until the wait is over.
+    await page.reload();
     await expect(
-      page.getByRole("heading", { name: "This envelope is unavailable" }),
+      page.getByRole("heading", { name: "Terms to decline" }),
     ).toBeVisible();
 
-    // The download and the deletion stay on record in the install's audit
-    // trail, with whose envelope it was.
+    // The download, the request and its cancellation stay on record in the
+    // install's audit trail, with whose envelope it was.
     const audit = await page.request.get("/api/admin/audit");
     const { events } = (await audit.json()) as {
       events: { event: string; metadata: Record<string, unknown> | null }[];
@@ -1433,13 +1472,18 @@ test("a signer who declines is told the decline was recorded, not that the link 
       ownerEmail: memberEmail,
     });
     expect(
-      events.find((event) => event.event === "envelope_deleted")?.metadata,
+      events.find((event) => event.event === "envelope_deletion_scheduled")
+        ?.metadata,
     ).toMatchObject({
       envelopeId,
       ownerEmail: memberEmail,
       reason: "Never agreed.",
       status: "declined",
     });
+    expect(
+      events.find((event) => event.event === "envelope_deletion_cancelled")
+        ?.metadata,
+    ).toMatchObject({ envelopeId, ownerEmail: memberEmail });
   });
 });
 

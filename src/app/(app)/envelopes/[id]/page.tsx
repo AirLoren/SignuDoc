@@ -1,4 +1,7 @@
-import { EnvelopeDetailShell } from "@/components/envelopes/envelope-detail-shell";
+import {
+  EnvelopeDetailShell,
+  type EnvelopeDeletionNotice,
+} from "@/components/envelopes/envelope-detail-shell";
 import { isAdminUser } from "@/lib/auth/admin";
 import { getAuthSession } from "@/lib/auth/server";
 import { getDb } from "@/lib/db/connection";
@@ -6,7 +9,15 @@ import {
   formatEnvelopeOwner,
   resolveEnvelopeViewerAccess,
 } from "@/lib/envelope-access";
+import { getScheduledEnvelopeDeletion } from "@/lib/envelope-deletion";
 import { getEnvelopeDetailDataForUser } from "@/lib/envelopes";
+
+const deletionDateFormatter = new Intl.DateTimeFormat("en-US", {
+  day: "numeric",
+  month: "long",
+  timeZone: "UTC",
+  year: "numeric",
+});
 
 type EnvelopeDetailPageProps = {
   params: Promise<{
@@ -24,6 +35,7 @@ export default async function EnvelopeDetailPage({
   let initialState: "error" | "not-found" | undefined;
   let canDeleteFinished = false;
   let ownerLabel: string | undefined;
+  let scheduledDeletion: EnvelopeDeletionNotice | undefined;
 
   try {
     const session = await getAuthSession();
@@ -43,6 +55,21 @@ export default async function EnvelopeDetailPage({
       detailRecord !== null &&
       session !== null &&
       (await isAdminUser(session.user.id, getDb()));
+
+    const scheduled = detailRecord
+      ? await getScheduledEnvelopeDeletion(id, getDb())
+      : null;
+
+    scheduledDeletion = scheduled
+      ? {
+          deleteOnLabel: deletionDateFormatter.format(
+            new Date(scheduled.deleteAfter * 1000),
+          ),
+          // Why is for administrators; the sender is told who asked.
+          reason: canDeleteFinished ? scheduled.reason : null,
+          requestedByEmail: scheduled.requestedByEmail,
+        }
+      : undefined;
   } catch {
     initialState = "error";
   }
@@ -55,6 +82,7 @@ export default async function EnvelopeDetailPage({
       key={id}
       ownerLabel={ownerLabel}
       record={detailRecord ?? undefined}
+      scheduledDeletion={scheduledDeletion}
     />
   );
 }

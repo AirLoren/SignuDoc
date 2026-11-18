@@ -8,8 +8,8 @@ import { openTestDatabase } from "./db/test-database.ts";
 import { resolveEnvelopeViewerAccess } from "./envelope-access.ts";
 import { listAllEnvelopesForAdmin, listEnvelopesForUser } from "./envelopes.ts";
 
-// Who can see an envelope: its sender, and any administrator. Run with
-// `npm run test:db`.
+// Who can see an envelope: its sender, and any administrator once it has
+// been sent. Run with `npm run test:db`.
 
 let database: pg.Pool;
 const createdUsers: string[] = [];
@@ -38,22 +38,28 @@ async function createUser(role: "admin" | "user", name: string) {
   return { email, name, userId: id };
 }
 
-async function createEnvelope(userId: string, title: string) {
+async function createEnvelope(
+  userId: string,
+  title: string,
+  status: "draft" | "sent" = "sent",
+) {
   const envelopeId = randomUUID();
 
   await database.query(
     `
       insert into envelopes (
         id, user_id, title, status, source_pdf_key, source_pdf_filename,
-        source_pdf_size_bytes, page_count, source_pdf_hash
-      ) values ($1, $2, $3, 'draft', $4, 'doc.pdf', 4, 1, $5)
+        source_pdf_size_bytes, page_count, source_pdf_hash, sent_at
+      ) values ($1, $2, $3, $4, $5, 'doc.pdf', 4, 1, $6, $7)
     `,
     [
       envelopeId,
       userId,
       title,
+      status,
       `users/${userId}/envelopes/${envelopeId}/source.pdf`,
       "a".repeat(64),
+      status === "draft" ? null : Math.floor(Date.now() / 1000),
     ],
   );
 
@@ -112,7 +118,11 @@ test("an administrator's list of every envelope names each sender", async () => 
   const firstEnvelope = await createEnvelope(first.userId, "First lease");
   const secondEnvelope = await createEnvelope(second.userId, "Second lease");
 
-  const all = await listAllEnvelopesForAdmin({ limit: 100 }, database);
+  const all = await listAllEnvelopesForAdmin(
+    second.userId,
+    { limit: 100 },
+    database,
+  );
   const byId = new Map(
     all.envelopes.map((envelope) => [envelope.id, envelope]),
   );
@@ -172,6 +182,7 @@ test("searching every envelope finds a sender by name or address", async () => {
 
   for (const search of ["quentin quarry", sender.email.slice(0, 12)]) {
     const result = await listAllEnvelopesForAdmin(
+      sender.userId,
       { limit: 100, search },
       database,
     );
@@ -190,4 +201,41 @@ test("searching every envelope finds a sender by name or address", async () => {
   );
 
   assert.deepEqual(own.envelopes, []);
+});
+
+test("another member's draft stays theirs: an administrator neither lists nor opens it", async () => {
+  const sender = await createUser("user", "Dana Drafter");
+  const admin = await createUser("admin", "Avery Admin");
+  const draftId = await createEnvelope(sender.userId, "Unsent lease", "draft");
+  const sentId = await createEnvelope(sender.userId, "Sent lease");
+  const ownDraftId = await createEnvelope(admin.userId, "Own draft", "draft");
+
+  assert.equal(
+    await resolveEnvelopeViewerAccess(admin.userId, draftId, database),
+    null,
+  );
+  assert.ok(await resolveEnvelopeViewerAccess(admin.userId, sentId, database));
+  // The sender still sees it.
+  assert.ok(
+    await resolveEnvelopeViewerAccess(sender.userId, draftId, database),
+  );
+
+  const all = await listAllEnvelopesForAdmin(
+    admin.userId,
+    { limit: 100, search: "lease" },
+    database,
+  );
+  const ids = all.envelopes.map((envelope) => envelope.id);
+
+  assert.ok(ids.includes(sentId));
+  assert.ok(!ids.includes(draftId));
+
+  // An administrator's own drafts are still in everyone's list.
+  const own = await listAllEnvelopesForAdmin(
+    admin.userId,
+    { limit: 100, search: "own draft" },
+    database,
+  );
+
+  assert.ok(own.envelopes.some((envelope) => envelope.id === ownDraftId));
 });
