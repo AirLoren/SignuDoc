@@ -650,6 +650,21 @@ export function SigningLiveShell({
           continue;
         }
 
+        const isStillCurrent = () =>
+          (latestTextValuesRef.current[field.id] ?? "").trim() === value;
+        // A check that could not be made leaves no warning, so it never
+        // keeps Finish off: signing makes the same check when they finish.
+        // The answer is checked again the next time it changes.
+        const giveUp = () => {
+          if (checkedAnswersRef.current[field.id] === value) {
+            delete checkedAnswersRef.current[field.id];
+          }
+
+          if (isStillCurrent()) {
+            setTooLongAnswers((current) => withoutKey(current, field.id));
+          }
+        };
+
         void fetch(record.fieldFitUrl, {
           body: JSON.stringify({ fieldId: field.id, value }),
           headers: { "content-type": "application/json" },
@@ -661,12 +676,13 @@ export function SigningLiveShell({
               maxCharacters?: number;
             } | null;
 
+            if (!response.ok || !payload) {
+              giveUp();
+              return;
+            }
+
             // An answer changed since is checked again on its own.
-            if (
-              !response.ok ||
-              !payload ||
-              (latestTextValuesRef.current[field.id] ?? "").trim() !== value
-            ) {
+            if (!isStillCurrent()) {
               return;
             }
 
@@ -677,9 +693,7 @@ export function SigningLiveShell({
                 : withoutKey(current, field.id),
             );
           })
-          .catch(() => {
-            // Signing checks it again when the signer finishes.
-          });
+          .catch(giveUp);
       }
     }, 400);
 
