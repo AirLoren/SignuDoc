@@ -1,9 +1,10 @@
 import { type DbExecutor, getDb, queryOne } from "./db/connection.ts";
 
 // Whose envelope a signed-in account is looking at. Its sender sees it, as
-// before; an administrator sees every envelope in the install, to read,
-// download and, once it is finished, delete. Everything else that changes
-// an envelope (sending, voiding, reminders, editing) stays with its sender.
+// before; an administrator sees every envelope in the install that has
+// been sent, to read, download and, once it is finished, delete. A draft
+// stays its sender's own until it is sent. Everything else that changes an
+// envelope (sending, voiding, reminders, editing) stays with its sender.
 
 export type EnvelopeViewerAccess = {
   ownerEmail: string;
@@ -17,6 +18,7 @@ type AccessRow = {
   ownerEmail: string;
   ownerName: string | null;
   ownerUserId: string;
+  status: string;
   viewerRole: string | null;
 };
 
@@ -37,6 +39,7 @@ export async function resolveEnvelopeViewerAccess(
         e.user_id AS "ownerUserId",
         owner.email AS "ownerEmail",
         owner.name AS "ownerName",
+        e.status,
         (SELECT role FROM public."user" WHERE id = $2) AS "viewerRole"
       FROM envelopes e
       JOIN public."user" owner ON owner.id = e.user_id
@@ -51,7 +54,9 @@ export async function resolveEnvelopeViewerAccess(
 
   const viewerIsOwner = row.ownerUserId === viewerUserId;
 
-  if (!viewerIsOwner && row.viewerRole !== "admin") {
+  // Someone else's envelope only for an administrator, and never their
+  // draft.
+  if (!viewerIsOwner && (row.viewerRole !== "admin" || row.status === "draft")) {
     return null;
   }
 

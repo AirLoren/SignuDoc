@@ -1802,23 +1802,30 @@ export async function listEnvelopesForUser(
 
 /**
  * Every envelope in the install, whoever sent it, each with its sender.
- * For an administrator: the caller checks the role.
+ * Other members' drafts are left out: a draft is its sender's own until it
+ * is sent. For an administrator: the caller checks the role.
  */
 export async function listAllEnvelopesForAdmin(
+  adminUserId: string,
   filters: Partial<EnvelopeListFilters> = {},
   database: DbExecutor = getDb(),
 ): Promise<DashboardEnvelopePage> {
-  return listEnvelopes(null, filters, database);
+  return listEnvelopes(null, filters, database, adminUserId);
 }
 
 async function listEnvelopes(
   ownerUserId: string | null,
   filters: Partial<EnvelopeListFilters>,
   database: DbExecutor,
+  adminUserId?: string,
 ): Promise<DashboardEnvelopePage> {
   const parsedFilters = envelopeListFiltersSchema.parse(filters);
-  const values: unknown[] = ownerUserId === null ? [] : [ownerUserId];
-  const clauses = ownerUserId === null ? ["TRUE"] : ["user_id = $1"];
+  const values: unknown[] =
+    ownerUserId === null ? [adminUserId ?? ""] : [ownerUserId];
+  const clauses =
+    ownerUserId === null
+      ? ["(status <> 'draft' OR user_id = $1)"]
+      : ["user_id = $1"];
   let nextParamIndex = values.length + 1;
 
   if (parsedFilters.status) {

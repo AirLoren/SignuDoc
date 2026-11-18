@@ -25,6 +25,8 @@ const EVENT_LABELS: Record<SystemAuditEvent["event"], string> = {
   account_deleted: "Account deleted",
   email_domain_changed: "Email domain changed",
   envelope_deleted: "Finished envelope deleted",
+  envelope_deletion_cancelled: "Envelope deletion cancelled",
+  envelope_deletion_scheduled: "Envelope deletion scheduled",
   envelope_file_downloaded: "Another member's file downloaded",
   identity_verification_revoked: "Identity confirmation taken back",
   identity_verified: "Identity confirmed",
@@ -100,6 +102,20 @@ function describeEvent(event: SystemAuditEvent): string {
       return [
         typeof metadata.title === "string" ? `"${metadata.title}"` : null,
         typeof metadata.status === "string" ? metadata.status : null,
+        typeof metadata.reason === "string" ? metadata.reason : null,
+        typeof metadata.ownerEmail === "string"
+          ? `sent by ${metadata.ownerEmail}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+    case "envelope_deletion_scheduled":
+    case "envelope_deletion_cancelled":
+      return [
+        typeof metadata.title === "string" ? `"${metadata.title}"` : null,
+        typeof metadata.deleteAfter === "number"
+          ? `${event.event === "envelope_deletion_scheduled" ? "to be deleted" : "was due"} on ${new Date(metadata.deleteAfter * 1000).toISOString().slice(0, 10)}`
+          : null,
         typeof metadata.reason === "string" ? metadata.reason : null,
         typeof metadata.ownerEmail === "string"
           ? `sent by ${metadata.ownerEmail}`

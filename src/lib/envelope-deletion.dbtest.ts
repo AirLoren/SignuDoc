@@ -9,13 +9,24 @@ import { after, before, test } from "node:test";
 import type pg from "pg";
 
 import { openTestDatabase } from "./db/test-database.ts";
-import { deleteFinishedEnvelope } from "./envelope-deletion.ts";
+import {
+  cancelEnvelopeDeletion,
+  deleteScheduledEnvelope,
+  ENVELOPE_DELETION_WAIT_DAYS,
+  getScheduledEnvelopeDeletion,
+  runScheduledEnvelopeDeletions,
+  scheduleEnvelopeDeletion,
+} from "./envelope-deletion.ts";
 import { EnvelopeMutationError } from "./envelopes.ts";
 import {
   deletePendingFiles,
   queueFileDeletions,
   runRetentionSweep,
 } from "./retention.ts";
+import type {
+  EmailService,
+  TransactionalEmailMessage,
+} from "./services/email.ts";
 import { getRecipientCertificateKey } from "./services/storage-keys.ts";
 import {
   createStorageService,
@@ -26,8 +37,9 @@ import {
   verifySystemAuditChain,
 } from "./services/system-audit.ts";
 
-// An administrator deleting a finished envelope by hand, against a real
-// Postgres. Run with `npm run test:db`.
+// An administrator scheduling a finished envelope's deletion, cancelling
+// it, and the daily cleanup deleting it once the wait is over, against a
+// real Postgres. Run with `npm run test:db`.
 
 const SOURCE_HASH = "a".repeat(64);
 const SIGNED_HASH = "b".repeat(64);
@@ -35,6 +47,8 @@ const EVIDENCE_HASH = "c".repeat(64);
 const RECIPIENT_EVIDENCE_HASH = "d".repeat(64);
 // The install audit trail's lock (services/system-audit.ts).
 const SYSTEM_AUDIT_LOCK_ID = 746108325;
+const DAY = 24 * 60 * 60;
+const WAIT = ENVELOPE_DELETION_WAIT_DAYS * DAY;
 
 let database: pg.Pool;
 let storageDir: string;
@@ -175,16 +189,59 @@ async function filesExist(keys: readonly string[]) {
   );
 }
 
-function deleteAs(
+let sent: TransactionalEmailMessage[] = [];
+
+function createOutbox(fail = false): EmailService {
+  return {
+    async send(message) {
+      if (fail) {
+        throw new Error("Email is down.");
+      }
+
+      sent.push(message);
+      return { accepted: [message.to], rejected: [] };
+    },
+    async sendBatch(messages) {
+      return Promise.all(messages.map((message) => this.send(message)));
+    },
+  };
+}
+
+function emailsTo(address: string) {
+  return sent.filter((message) => message.to === address);
+}
+
+function scheduleAs(
   actor: { email: string; userId: string },
   envelopeId: string,
-  reason?: string,
+  reason?: unknown,
+  { emailService = createOutbox(), now = Math.floor(Date.now() / 1000) } = {},
 ) {
-  return deleteFinishedEnvelope(
+  return scheduleEnvelopeDeletion(
     envelopeId,
     { actor, ipAddress: "203.0.113.9", reason, userAgent: "Test browser" },
-    { database, storageService },
+    { database, emailService, now },
   );
+}
+
+function cancelAs(actor: { email: string; userId: string }, envelopeId: string) {
+  return cancelEnvelopeDeletion(
+    envelopeId,
+    { actor, ipAddress: "203.0.113.9", userAgent: "Test browser" },
+    { database, emailService: createOutbox() },
+  );
+}
+
+function deleteWhenDue(
+  envelopeId: string,
+  now: number,
+  storage: StorageService = storageService,
+) {
+  return deleteScheduledEnvelope(envelopeId, {
+    database,
+    now,
+    storageService: storage,
+  });
 }
 
 function rejectsWith(statusCode: number) {
@@ -192,34 +249,64 @@ function rejectsWith(statusCode: number) {
     error instanceof EnvelopeMutationError && error.statusCode === statusCode;
 }
 
+async function latestEvent() {
+  const [event] = await listSystemAuditEvents({ limit: 1 }, database);
+
+  return event;
+}
+
 for (const status of ["completed", "declined", "voided"] as const) {
-  test(`an administrator deletes a ${status} envelope, its files go and the deletion is recorded`, async () => {
+  test(`a ${status} envelope is scheduled, waits ${String(ENVELOPE_DELETION_WAIT_DAYS)} days, then goes with its files, all on record`, async () => {
     const admin = await createUser("admin");
     const envelope = await createEnvelope(admin.userId, { status });
+    const now = Math.floor(Date.now() / 1000);
 
+    const scheduled = await scheduleAs(
+      admin,
+      envelope.envelopeId,
+      "Kept long enough.",
+      { now },
+    );
+
+    assert.equal(scheduled.deleteAfter, now + WAIT);
+    // Nothing goes yet.
+    assert.equal(await envelopeExists(envelope.envelopeId), true);
     assert.ok((await filesExist(envelope.stored)).every(Boolean));
 
-    await deleteAs(admin, envelope.envelopeId, "Kept long enough.");
+    const request = await latestEvent();
 
+    assert.equal(request?.event, "envelope_deletion_scheduled");
+    assert.equal(request?.actorUserId, admin.userId);
+    assert.equal(request?.ipAddress, "203.0.113.9");
+    assert.equal(request?.metadata?.deleteAfter, now + WAIT);
+    assert.equal(request?.metadata?.reason, "Kept long enough.");
+
+    // A day early, still nothing.
+    assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT - DAY), false);
+    assert.equal(await envelopeExists(envelope.envelopeId), true);
+
+    assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT), true);
     assert.equal(await envelopeExists(envelope.envelopeId), false);
+    assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
     assert.deepEqual(
       await filesExist(envelope.stored),
       envelope.stored.map(() => false),
     );
     assert.deepEqual(await pendingFileDeletions(envelope.envelopeId), []);
 
-    const [event] = await listSystemAuditEvents({ limit: 1 }, database);
+    const event = await latestEvent();
 
     assert.equal(event?.event, "envelope_deleted");
+    // Under the administrator who asked for it.
     assert.equal(event?.actorUserId, admin.userId);
     assert.equal(event?.actorEmail, admin.email);
-    assert.equal(event?.ipAddress, "203.0.113.9");
     assert.deepEqual(
       {
         envelopeId: event?.metadata?.envelopeId,
         evidenceSha256: event?.metadata?.evidenceSha256,
         reason: event?.metadata?.reason,
         recipientEvidenceSha256: event?.metadata?.recipientEvidenceSha256,
+        requestedAt: event?.metadata?.requestedAt,
         sourcePdfHash: event?.metadata?.sourcePdfHash,
         status: event?.metadata?.status,
         title: event?.metadata?.title,
@@ -229,6 +316,7 @@ for (const status of ["completed", "declined", "voided"] as const) {
         evidenceSha256: EVIDENCE_HASH,
         reason: "Kept long enough.",
         recipientEvidenceSha256: RECIPIENT_EVIDENCE_HASH,
+        requestedAt: now,
         sourcePdfHash: SOURCE_HASH,
         status,
         title: "Lease",
@@ -238,88 +326,150 @@ for (const status of ["completed", "declined", "voided"] as const) {
   });
 }
 
-test("someone who is not an administrator cannot delete a finished envelope", async () => {
+test("someone who is not an administrator cannot schedule a deletion", async () => {
   const user = await createUser("user");
   const envelope = await createEnvelope(user.userId, { status: "completed" });
   const before = await listSystemAuditEvents({ limit: 1 }, database);
 
-  await assert.rejects(deleteAs(user, envelope.envelopeId), rejectsWith(403));
+  await assert.rejects(scheduleAs(user, envelope.envelopeId), rejectsWith(403));
 
-  assert.equal(await envelopeExists(envelope.envelopeId), true);
-  assert.ok((await filesExist(envelope.stored)).every(Boolean));
+  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
   assert.deepEqual(await listSystemAuditEvents({ limit: 1 }, database), before);
 });
 
-test("an envelope still out for signature, or a draft, is not deleted this way", async () => {
+test("an envelope still out for signature, or a draft, is not scheduled", async () => {
   const admin = await createUser("admin");
 
   for (const status of ["sent", "draft"] as const) {
     const envelope = await createEnvelope(admin.userId, { status });
 
     await assert.rejects(
-      deleteAs(admin, envelope.envelopeId),
+      scheduleAs(admin, envelope.envelopeId),
       rejectsWith(409),
     );
-    assert.equal(await envelopeExists(envelope.envelopeId), true);
-    assert.ok((await filesExist(envelope.stored)).every(Boolean));
+    assert.equal(
+      await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+      null,
+    );
   }
 });
 
-test("an administrator deletes another member's finished envelope, and the record names its sender", async () => {
+test("another member's envelope: its sender is emailed, and the records name them", async () => {
+  sent = [];
   const owner = await createUser("user");
   const admin = await createUser("admin");
   const envelope = await createEnvelope(owner.userId, { status: "completed" });
+  const now = Math.floor(Date.now() / 1000);
 
-  await deleteAs(admin, envelope.envelopeId, "Asked to by legal.");
+  await scheduleAs(admin, envelope.envelopeId, "Asked to by legal.", { now });
 
-  assert.equal(await envelopeExists(envelope.envelopeId), false);
-  assert.deepEqual(
-    await filesExist(envelope.stored),
-    envelope.stored.map(() => false),
-  );
+  const [notice] = emailsTo(owner.email);
 
-  const [event] = await listSystemAuditEvents({ limit: 1 }, database);
+  assert.equal(notice?.template, "deletion_notice");
+  assert.match(notice?.subject ?? "", /^"Lease" will be deleted on \d{4}-\d{2}-\d{2}$/);
+  assert.match(notice?.textBody ?? "", new RegExp(admin.email.replace(/[.]/g, "\\.")));
+  // The reason is for administrators.
+  assert.doesNotMatch(notice?.textBody ?? "", /legal/);
+
+  const request = await latestEvent();
+
+  assert.equal(request?.targetUserId, owner.userId);
+  assert.equal(request?.metadata?.ownerEmail, owner.email);
+
+  await deleteWhenDue(envelope.envelopeId, now + WAIT);
+
+  const event = await latestEvent();
 
   assert.equal(event?.event, "envelope_deleted");
   assert.equal(event?.actorUserId, admin.userId);
   assert.equal(event?.metadata?.ownerUserId, owner.userId);
   assert.equal(event?.metadata?.ownerEmail, owner.email);
   assert.equal(event?.metadata?.reason, "Asked to by legal.");
+  assert.equal(event?.metadata?.senderNotified, true);
 });
 
-test("someone who is not an administrator cannot find another member's envelope to delete", async () => {
+test("an administrator's own envelope sends no email", async () => {
+  sent = [];
+  const admin = await createUser("admin");
+  const envelope = await createEnvelope(admin.userId, { status: "completed" });
+
+  await scheduleAs(admin, envelope.envelopeId);
+
+  assert.deepEqual(emailsTo(admin.email), []);
+});
+
+test("someone who is not an administrator cannot find another member's envelope", async () => {
   const owner = await createUser("admin");
   const other = await createUser("user");
   const envelope = await createEnvelope(owner.userId, { status: "completed" });
 
-  await assert.rejects(deleteAs(other, envelope.envelopeId), rejectsWith(404));
-  assert.equal(await envelopeExists(envelope.envelopeId), true);
+  await assert.rejects(scheduleAs(other, envelope.envelopeId), rejectsWith(404));
+  await assert.rejects(cancelAs(other, envelope.envelopeId), rejectsWith(404));
+  await assert.rejects(scheduleAs(owner, randomUUID()), rejectsWith(404));
 });
 
-test("an envelope that does not exist is not found", async () => {
+test("a deletion already scheduled is not scheduled twice", async () => {
   const admin = await createUser("admin");
+  const envelope = await createEnvelope(admin.userId, { status: "completed" });
 
-  await assert.rejects(deleteAs(admin, randomUUID()), rejectsWith(404));
+  await scheduleAs(admin, envelope.envelopeId);
+  await assert.rejects(scheduleAs(admin, envelope.envelopeId), rejectsWith(409));
 });
 
-test("a Part 11 record needs a reason before it is deleted", async () => {
+test("any administrator can cancel, the sender is told, and nothing is deleted", async () => {
+  sent = [];
+  const owner = await createUser("user");
+  const admin = await createUser("admin");
+  const otherAdmin = await createUser("admin");
+  const envelope = await createEnvelope(owner.userId, { status: "completed" });
+  const now = Math.floor(Date.now() / 1000);
+
+  await scheduleAs(admin, envelope.envelopeId, "Tidying up.", { now });
+  await cancelAs(otherAdmin, envelope.envelopeId);
+
+  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+
+  const event = await latestEvent();
+
+  assert.equal(event?.event, "envelope_deletion_cancelled");
+  assert.equal(event?.actorUserId, otherAdmin.userId);
+  assert.equal(event?.metadata?.requestedByEmail, admin.email);
+  assert.deepEqual(
+    emailsTo(owner.email).map((message) => message.subject),
+    ['"Lease" will be deleted on ' + new Date((now + WAIT) * 1000).toISOString().slice(0, 10), '"Lease" will not be deleted'],
+  );
+
+  // The day it would have gone, it stays.
+  assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT), false);
+  assert.equal(await envelopeExists(envelope.envelopeId), true);
+  assert.ok((await filesExist(envelope.stored)).every(Boolean));
+
+  // Nothing left to cancel; a member cannot cancel at all.
+  await assert.rejects(cancelAs(admin, envelope.envelopeId), rejectsWith(409));
+  await assert.rejects(cancelAs(owner, envelope.envelopeId), rejectsWith(403));
+  await assert.rejects(scheduleAs(owner, envelope.envelopeId), rejectsWith(403));
+});
+
+test("a Part 11 record needs a reason before it is scheduled", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, {
     part11: true,
     status: "completed",
   });
+  const now = Math.floor(Date.now() / 1000);
 
   await assert.rejects(
-    deleteAs(admin, envelope.envelopeId, "   "),
+    scheduleAs(admin, envelope.envelopeId, "   "),
     rejectsWith(400),
   );
-  assert.equal(await envelopeExists(envelope.envelopeId), true);
+  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
 
-  await deleteAs(admin, envelope.envelopeId, "Retention period over.");
+  await scheduleAs(admin, envelope.envelopeId, "Retention period over.", { now });
+  await deleteWhenDue(envelope.envelopeId, now + WAIT);
 
   assert.equal(await envelopeExists(envelope.envelopeId), false);
 
-  const [event] = await listSystemAuditEvents({ limit: 1 }, database);
+  const event = await latestEvent();
 
   assert.equal(event?.metadata?.part11, true);
   assert.equal(event?.metadata?.reason, "Retention period over.");
@@ -329,24 +479,72 @@ test("a reason that is not text, or too long, is refused", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "voided" });
 
+  await assert.rejects(scheduleAs(admin, envelope.envelopeId, 42), rejectsWith(400));
   await assert.rejects(
-    deleteFinishedEnvelope(
-      envelope.envelopeId,
-      { actor: admin, reason: 42 },
-      { database, storageService },
-    ),
+    scheduleAs(admin, envelope.envelopeId, "x".repeat(1001)),
     rejectsWith(400),
   );
-  await assert.rejects(
-    deleteAs(admin, envelope.envelopeId, "x".repeat(1001)),
-    rejectsWith(400),
-  );
-  assert.equal(await envelopeExists(envelope.envelopeId), true);
+  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+});
+
+test("when the email to the sender fails, the deletion is still scheduled and the daily run sends it", async () => {
+  sent = [];
+  const owner = await createUser("user");
+  const admin = await createUser("admin");
+  const envelope = await createEnvelope(owner.userId, { status: "declined" });
+  const now = Math.floor(Date.now() / 1000);
+  const originalConsoleError = console.error;
+
+  console.error = () => {};
+
+  try {
+    await scheduleAs(admin, envelope.envelopeId, undefined, {
+      emailService: createOutbox(true),
+      now,
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.ok(await getScheduledEnvelopeDeletion(envelope.envelopeId, database));
+  assert.deepEqual(emailsTo(owner.email), []);
+
+  const summary = await runScheduledEnvelopeDeletions({
+    database,
+    emailService: createOutbox(),
+    now: now + DAY,
+    storageService,
+  });
+
+  assert.ok(summary.noticesSent >= 1);
+  assert.equal(emailsTo(owner.email).length, 1);
+
+  // Told once: the next run does not send it again.
+  await runScheduledEnvelopeDeletions({
+    database,
+    emailService: createOutbox(),
+    now: now + 2 * DAY,
+    storageService,
+  });
+  assert.equal(emailsTo(owner.email).length, 1);
+
+  // And once the wait is over, the run deletes it.
+  const final = await runScheduledEnvelopeDeletions({
+    database,
+    emailService: createOutbox(),
+    now: now + WAIT,
+    storageService,
+  });
+
+  assert.ok(final.deleted >= 1);
+  assert.deepEqual(final.failures, []);
+  assert.equal(await envelopeExists(envelope.envelopeId), false);
 });
 
 test("when a file cannot be deleted, the envelope is still deleted and recorded, and the next cleanup deletes the file", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "completed" });
+  const now = Math.floor(Date.now() / 1000);
   const failingStorage = {
     ...storageService,
     deleteObject: async () => {
@@ -356,23 +554,21 @@ test("when a file cannot be deleted, the envelope is still deleted and recorded,
   const logged: unknown[][] = [];
   const originalConsoleError = console.error;
 
+  await scheduleAs(admin, envelope.envelopeId, undefined, { now });
+
   console.error = (...args: unknown[]) => {
     logged.push(args);
   };
 
   try {
-    await deleteFinishedEnvelope(
-      envelope.envelopeId,
-      { actor: admin },
-      { database, storageService: failingStorage },
-    );
+    await deleteWhenDue(envelope.envelopeId, now + WAIT, failingStorage);
   } finally {
     console.error = originalConsoleError;
   }
 
   assert.equal(await envelopeExists(envelope.envelopeId), false);
 
-  const [event] = await listSystemAuditEvents({ limit: 1 }, database);
+  const event = await latestEvent();
 
   assert.equal(event?.event, "envelope_deleted");
   assert.equal(event?.metadata?.envelopeId, envelope.envelopeId);
@@ -399,12 +595,10 @@ test("when a file cannot be deleted, the envelope is still deleted and recorded,
   assert.deepEqual(await pendingFileDeletions(envelope.envelopeId), []);
 });
 
-test("when the deletion fails before it commits, no file is touched", async () => {
+test("a deletion that is not due touches no file", async () => {
   const admin = await createUser("admin");
-  const envelope = await createEnvelope(admin.userId, {
-    part11: true,
-    status: "completed",
-  });
+  const envelope = await createEnvelope(admin.userId, { status: "completed" });
+  const now = Math.floor(Date.now() / 1000);
   let deletes = 0;
   const countingStorage = {
     ...storageService,
@@ -414,14 +608,10 @@ test("when the deletion fails before it commits, no file is touched", async () =
     },
   } as StorageService;
 
-  await assert.rejects(
-    deleteFinishedEnvelope(
-      envelope.envelopeId,
-      { actor: admin },
-      { database, storageService: countingStorage },
-    ),
-    rejectsWith(400),
-  );
+  // Not scheduled at all, then scheduled but not due.
+  assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT, countingStorage), false);
+  await scheduleAs(admin, envelope.envelopeId, undefined, { now });
+  assert.equal(await deleteWhenDue(envelope.envelopeId, now, countingStorage), false);
   assert.equal(deletes, 0);
   assert.equal(await envelopeExists(envelope.envelopeId), true);
   assert.ok((await filesExist(envelope.stored)).every(Boolean));
@@ -440,7 +630,7 @@ test("an administrator whose role is being taken away waits for it, and is then 
       [admin.userId],
     );
 
-    const deletion = deleteAs(admin, envelope.envelopeId, "Done.");
+    const scheduling = scheduleAs(admin, envelope.envelopeId, "Done.");
 
     await delay(300);
     await demotion.query(
@@ -449,16 +639,15 @@ test("an administrator whose role is being taken away waits for it, and is then 
     );
     await demotion.query("commit");
 
-    await assert.rejects(deletion, rejectsWith(403));
+    await assert.rejects(scheduling, rejectsWith(403));
   } finally {
     demotion.release();
   }
 
-  assert.equal(await envelopeExists(envelope.envelopeId), true);
-  assert.ok((await filesExist(envelope.stored)).every(Boolean));
+  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
 });
 
-test("a deletion running while the administrator's handed-over envelopes move does not deadlock", async () => {
+test("a request running while the administrator's handed-over envelopes move does not deadlock", async () => {
   const admin = await createUser("admin");
   const keeper = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "completed" });
@@ -480,7 +669,7 @@ test("a deletion running while the administrator's handed-over envelopes move do
       SYSTEM_AUDIT_LOCK_ID,
     ]);
 
-    const deletion = deleteAs(admin, envelope.envelopeId, "Done.");
+    const scheduling = scheduleAs(admin, envelope.envelopeId, "Done.");
 
     await delay(300);
     await demotion.query(`update envelopes set user_id = $1 where id = $2`, [
@@ -489,13 +678,28 @@ test("a deletion running while the administrator's handed-over envelopes move do
     ]);
     await demotion.query("commit");
 
-    // It moved while the deletion waited: told to look again.
-    await assert.rejects(deletion, rejectsWith(409));
+    // It moved while the request waited: told to look again.
+    await assert.rejects(scheduling, rejectsWith(409));
   } finally {
     demotion.release();
   }
 
-  assert.equal(await envelopeExists(envelope.envelopeId), true);
+  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+});
+
+test("a scheduled deletion still runs after the administrator who asked loses the role", async () => {
+  const admin = await createUser("admin");
+  const keeper = await createUser("admin");
+  const envelope = await createEnvelope(keeper.userId, { status: "completed" });
+  const now = Math.floor(Date.now() / 1000);
+
+  await scheduleAs(admin, envelope.envelopeId, "Asked for.", { now });
+  await database.query(`update public."user" set role = 'user' where id = $1`, [
+    admin.userId,
+  ]);
+
+  assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT), true);
+  assert.equal(await envelopeExists(envelope.envelopeId), false);
 });
 
 test("a file that keeps failing goes to the back of the queue, so the others are still reached", async () => {

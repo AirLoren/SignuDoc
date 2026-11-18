@@ -80,7 +80,7 @@ export default async function DashboardPage({
     result = !session
       ? { envelopes: [], hasMore: false }
       : showAll
-        ? await listAllEnvelopesForAdmin(filters, database)
+        ? await listAllEnvelopesForAdmin(session.user.id, filters, database)
         : await listEnvelopesForUser(session.user.id, filters, database);
     // Nothing at all yet, as opposed to nothing that matches or nothing
     // on this page.

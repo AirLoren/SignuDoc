@@ -1,0 +1,22 @@
+-- Finished envelopes an administrator has asked to delete. Nothing goes at
+-- once: the envelope stays as it is for the waiting period, its sender is
+-- emailed a link to download it, and any administrator can cancel. The
+-- daily cleanup deletes it once the wait is over.
+
+create table if not exists public.scheduled_envelope_deletions (
+  envelope_id text primary key references public.envelopes (id) on delete cascade,
+  -- Who asked. No foreign key: the request stands, and the record names
+  -- them, after their account is gone.
+  requested_by_user_id text not null,
+  requested_by_email text not null,
+  requested_at bigint not null,
+  -- Deleted by the first daily cleanup at or after this time.
+  delete_after bigint not null,
+  reason text,
+  -- When the sender was told. Null until the email went out; the daily
+  -- cleanup tries again. Set at once when the sender asked themselves.
+  sender_notified_at bigint
+);
+
+create index if not exists scheduled_envelope_deletions_due_idx
+  on public.scheduled_envelope_deletions (delete_after);
