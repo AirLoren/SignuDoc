@@ -15,6 +15,7 @@ import {
   ENVELOPE_DELETION_WAIT_DAYS,
   getScheduledEnvelopeDeletion,
   runScheduledEnvelopeDeletions,
+  SCHEDULED_DELETIONS_PER_RUN,
   scheduleEnvelopeDeletion,
 } from "./envelope-deletion.ts";
 import { EnvelopeMutationError } from "./envelopes.ts";
@@ -752,6 +753,79 @@ test("a cancellation email still owed is not sent once the deletion is scheduled
   // Nor does a later run send it.
   await runDaily(start + 2 * DAY);
   assert.equal(emailsTo(second.owner.email).length, 2);
+});
+
+test("notices that keep failing go behind the others, so later senders are still told", async () => {
+  sent = [];
+  const admin = await createUser("admin");
+  const unreachable = await createUser("user");
+  const reachable = await createUser("user");
+  // Long ago, so these come before anything else waiting.
+  const start = 500_000_000;
+
+  // A full batch of requests whose sender's email keeps bouncing…
+  await database.query(
+    `
+      with made as (
+        insert into envelopes (
+          id, user_id, title, status, source_pdf_key, source_pdf_filename,
+          source_pdf_size_bytes, page_count, source_pdf_hash, sent_at,
+          completed_at
+        )
+        select
+          gen_random_uuid()::text, $1, 'Lease', 'completed',
+          'users/' || $1 || '/envelopes/' || n || '/source.pdf', 'lease.pdf',
+          4, 1, $2, $3, $3
+        from generate_series(1, $4::int) as n
+        returning id
+      )
+      insert into scheduled_envelope_deletions (
+        envelope_id, requested_by_user_id, requested_by_email, requested_at,
+        delete_after
+      )
+      select id, $5, $6, $3, $3 + $7 from made
+    `,
+    [
+      unreachable.userId,
+      SOURCE_HASH,
+      start,
+      SCHEDULED_DELETIONS_PER_RUN,
+      admin.userId,
+      admin.email,
+      WAIT,
+    ],
+  );
+  // …and one asked for after them.
+  const later = await createEnvelope(reachable.userId, { status: "completed" });
+
+  await quietly(() =>
+    scheduleAs(admin, later.envelopeId, undefined, {
+      emailService: createOutbox(true),
+      now: start + 1,
+    }),
+  );
+
+  const bouncing = createOutbox();
+  const outbox: EmailService = {
+    ...bouncing,
+    async send(message, options) {
+      if (message.to === unreachable.email) {
+        throw new Error("Mailbox unavailable.");
+      }
+
+      return bouncing.send(message, options);
+    },
+  };
+
+  // The first run tries the oldest ones; the next reaches the later sender.
+  await quietly(() => runDaily(start + DAY, outbox));
+  await quietly(() => runDaily(start + 2 * DAY, outbox));
+
+  assert.equal(emailsTo(reachable.email).length, 1);
+  assert.ok(
+    (await getScheduledEnvelopeDeletion(later.envelopeId, database))
+      ?.deleteAfter,
+  );
 });
 
 test("a cancelled deletion can be scheduled again", async () => {

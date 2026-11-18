@@ -39,7 +39,7 @@ export const ENVELOPE_DELETION_WAIT_DAYS = 14;
 const DAY_IN_SECONDS = 24 * 60 * 60;
 
 /** How many due deletions, and sender notices, one daily run handles. */
-const SCHEDULED_DELETIONS_PER_RUN = 100;
+export const SCHEDULED_DELETIONS_PER_RUN = 100;
 
 type FinishedEnvelopeRow = {
   evidenceSha256: string | null;
@@ -415,7 +415,8 @@ export async function scheduleEnvelopeDeletion(
           cancelled_at = NULL,
           cancelled_by_user_id = NULL,
           cancelled_by_email = NULL,
-          cancel_notified_at = NULL
+          cancel_notified_at = NULL,
+          last_attempt_at = NULL
         WHERE scheduled_envelope_deletions.cancelled_at IS NOT NULL
       `,
       [
@@ -720,33 +721,39 @@ const CANCELLED_KEPT_SECONDS = DAY_IN_SECONDS;
 /** After this, a cancellation notice that keeps failing is given up. */
 const CANCELLED_GIVE_UP_SECONDS = 30 * DAY_IN_SECONDS;
 
-/** Whether the notice a row was read as owing is still owed, as it is now. */
-async function isNoticeStillOwed(
+/**
+ * Claims a notice the row was read as owing, if it is still owed as things
+ * are now: a request rescheduled or cancelled since the list was read is
+ * owed something else, or nothing. The attempt is recorded either way it
+ * ends, so a notice that keeps failing goes behind the others next time.
+ */
+async function claimOwedNotice(
   row: PendingNoticeRow,
+  now: number,
   database: DbExecutor,
 ): Promise<boolean> {
   const result =
     row.cancelledAt === null
       ? await database.query(
           `
-            SELECT 1
-            FROM scheduled_envelope_deletions
+            UPDATE scheduled_envelope_deletions
+            SET last_attempt_at = $3
             WHERE envelope_id = $1
               AND requested_at = $2
               AND cancelled_at IS NULL
               AND sender_notified_at IS NULL
           `,
-          [row.envelopeId, row.requestedAt],
+          [row.envelopeId, row.requestedAt, now],
         )
       : await database.query(
           `
-            SELECT 1
-            FROM scheduled_envelope_deletions
+            UPDATE scheduled_envelope_deletions
+            SET last_attempt_at = $3
             WHERE envelope_id = $1
               AND cancelled_at = $2
               AND cancel_notified_at IS NULL
           `,
-          [row.envelopeId, row.cancelledAt],
+          [row.envelopeId, row.cancelledAt, now],
         );
 
   return result.rowCount === 1;
@@ -798,7 +805,9 @@ export async function runScheduledEnvelopeDeletions({
           AND e.user_id <> s.requested_by_user_id
           AND e.user_id <> s.cancelled_by_user_id
         )
-      ORDER BY s.requested_at ASC
+      -- Never tried first, then the longest since the last try, so notices
+      -- that keep failing cannot hold back the rest.
+      ORDER BY s.last_attempt_at ASC NULLS FIRST, s.requested_at ASC
       LIMIT ${String(SCHEDULED_DELETIONS_PER_RUN)}
     `,
     [now - CANCELLED_GIVE_UP_SECONDS],
@@ -807,9 +816,7 @@ export async function runScheduledEnvelopeDeletions({
 
   for (const row of owed) {
     try {
-      // The list was read before any of it was sent: a request rescheduled
-      // or cancelled since then is owed something else, or nothing.
-      if (!(await isNoticeStillOwed(row, database))) {
+      if (!(await claimOwedNotice(row, now, database))) {
         continue;
       }
 
@@ -872,7 +879,7 @@ export async function runScheduledEnvelopeDeletions({
       WHERE cancelled_at IS NULL
         AND sender_notified_at IS NOT NULL
         AND delete_after <= $1
-      ORDER BY delete_after ASC, envelope_id ASC
+      ORDER BY last_attempt_at ASC NULLS FIRST, delete_after ASC, envelope_id ASC
       LIMIT ${String(SCHEDULED_DELETIONS_PER_RUN)}
     `,
     [now],
@@ -880,6 +887,13 @@ export async function runScheduledEnvelopeDeletions({
 
   for (const { envelopeId } of due) {
     try {
+      // Recorded before trying, so a deletion that keeps failing goes
+      // behind the others next time.
+      await database.query(
+        `UPDATE scheduled_envelope_deletions SET last_attempt_at = $2 WHERE envelope_id = $1`,
+        [envelopeId, now],
+      );
+
       if (
         await deleteScheduledEnvelope(envelopeId, {
           database,

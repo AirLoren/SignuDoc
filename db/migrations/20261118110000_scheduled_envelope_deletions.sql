@@ -24,7 +24,11 @@ create table if not exists public.scheduled_envelope_deletions (
   cancelled_at bigint,
   cancelled_by_user_id text,
   cancelled_by_email text,
-  cancel_notified_at bigint
+  cancel_notified_at bigint,
+  -- When the daily cleanup last tried this request's email or deletion.
+  -- The ones never tried, then the longest waiting, go first, so a few
+  -- that keep failing cannot hold back the rest.
+  last_attempt_at bigint
 );
 
 create index if not exists scheduled_envelope_deletions_due_idx
