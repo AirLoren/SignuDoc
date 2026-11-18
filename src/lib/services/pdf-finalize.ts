@@ -330,7 +330,12 @@ function layoutAtSize(
       ? 0
       : (lines.length - 1) * size * FIELD_TEXT_LINE_HEIGHT + size;
 
-  return { blockHeight, fits: blockHeight <= maxHeight, lines, size };
+  // A line can be wider than the box only when one character is.
+  const fits =
+    blockHeight <= maxHeight &&
+    lines.every((line) => font.widthOfTextAtSize(line, size) <= maxWidth);
+
+  return { blockHeight, fits, lines, size };
 }
 
 /**
@@ -384,14 +389,15 @@ function layoutFieldText(
 function getTextFieldBox(rect: { heightPt: number; widthPt: number }) {
   const padding = getFieldPadding(rect.widthPt, rect.heightPt);
 
+  // A box too small even for one line at the readable size still takes
+  // one line at it, as it always has, but never a second.
+  const maxHeight = Math.max(MIN_FIELD_TEXT_SIZE, rect.heightPt - padding * 2);
+
   return {
-    maxHeight: Math.max(10, rect.heightPt - padding * 2),
-    maxWidth: Math.max(12, rect.widthPt - padding * 2),
+    maxHeight,
+    maxWidth: Math.max(MIN_FIELD_TEXT_SIZE, rect.widthPt - padding * 2),
     padding,
-    preferredSize: Math.min(
-      Math.max(10, rect.heightPt - padding * 2),
-      rect.heightPt * 0.64,
-    ),
+    preferredSize: Math.min(maxHeight, rect.heightPt * 0.64),
   };
 }
 
@@ -728,14 +734,18 @@ async function drawFieldValue(
         MIN_FIELD_TEXT_SIZE,
       );
 
-      if (!layout.fits) {
+      for (
+        let floor = LAST_RESORT_FIELD_TEXT_SIZE;
+        !layout.fits && floor >= 0.01;
+        floor /= 2
+      ) {
         layout = layoutFieldText(
           fonts.auditRegular,
           textValue,
           box.maxWidth,
           box.maxHeight,
-          MIN_FIELD_TEXT_SIZE,
-          LAST_RESORT_FIELD_TEXT_SIZE,
+          layout.size,
+          floor,
         );
       }
 

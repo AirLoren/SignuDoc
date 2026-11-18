@@ -833,3 +833,22 @@ test("signing is told when an answer cannot fit its box at a readable size", asy
     null,
   );
 });
+
+test("a box shorter than two readable lines takes only one", async () => {
+  // 3.6 pt high: one line at the readable size, as before, but no second.
+  const field = { ...NARROW_FIELD, height: 0.0045 };
+
+  assert.equal(
+    await findTypedValueTooLongForField(
+      [{ field, value: "Approved" }],
+      [LETTER_PAGE],
+    ),
+    null,
+  );
+  assert.ok(
+    await findTypedValueTooLongForField(
+      [{ field, value: LONG_ANSWER }],
+      [LETTER_PAGE],
+    ),
+  );
+});
