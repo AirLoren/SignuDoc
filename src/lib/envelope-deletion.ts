@@ -63,6 +63,10 @@ type ScheduleRow = {
   requestedByEmail: string;
   requestedByUserId: string;
   senderNotifiedAt: number | null;
+  cancelledAt: number | null;
+  cancelledByEmail: string | null;
+  cancelledByUserId: string | null;
+  cancelNotifiedAt: number | null;
 };
 
 export type ScheduledEnvelopeDeletion = {
@@ -224,7 +228,11 @@ const SCHEDULE_COLUMNS = `
   requested_at AS "requestedAt",
   delete_after AS "deleteAfter",
   reason,
-  sender_notified_at AS "senderNotifiedAt"
+  sender_notified_at AS "senderNotifiedAt",
+  cancelled_at AS "cancelledAt",
+  cancelled_by_user_id AS "cancelledByUserId",
+  cancelled_by_email AS "cancelledByEmail",
+  cancel_notified_at AS "cancelNotifiedAt"
 `;
 
 /** The deletion scheduled for an envelope, if there is one. */
@@ -234,7 +242,11 @@ export async function getScheduledEnvelopeDeletion(
 ): Promise<ScheduledEnvelopeDeletion | null> {
   const row = await queryOne<ScheduleRow>(
     database,
-    `SELECT ${SCHEDULE_COLUMNS} FROM scheduled_envelope_deletions WHERE envelope_id = $1`,
+    `
+      SELECT ${SCHEDULE_COLUMNS}
+      FROM scheduled_envelope_deletions
+      WHERE envelope_id = $1 AND cancelled_at IS NULL
+    `,
     [envelopeId],
   );
 
@@ -254,54 +266,103 @@ function envelopeLink(envelopeId: string): string | null {
   return appUrl ? `${appUrl}/envelopes/${envelopeId}` : null;
 }
 
-/** Tells the sender that their envelope will be deleted, and when. */
+type NoticeTarget = {
+  envelopeId: string;
+  ownerEmail: string;
+  ownerName: string | null;
+  title: string;
+};
+
+function greeting(target: NoticeTarget): string {
+  return `Hello ${target.ownerName?.trim() || target.ownerEmail},`;
+}
+
+/**
+ * Tells the sender that their envelope will be deleted, and when. The
+ * sender always gets the whole wait: a notice that goes out late moves the
+ * date back to ENVELOPE_DELETION_WAIT_DAYS after it, and nothing is deleted
+ * before its notice has gone.
+ */
 async function sendDeletionNotice(
-  {
-    deleteAfter,
-    envelopeId,
-    ownerEmail,
-    ownerName,
-    requestedAt,
-    requestedByEmail,
-    title,
-  }: {
+  target: NoticeTarget & {
     deleteAfter: number;
-    envelopeId: string;
-    ownerEmail: string;
-    ownerName: string | null;
     requestedAt: number;
     requestedByEmail: string;
-    title: string;
   },
+  now: number,
   database: DbExecutor,
   emailService: EmailService,
 ): Promise<void> {
-  const link = envelopeLink(envelopeId);
+  const deleteOn = Math.max(
+    target.deleteAfter,
+    now + ENVELOPE_DELETION_WAIT_DAYS * DAY_IN_SECONDS,
+  );
+  const link = envelopeLink(target.envelopeId);
 
   await emailService.send(
     {
-      subject: `"${title}" will be deleted on ${formatDay(deleteAfter)}`,
+      subject: `"${target.title}" will be deleted on ${formatDay(deleteOn)}`,
       template: "deletion_notice",
       textBody: [
-        `Hello ${ownerName?.trim() || ownerEmail},`,
+        greeting(target),
         "",
-        `An administrator of your organization (${requestedByEmail}) has scheduled "${title}" and its audit trail to be deleted on or after ${formatDay(deleteAfter)}.`,
+        `An administrator of your organization (${target.requestedByEmail}) has scheduled "${target.title}" and its audit trail to be deleted on or after ${formatDay(deleteOn)}.`,
         "",
         "Download the signed PDF and the certificate before then if you need to keep them. If this is a mistake, ask an administrator: they can cancel it until that day.",
         ...(link ? ["", link] : []),
       ].join("\n"),
-      to: ownerEmail,
+      to: target.ownerEmail,
     },
-    { idempotencyKey: `deletion-notice/${envelopeId}/${String(requestedAt)}` },
+    {
+      idempotencyKey: `deletion-notice/${target.envelopeId}/${String(target.requestedAt)}/${String(deleteOn)}`,
+    },
+  );
+
+  // Marked even when the deletion was cancelled while the email went out:
+  // the daily run then tells the sender it was cancelled.
+  await database.query(
+    `
+      UPDATE scheduled_envelope_deletions
+      SET sender_notified_at = $1, delete_after = GREATEST(delete_after, $2)
+      WHERE envelope_id = $3 AND requested_at = $4
+    `,
+    [now, deleteOn, target.envelopeId, target.requestedAt],
+  );
+}
+
+/** Tells a sender who was told about a deletion that it was cancelled. */
+async function sendCancellationNotice(
+  target: NoticeTarget & { cancelledAt: number; cancelledByEmail: string },
+  now: number,
+  database: DbExecutor,
+  emailService: EmailService,
+): Promise<void> {
+  const link = envelopeLink(target.envelopeId);
+
+  await emailService.send(
+    {
+      subject: `"${target.title}" will not be deleted`,
+      template: "deletion_notice",
+      textBody: [
+        greeting(target),
+        "",
+        `An administrator of your organization (${target.cancelledByEmail}) has cancelled the deletion of "${target.title}". It stays as it is.`,
+        ...(link ? ["", link] : []),
+      ].join("\n"),
+      to: target.ownerEmail,
+    },
+    {
+      idempotencyKey: `deletion-cancelled/${target.envelopeId}/${String(target.cancelledAt)}`,
+    },
   );
 
   await database.query(
     `
       UPDATE scheduled_envelope_deletions
-      SET sender_notified_at = $1
-      WHERE envelope_id = $2 AND requested_at = $3
+      SET cancel_notified_at = $1
+      WHERE envelope_id = $2 AND cancelled_at = $3
     `,
-    [currentTime(), envelopeId, requestedAt],
+    [now, target.envelopeId, target.cancelledAt],
   );
 }
 
@@ -337,13 +398,25 @@ export async function scheduleEnvelopeDeletion(
     );
     const deletionReason = parseReason(reason, envelope.part11);
     const senderIsActor = envelope.ownerUserId === actor.userId;
+    // A cancelled request is replaced; one still standing is not.
     const inserted = await tx.query(
       `
         INSERT INTO scheduled_envelope_deletions (
           envelope_id, requested_by_user_id, requested_by_email,
           requested_at, delete_after, reason, sender_notified_at
         ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (envelope_id) DO NOTHING
+        ON CONFLICT (envelope_id) DO UPDATE SET
+          requested_by_user_id = EXCLUDED.requested_by_user_id,
+          requested_by_email = EXCLUDED.requested_by_email,
+          requested_at = EXCLUDED.requested_at,
+          delete_after = EXCLUDED.delete_after,
+          reason = EXCLUDED.reason,
+          sender_notified_at = EXCLUDED.sender_notified_at,
+          cancelled_at = NULL,
+          cancelled_by_user_id = NULL,
+          cancelled_by_email = NULL,
+          cancel_notified_at = NULL
+        WHERE scheduled_envelope_deletions.cancelled_at IS NOT NULL
       `,
       [
         envelope.id,
@@ -403,12 +476,13 @@ export async function scheduleEnvelopeDeletion(
     };
   }, database);
 
-  // The schedule stands whatever happens to the email; the daily cleanup
-  // tries again until it goes out.
+  // The schedule stands whatever happens to the email. Until it goes out,
+  // nothing is deleted, and the daily run tries again.
   if (scheduled.notice) {
     try {
       await sendDeletionNotice(
         scheduled.notice,
+        now,
         database,
         emailService ?? createEmailService(),
       );
@@ -442,9 +516,11 @@ export async function cancelEnvelopeDeletion(
   {
     database = getDb(),
     emailService,
+    now = currentTime(),
   }: {
     database?: DbPool;
     emailService?: EmailService;
+    now?: number;
   } = {},
 ): Promise<{ envelopeId: string }> {
   const cancelled = await withTransaction(async (tx) => {
@@ -453,14 +529,17 @@ export async function cancelEnvelopeDeletion(
       envelopeId,
       actor.userId,
     );
+    // Kept, marked cancelled, until the sender has been told: a notice
+    // that was going out at this moment still gets its answer.
     const schedule = await queryOne<ScheduleRow>(
       tx,
       `
-        DELETE FROM scheduled_envelope_deletions
-        WHERE envelope_id = $1
+        UPDATE scheduled_envelope_deletions
+        SET cancelled_at = $2, cancelled_by_user_id = $3, cancelled_by_email = $4
+        WHERE envelope_id = $1 AND cancelled_at IS NULL
         RETURNING ${SCHEDULE_COLUMNS}
       `,
-      [envelope.id],
+      [envelope.id, now, actor.userId, actor.email],
     );
 
     if (!schedule) {
@@ -497,26 +576,27 @@ export async function cancelEnvelopeDeletion(
         envelope.ownerUserId !== actor.userId &&
         envelope.ownerUserId !== schedule.requestedByUserId &&
         schedule.senderNotifiedAt !== null
-          ? { email: owner.email, name: owner.name, title: envelope.title }
+          ? {
+              cancelledAt: now,
+              cancelledByEmail: actor.email,
+              envelopeId: envelope.id,
+              ownerEmail: owner.email,
+              ownerName: owner.name,
+              title: envelope.title,
+            }
           : null,
     };
   }, database);
 
+  // A failure here is tried again by the daily run.
   if (cancelled.notify) {
-    const link = envelopeLink(envelopeId);
-
     try {
-      await (emailService ?? createEmailService()).send({
-        subject: `"${cancelled.notify.title}" will not be deleted`,
-        template: "deletion_notice",
-        textBody: [
-          `Hello ${cancelled.notify.name?.trim() || cancelled.notify.email},`,
-          "",
-          `An administrator of your organization (${actor.email}) has cancelled the deletion of "${cancelled.notify.title}". It stays as it is.`,
-          ...(link ? ["", link] : []),
-        ].join("\n"),
-        to: cancelled.notify.email,
-      });
+      await sendCancellationNotice(
+        cancelled.notify,
+        now,
+        database,
+        emailService ?? createEmailService(),
+      );
     } catch (error) {
       console.error(
         `Telling the sender about the cancelled deletion of envelope ${envelopeId} failed:`,
@@ -532,7 +612,7 @@ export async function cancelEnvelopeDeletion(
  * Deletes one envelope whose scheduled deletion is due, with its files,
  * and records the deletion in the install's audit trail under the
  * administrator who asked for it. False when there was nothing due: it was
- * cancelled, or is not due yet.
+ * cancelled, its sender has not been told yet, or it is not due yet.
  */
 export async function deleteScheduledEnvelope(
   envelopeId: string,
@@ -552,13 +632,17 @@ export async function deleteScheduledEnvelope(
       envelopeId,
       null,
     );
-    // Cancelled, or not due, by the time it was locked: nothing to do.
+    // Cancelled, not told, or not due by the time it was locked: nothing
+    // to do.
     const schedule = await queryOne<ScheduleRow>(
       tx,
       `
         SELECT ${SCHEDULE_COLUMNS}
         FROM scheduled_envelope_deletions
-        WHERE envelope_id = $1 AND delete_after <= $2
+        WHERE envelope_id = $1
+          AND cancelled_at IS NULL
+          AND sender_notified_at IS NOT NULL
+          AND delete_after <= $2
         FOR UPDATE
       `,
       [envelope.id, now],
@@ -583,7 +667,7 @@ export async function deleteScheduledEnvelope(
           reason: schedule.reason,
           recipientEvidenceSha256: envelope.recipientEvidenceSha256,
           requestedAt: schedule.requestedAt,
-          senderNotified: schedule.senderNotifiedAt !== null,
+          senderNotifiedAt: schedule.senderNotifiedAt,
           signedPdfSha256: envelope.signedPdfSha256,
           sourcePdfHash: envelope.sourcePdfHash,
           status: envelope.status,
@@ -624,9 +708,22 @@ export type ScheduledDeletionSummary = {
   noticesSent: number;
 };
 
+type PendingNoticeRow = ScheduleRow & {
+  envelopeId: string;
+  ownerEmail: string;
+  ownerName: string | null;
+  title: string;
+};
+
+/** How long a cancelled request is kept for a notice still going out. */
+const CANCELLED_KEPT_SECONDS = DAY_IN_SECONDS;
+/** After this, a cancellation notice that keeps failing is given up. */
+const CANCELLED_GIVE_UP_SECONDS = 30 * DAY_IN_SECONDS;
+
 /**
- * The daily part: emails any sender not yet told, then deletes the
- * envelopes whose wait is over.
+ * The daily part: emails any sender still owed a notice of a deletion or of
+ * its cancellation, clears cancelled requests nobody is owed anything for,
+ * then deletes the envelopes whose wait is over.
  */
 export async function runScheduledEnvelopeDeletions({
   database = getDb(),
@@ -645,14 +742,10 @@ export async function runScheduledEnvelopeDeletions({
     noticeFailures: [],
     noticesSent: 0,
   };
-  const unsent = await queryMany<
-    ScheduleRow & {
-      envelopeId: string;
-      ownerEmail: string;
-      ownerName: string | null;
-      title: string;
-    }
-  >(
+  // Owed a notice: a standing request the sender has not been told of, or
+  // a cancelled one they were told of and not yet told was cancelled
+  // (unless they asked or cancelled it themselves).
+  const owed = await queryMany<PendingNoticeRow>(
     database,
     `
       SELECT
@@ -664,29 +757,41 @@ export async function runScheduledEnvelopeDeletions({
       FROM scheduled_envelope_deletions s
       JOIN envelopes e ON e.id = s.envelope_id
       JOIN public."user" u ON u.id = e.user_id
-      WHERE s.sender_notified_at IS NULL AND s.delete_after > $1
+      WHERE (s.cancelled_at IS NULL AND s.sender_notified_at IS NULL)
+        OR (
+          s.cancelled_at IS NOT NULL
+          AND s.sender_notified_at IS NOT NULL
+          AND s.cancel_notified_at IS NULL
+          AND s.cancelled_at > $1
+          AND e.user_id <> s.requested_by_user_id
+          AND e.user_id <> s.cancelled_by_user_id
+        )
       ORDER BY s.requested_at ASC
       LIMIT ${String(SCHEDULED_DELETIONS_PER_RUN)}
     `,
-    [now],
+    [now - CANCELLED_GIVE_UP_SECONDS],
   );
   let service = emailService;
 
-  for (const row of unsent) {
+  for (const row of owed) {
     try {
-      await sendDeletionNotice(
-        {
-          deleteAfter: row.deleteAfter,
-          envelopeId: row.envelopeId,
-          ownerEmail: row.ownerEmail,
-          ownerName: row.ownerName,
-          requestedAt: row.requestedAt,
-          requestedByEmail: row.requestedByEmail,
-          title: row.title,
-        },
-        database,
-        (service ??= createEmailService()),
-      );
+      service ??= createEmailService();
+
+      if (row.cancelledAt === null) {
+        await sendDeletionNotice(row, now, database, service);
+      } else {
+        await sendCancellationNotice(
+          {
+            ...row,
+            cancelledAt: row.cancelledAt,
+            cancelledByEmail: row.cancelledByEmail ?? "",
+          },
+          now,
+          database,
+          service,
+        );
+      }
+
       summary.noticesSent += 1;
     } catch (error) {
       summary.noticeFailures.push(row.envelopeId);
@@ -697,12 +802,38 @@ export async function runScheduledEnvelopeDeletions({
     }
   }
 
+  // Cancelled requests are kept a day, for a notice that was going out as
+  // they were cancelled, then until any cancellation notice owed has gone.
+  await database.query(
+    `
+      DELETE FROM scheduled_envelope_deletions s
+      USING envelopes e
+      WHERE e.id = s.envelope_id
+        AND s.cancelled_at IS NOT NULL
+        AND (
+          s.cancelled_at <= $2
+          OR (
+            s.cancelled_at <= $1
+            AND (
+              s.sender_notified_at IS NULL
+              OR s.cancel_notified_at IS NOT NULL
+              OR e.user_id = s.requested_by_user_id
+              OR e.user_id = s.cancelled_by_user_id
+            )
+          )
+        )
+    `,
+    [now - CANCELLED_KEPT_SECONDS, now - CANCELLED_GIVE_UP_SECONDS],
+  );
+
   const due = await queryMany<{ envelopeId: string }>(
     database,
     `
       SELECT envelope_id AS "envelopeId"
       FROM scheduled_envelope_deletions
-      WHERE delete_after <= $1
+      WHERE cancelled_at IS NULL
+        AND sender_notified_at IS NOT NULL
+        AND delete_after <= $1
       ORDER BY delete_after ASC, envelope_id ASC
       LIMIT ${String(SCHEDULED_DELETIONS_PER_RUN)}
     `,

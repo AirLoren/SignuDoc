@@ -1,7 +1,8 @@
 -- Finished envelopes an administrator has asked to delete. Nothing goes at
 -- once: the envelope stays as it is for the waiting period, its sender is
 -- emailed a link to download it, and any administrator can cancel. The
--- daily cleanup deletes it once the wait is over.
+-- daily cleanup deletes it once the wait is over, and never before the
+-- sender has been told.
 
 create table if not exists public.scheduled_envelope_deletions (
   envelope_id text primary key references public.envelopes (id) on delete cascade,
@@ -14,8 +15,16 @@ create table if not exists public.scheduled_envelope_deletions (
   delete_after bigint not null,
   reason text,
   -- When the sender was told. Null until the email went out; the daily
-  -- cleanup tries again. Set at once when the sender asked themselves.
-  sender_notified_at bigint
+  -- cleanup tries again, and a late notice moves delete_after back so the
+  -- sender still gets the whole wait. Set at once when the sender asked
+  -- themselves.
+  sender_notified_at bigint,
+  -- A cancelled request is kept until its sender, if they were told it
+  -- would go, has been told it will not.
+  cancelled_at bigint,
+  cancelled_by_user_id text,
+  cancelled_by_email text,
+  cancel_notified_at bigint
 );
 
 create index if not exists scheduled_envelope_deletions_due_idx

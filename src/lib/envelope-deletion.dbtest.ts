@@ -227,12 +227,32 @@ function scheduleAs(
 function cancelAs(
   actor: { email: string; userId: string },
   envelopeId: string,
+  { emailService = createOutbox(), now = Math.floor(Date.now() / 1000) } = {},
 ) {
   return cancelEnvelopeDeletion(
     envelopeId,
     { actor, ipAddress: "203.0.113.9", userAgent: "Test browser" },
-    { database, emailService: createOutbox() },
+    { database, emailService, now },
   );
+}
+
+function runDaily(now: number, emailService = createOutbox()) {
+  return runScheduledEnvelopeDeletions({
+    database,
+    emailService,
+    now,
+    storageService,
+  });
+}
+
+function quietly<T>(work: () => Promise<T>): Promise<T> {
+  const originalConsoleError = console.error;
+
+  console.error = () => {};
+
+  return work().finally(() => {
+    console.error = originalConsoleError;
+  });
 }
 
 function deleteWhenDue(
@@ -400,7 +420,7 @@ test("another member's envelope: its sender is emailed, and the records name the
   assert.equal(event?.metadata?.ownerUserId, owner.userId);
   assert.equal(event?.metadata?.ownerEmail, owner.email);
   assert.equal(event?.metadata?.reason, "Asked to by legal.");
-  assert.equal(event?.metadata?.senderNotified, true);
+  assert.equal(typeof event?.metadata?.senderNotifiedAt, "number");
 });
 
 test("an administrator's own envelope sends no email", async () => {
@@ -529,58 +549,157 @@ test("a reason that is not text, or too long, is refused", async () => {
   );
 });
 
-test("when the email to the sender fails, the deletion is still scheduled and the daily run sends it", async () => {
+test("nothing is deleted before the sender is told, and a late notice still gives the whole wait", async () => {
   sent = [];
   const owner = await createUser("user");
   const admin = await createUser("admin");
   const envelope = await createEnvelope(owner.userId, { status: "declined" });
   const now = Math.floor(Date.now() / 1000);
-  const originalConsoleError = console.error;
 
-  console.error = () => {};
-
-  try {
-    await scheduleAs(admin, envelope.envelopeId, undefined, {
+  await quietly(() =>
+    scheduleAs(admin, envelope.envelopeId, undefined, {
       emailService: createOutbox(true),
       now,
-    });
-  } finally {
-    console.error = originalConsoleError;
-  }
+    }),
+  );
 
   assert.ok(await getScheduledEnvelopeDeletion(envelope.envelopeId, database));
   assert.deepEqual(emailsTo(owner.email), []);
 
-  const summary = await runScheduledEnvelopeDeletions({
-    database,
-    emailService: createOutbox(),
-    now: now + DAY,
-    storageService,
-  });
+  // Past the date, but the sender was never told: it stays.
+  const unsent = await quietly(() => runDaily(now + WAIT, createOutbox(true)));
+
+  assert.ok(unsent.noticeFailures.includes(envelope.envelopeId));
+  assert.equal(await envelopeExists(envelope.envelopeId), true);
+  assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT), false);
+
+  // Email is back a day later: the notice goes, with a date a whole wait
+  // from then.
+  const toldAt = now + WAIT + DAY;
+  const summary = await runDaily(toldAt);
 
   assert.ok(summary.noticesSent >= 1);
-  assert.equal(emailsTo(owner.email).length, 1);
+  assert.deepEqual(
+    emailsTo(owner.email).map((message) => message.subject),
+    [
+      `"Lease" will be deleted on ${new Date((toldAt + WAIT) * 1000).toISOString().slice(0, 10)}`,
+    ],
+  );
+  assert.equal(
+    (await getScheduledEnvelopeDeletion(envelope.envelopeId, database))
+      ?.deleteAfter,
+    toldAt + WAIT,
+  );
 
-  // Told once: the next run does not send it again.
-  await runScheduledEnvelopeDeletions({
-    database,
-    emailService: createOutbox(),
-    now: now + 2 * DAY,
-    storageService,
-  });
+  // Told once: the next run does not send it again, nor delete it early.
+  await runDaily(toldAt + DAY);
   assert.equal(emailsTo(owner.email).length, 1);
+  assert.equal(await envelopeExists(envelope.envelopeId), true);
 
-  // And once the wait is over, the run deletes it.
-  const final = await runScheduledEnvelopeDeletions({
-    database,
-    emailService: createOutbox(),
-    now: now + WAIT,
-    storageService,
-  });
+  // Once the new wait is over, the run deletes it.
+  const final = await runDaily(toldAt + WAIT);
 
   assert.ok(final.deleted >= 1);
   assert.deepEqual(final.failures, []);
   assert.equal(await envelopeExists(envelope.envelopeId), false);
+});
+
+test("a cancellation email that fails is sent by the daily run", async () => {
+  sent = [];
+  const owner = await createUser("user");
+  const admin = await createUser("admin");
+  const envelope = await createEnvelope(owner.userId, { status: "completed" });
+  const now = Math.floor(Date.now() / 1000);
+
+  await scheduleAs(admin, envelope.envelopeId, undefined, { now });
+  await quietly(() =>
+    cancelAs(admin, envelope.envelopeId, {
+      emailService: createOutbox(true),
+      now: now + 60,
+    }),
+  );
+
+  assert.equal(emailsTo(owner.email).length, 1);
+
+  await runDaily(now + DAY);
+
+  assert.deepEqual(
+    emailsTo(owner.email)
+      .map((message) => message.subject)
+      .slice(1),
+    ['"Lease" will not be deleted'],
+  );
+
+  // Told once; then the cancelled request is cleared away.
+  await runDaily(now + 2 * DAY);
+  assert.equal(emailsTo(owner.email).length, 2);
+
+  const left = await database.query(
+    `select 1 from scheduled_envelope_deletions where envelope_id = $1`,
+    [envelope.envelopeId],
+  );
+
+  assert.equal(left.rowCount, 0);
+  assert.equal(await envelopeExists(envelope.envelopeId), true);
+});
+
+test("a cancellation while the notice is going out still reaches the sender", async () => {
+  sent = [];
+  const owner = await createUser("user");
+  const admin = await createUser("admin");
+  const envelope = await createEnvelope(owner.userId, { status: "completed" });
+  const now = Math.floor(Date.now() / 1000);
+  const outbox = createOutbox();
+  // The notice is accepted only after another administrator has cancelled.
+  const slowOutbox: EmailService = {
+    ...outbox,
+    async send(message, options) {
+      await cancelAs(admin, envelope.envelopeId, { now: now + 1 });
+      return outbox.send(message, options);
+    },
+  };
+
+  await scheduleAs(admin, envelope.envelopeId, undefined, {
+    emailService: slowOutbox,
+    now,
+  });
+
+  // The cancellation saw no notice yet, so sent nothing; the notice then
+  // went out.
+  assert.equal(emailsTo(owner.email).length, 1);
+  assert.equal(
+    await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+    null,
+  );
+
+  await runDaily(now + DAY);
+
+  assert.deepEqual(
+    emailsTo(owner.email).map((message) => message.subject)[1],
+    '"Lease" will not be deleted',
+  );
+  assert.equal(await deleteWhenDue(envelope.envelopeId, now + 2 * WAIT), false);
+  assert.equal(await envelopeExists(envelope.envelopeId), true);
+});
+
+test("a cancelled deletion can be scheduled again", async () => {
+  const admin = await createUser("admin");
+  const envelope = await createEnvelope(admin.userId, { status: "voided" });
+  const now = Math.floor(Date.now() / 1000);
+
+  await scheduleAs(admin, envelope.envelopeId, "First.", { now });
+  await cancelAs(admin, envelope.envelopeId, { now: now + 10 });
+
+  const again = await scheduleAs(admin, envelope.envelopeId, "Second.", {
+    now: now + 20,
+  });
+
+  assert.equal(again.deleteAfter, now + 20 + WAIT);
+  assert.equal(
+    (await getScheduledEnvelopeDeletion(envelope.envelopeId, database))?.reason,
+    "Second.",
+  );
+  assert.equal(await deleteWhenDue(envelope.envelopeId, now + 20 + WAIT), true);
 });
 
 test("when a file cannot be deleted, the envelope is still deleted and recorded, and the next cleanup deletes the file", async () => {
