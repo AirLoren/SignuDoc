@@ -1561,18 +1561,23 @@ function buildVoidNotificationEmail(input: {
   senderName: string;
   signerEmail: string;
   signerName: string;
+  /** The signer had already signed, so the document they signed won't be completed. */
+  signerSigned?: boolean;
 }) {
   const subject = `"${input.envelopeTitle}" was voided by ${input.senderName}`;
+  const outcome = input.signerSigned
+    ? "The signing process has been canceled, so the document you signed will not be completed. No further action is needed."
+    : "The signing process has been canceled. No further action is needed.";
   const textBody = [
     `Hi ${input.signerName},`,
     "",
     `${input.senderName} voided "${input.envelopeTitle}" in ${input.branding.productName}.`,
-    "The signing process has been canceled. No further action is needed.",
+    outcome,
   ].join("\n");
   const htmlBody = [
     `<p>Hi ${escapeHtml(input.signerName)},</p>`,
     `<p>${escapeHtml(input.senderName)} voided &ldquo;${escapeHtml(input.envelopeTitle)}&rdquo; in ${escapeHtml(input.branding.productName)}.</p>`,
-    "<p>The signing process has been canceled. No further action is needed.</p>",
+    `<p>${escapeHtml(outcome)}</p>`,
   ].join("");
   const legalFooter = withUserEmailLegalFooter(
     {
@@ -3349,6 +3354,12 @@ export async function voidSentEnvelope(
     (signer) => signer.status === "notified",
   );
   const currentSigner = notifiedSigners[0];
+  // Everyone who was sent the envelope hears that it was voided: the signer
+  // whose turn it is, and those who already signed it. Signers still waiting
+  // for their turn were never invited, so they get nothing.
+  const invitedSigners = signers.filter(
+    (signer) => signer.status === "notified" || signer.status === "signed",
+  );
   const voidedAt = Math.floor(Date.now() / 1000);
   const emailService = createEmailService();
   const storageService = createStorageService();
@@ -3565,7 +3576,7 @@ export async function voidSentEnvelope(
   const branding = await getBranding().catch(() => null);
 
   await Promise.all(
-    notifiedSigners.map(async (signer) => {
+    invitedSigners.map(async (signer) => {
       try {
         if (!branding) {
           throw new Error(
@@ -3581,6 +3592,7 @@ export async function voidSentEnvelope(
             senderName: input.senderName,
             signerEmail: signer.email,
             signerName: signer.name,
+            signerSigned: signer.status === "signed",
           }),
         );
 
