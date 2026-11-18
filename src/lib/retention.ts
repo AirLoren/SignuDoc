@@ -972,8 +972,18 @@ async function applyRetentionPeriod(
       if (deleted) {
         summary.finishedEnvelopesDeleted += 1;
 
+        // A file that cannot be deleted stays queued for the next sweep,
+        // and this run is reported as failed for it.
+        let filesLeft = false;
+
         for (const key of keys) {
-          await deletePendingFile(key, database, storageService);
+          if (!(await deletePendingFile(key, database, storageService))) {
+            filesLeft = true;
+          }
+        }
+
+        if (filesLeft) {
+          summary.finishedEnvelopeDeletionFailures.push(envelope.id);
         }
 
         await deleteThumbnailStoredMeanwhile(envelope, storageService);

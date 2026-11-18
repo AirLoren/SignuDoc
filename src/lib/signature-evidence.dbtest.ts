@@ -508,3 +508,79 @@ test("a deletion scheduled after the retention period's list was read still keep
   assert.equal(scheduled, true);
   assert.equal(await envelopeOwner(record), owner);
 });
+
+test("a file the retention period cannot delete stays queued, and the run reports it", async () => {
+  const owner = await createUser();
+  const now = 2_000_000_000;
+  const day = 24 * 60 * 60;
+  const record = await createEnvelope(
+    owner,
+    "completed",
+    "storage-down@example.test",
+    now - 400 * day,
+  );
+  const emailService = {
+    send: async (message: { to: string }) => ({
+      accepted: [message.to],
+      rejected: [],
+    }),
+    sendBatch: async () => [],
+  } as unknown as EmailService;
+  const failingStorage = {
+    ...storage(),
+    deleteObject: async () => {
+      throw new Error("Storage is down.");
+    },
+  } as ReturnType<typeof storage>;
+
+  await database.query(
+    `update envelopes set retention_warned_at = $1 where id = $2`,
+    [now - 60 * day, record],
+  );
+  await database.query(
+    `insert into app_settings (id, signup_mode, retention_days, created_at, updated_at)
+     values (true, 'closed', 30, 1, 1)
+     on conflict (id) do update set retention_days = 30`,
+  );
+
+  const originalConsoleError = console.error;
+
+  console.error = () => {};
+
+  try {
+    const summary = await runRetentionSweep({
+      database,
+      emailService,
+      now,
+      storageService: failingStorage,
+    });
+
+    assert.ok(summary.finishedEnvelopeDeletionFailures.includes(record));
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(await envelopeOwner(record), null);
+
+  const queued = await database.query(
+    `select 1 from pending_file_deletions where storage_key = $1`,
+    [`test/${record}.pdf`],
+  );
+
+  assert.equal(queued.rowCount, 1);
+
+  // Storage is back: the next sweep deletes it.
+  await runRetentionSweep({
+    database,
+    emailService,
+    now: now + day,
+    storageService: storage(),
+  });
+
+  const left = await database.query(
+    `select 1 from pending_file_deletions where storage_key = $1`,
+    [`test/${record}.pdf`],
+  );
+
+  assert.equal(left.rowCount, 0);
+});
