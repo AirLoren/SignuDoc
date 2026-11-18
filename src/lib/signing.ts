@@ -58,6 +58,7 @@ import {
 } from "./services/audit.ts";
 import {
   createEmailService,
+  createLazyEmailService,
   fitsAsAttachments,
   type EmailAttachment,
   type EmailService,
@@ -2361,7 +2362,7 @@ export async function submitSigningForToken(
     );
   }
 
-  const emailService = givenEmailService ?? createEmailService();
+  const emailService = givenEmailService ?? createLazyEmailService();
   const part11Signature = await reauthenticatePart11Signer(
     context,
     signerChecks.state,
@@ -2750,6 +2751,7 @@ export async function submitSigningForToken(
             copyRecipients,
             envelope: context.envelope,
             fields: completedFields,
+            pages: context.pages,
             signers: completedSigners,
             sourcePdf: {
               bucketName: sourcePdfHead.bucketName,
@@ -3039,7 +3041,7 @@ export async function declineSigningForToken(
   const context = await resolveSigningContext(token, { database });
 
   await assertSignerChecksPassed(context, verifiedMethods, database);
-  const emailService = createEmailService();
+  const emailService = createLazyEmailService();
   const storageService = createStorageService();
   const currentSignerId = context.signer.id;
   const presentedTokenHash = hashOpaqueToken(token);
