@@ -1118,7 +1118,7 @@ export function EnvelopeDetailShell({
           confirmLabel="Void envelope"
           description={[
             "This will cancel the signing process.",
-            "Notified signers will be informed that the envelope has been voided.",
+            "Signers who were sent the envelope, including those who already signed, will be told it was voided.",
             "This action cannot be undone.",
           ]}
           confirmDisabled={record.part11 && voidReason.trim().length === 0}
