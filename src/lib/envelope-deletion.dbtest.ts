@@ -682,6 +682,78 @@ test("a cancellation while the notice is going out still reaches the sender", as
   assert.equal(await envelopeExists(envelope.envelopeId), true);
 });
 
+test("a cancellation email still owed is not sent once the deletion is scheduled again", async () => {
+  sent = [];
+  const admin = await createUser("admin");
+  const first = { owner: await createUser("user") };
+  const second = { owner: await createUser("user") };
+  const firstEnvelope = await createEnvelope(first.owner.userId, {
+    status: "completed",
+  });
+  const secondEnvelope = await createEnvelope(second.owner.userId, {
+    status: "completed",
+  });
+  // Long ago, so the daily run reaches these two before anything else.
+  const start = 1_000_000_000;
+
+  // The first sender is still owed their notice.
+  await quietly(() =>
+    scheduleAs(admin, firstEnvelope.envelopeId, undefined, {
+      emailService: createOutbox(true),
+      now: start,
+    }),
+  );
+  // The second was told, then the cancellation email failed.
+  await scheduleAs(admin, secondEnvelope.envelopeId, undefined, {
+    now: start + 1,
+  });
+  await quietly(() =>
+    cancelAs(admin, secondEnvelope.envelopeId, {
+      emailService: createOutbox(true),
+      now: start + 2,
+    }),
+  );
+
+  // While the daily run sends the first notice, an administrator schedules
+  // the second deletion again, and its sender is told so.
+  const outbox = createOutbox();
+  let rescheduled = false;
+  const reschedulingOutbox: EmailService = {
+    ...outbox,
+    async send(message, options) {
+      if (!rescheduled && message.to === first.owner.email) {
+        rescheduled = true;
+        await scheduleAs(admin, secondEnvelope.envelopeId, "Again.", {
+          now: start + DAY,
+        });
+      }
+
+      return outbox.send(message, options);
+    },
+  };
+
+  await runDaily(start + DAY, reschedulingOutbox);
+
+  assert.equal(rescheduled, true);
+  // The old cancellation never followed the new notice.
+  assert.deepEqual(
+    emailsTo(second.owner.email).map((message) => message.subject),
+    [
+      `"Lease" will be deleted on ${new Date((start + 1 + WAIT) * 1000).toISOString().slice(0, 10)}`,
+      `"Lease" will be deleted on ${new Date((start + DAY + WAIT) * 1000).toISOString().slice(0, 10)}`,
+    ],
+  );
+  assert.equal(
+    (await getScheduledEnvelopeDeletion(secondEnvelope.envelopeId, database))
+      ?.reason,
+    "Again.",
+  );
+
+  // Nor does a later run send it.
+  await runDaily(start + 2 * DAY);
+  assert.equal(emailsTo(second.owner.email).length, 2);
+});
+
 test("a cancelled deletion can be scheduled again", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "voided" });

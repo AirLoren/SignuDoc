@@ -733,6 +733,16 @@ type FinishedEnvelopeRow = EnvelopeArtifactRow & {
   title: string;
 };
 
+async function hasScheduledDeletionsTable(
+  database: DbExecutor,
+): Promise<boolean> {
+  const result = await database.query<{ present: boolean }>(
+    `SELECT to_regclass('scheduled_envelope_deletions') IS NOT NULL AS present`,
+  );
+
+  return result.rows[0]?.present === true;
+}
+
 /**
  * Finished envelopes there is something to do with now: not yet warned and
  * inside the warning window, or warned long enough ago and past the period.
@@ -747,6 +757,17 @@ async function listFinishedEnvelopesToHandle(
   }: { deleteBefore: number; warnBefore: number; warnedBefore: number },
   database: DbExecutor,
 ): Promise<FinishedEnvelopeRow[]> {
+  // An administrator's scheduled deletion has its own notice and wait,
+  // which this timer must not cut short. A database the new migration has
+  // not reached yet has no such deletions, and its retention keeps working.
+  const scheduledDeletionClause = (await hasScheduledDeletionsTable(database))
+    ? `AND NOT EXISTS (
+          SELECT 1
+          FROM scheduled_envelope_deletions s
+          WHERE s.envelope_id = e.id AND s.cancelled_at IS NULL
+        )`
+    : "";
+
   return queryMany<FinishedEnvelopeRow>(
     database,
     `
@@ -769,13 +790,7 @@ async function listFinishedEnvelopesToHandle(
         -- Part 11 records are kept for as long as the rules that apply to
         -- them say, never by this timer.
         AND NOT e.part11
-        -- An administrator's scheduled deletion has its own notice and
-        -- wait, which this timer must not cut short.
-        AND NOT EXISTS (
-          SELECT 1
-          FROM scheduled_envelope_deletions s
-          WHERE s.envelope_id = e.id AND s.cancelled_at IS NULL
-        )
+        ${scheduledDeletionClause}
         AND (
           (
             e.retention_warned_at IS NULL

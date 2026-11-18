@@ -720,6 +720,38 @@ const CANCELLED_KEPT_SECONDS = DAY_IN_SECONDS;
 /** After this, a cancellation notice that keeps failing is given up. */
 const CANCELLED_GIVE_UP_SECONDS = 30 * DAY_IN_SECONDS;
 
+/** Whether the notice a row was read as owing is still owed, as it is now. */
+async function isNoticeStillOwed(
+  row: PendingNoticeRow,
+  database: DbExecutor,
+): Promise<boolean> {
+  const result =
+    row.cancelledAt === null
+      ? await database.query(
+          `
+            SELECT 1
+            FROM scheduled_envelope_deletions
+            WHERE envelope_id = $1
+              AND requested_at = $2
+              AND cancelled_at IS NULL
+              AND sender_notified_at IS NULL
+          `,
+          [row.envelopeId, row.requestedAt],
+        )
+      : await database.query(
+          `
+            SELECT 1
+            FROM scheduled_envelope_deletions
+            WHERE envelope_id = $1
+              AND cancelled_at = $2
+              AND cancel_notified_at IS NULL
+          `,
+          [row.envelopeId, row.cancelledAt],
+        );
+
+  return result.rowCount === 1;
+}
+
 /**
  * The daily part: emails any sender still owed a notice of a deletion or of
  * its cancellation, clears cancelled requests nobody is owed anything for,
@@ -775,6 +807,12 @@ export async function runScheduledEnvelopeDeletions({
 
   for (const row of owed) {
     try {
+      // The list was read before any of it was sent: a request rescheduled
+      // or cancelled since then is owed something else, or nothing.
+      if (!(await isNoticeStillOwed(row, database))) {
+        continue;
+      }
+
       service ??= createEmailService();
 
       if (row.cancelledAt === null) {
