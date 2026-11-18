@@ -13,6 +13,9 @@ import { PageHeader } from "@/components/shared/page-header";
 
 export type DashboardShellState = "default" | "empty" | "error";
 
+/** An administrator's dashboard: their own envelopes, or everyone's. */
+export type DashboardView = "all" | "mine";
+
 export type DashboardFilter =
   "All" | "Draft" | "Sent" | "Completed" | "Declined" | "Voided";
 
@@ -59,6 +62,8 @@ const statusPillClasses: Record<EnvelopeStatus, string> = {
 
 type DashboardDocumentsHeaderProps = {
   interactive?: boolean;
+  /** Shown to administrators only. */
+  view?: DashboardView;
 };
 
 type DashboardDocumentsPanelProps = {
@@ -91,6 +96,7 @@ type ErrorBannerProps = {
 
 export function DashboardDocumentsHeader({
   interactive = true,
+  view,
 }: DashboardDocumentsHeaderProps) {
   const label = (
     <>
@@ -104,17 +110,43 @@ export function DashboardDocumentsHeader({
   );
 
   return (
-    <PageHeader
-      action={
-        interactive ? (
-          <ShellButton href="/envelopes/new">{label}</ShellButton>
-        ) : (
-          <StaticShellButton>{label}</StaticShellButton>
-        )
-      }
-      description={documentsDescription}
-      title="Documents"
-    />
+    <>
+      <PageHeader
+        action={
+          interactive ? (
+            <ShellButton href="/envelopes/new">{label}</ShellButton>
+          ) : (
+            <StaticShellButton>{label}</StaticShellButton>
+          )
+        }
+        description={
+          view === "all"
+            ? "Every envelope in your organization, whoever sent it."
+            : documentsDescription
+        }
+        title={view === "all" ? "All envelopes" : "Documents"}
+      />
+      {view && interactive ? (
+        <nav aria-label="Whose envelopes" className="segmented self-start">
+          <Link
+            aria-current={view === "mine" ? "page" : undefined}
+            className="segmented-item"
+            data-active={view === "mine"}
+            href="/dashboard"
+          >
+            Mine
+          </Link>
+          <Link
+            aria-current={view === "all" ? "page" : undefined}
+            className="segmented-item"
+            data-active={view === "all"}
+            href="/dashboard?view=all"
+          >
+            Everyone&apos;s
+          </Link>
+        </nav>
+      ) : null}
+    </>
   );
 }
 
@@ -266,6 +298,12 @@ function EnvelopeCard({
         >
           {envelope.title}
         </span>
+        {envelope.senderLabel ? (
+          <span className="block truncate text-[0.8125rem] text-(--secondary)">
+            <span className="sr-only">Sent by </span>
+            {envelope.senderLabel}
+          </span>
+        ) : null}
         <span className="block truncate text-[0.8125rem] text-(--tertiary)">
           {envelope.contextLine}
         </span>

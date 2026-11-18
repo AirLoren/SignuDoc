@@ -7,6 +7,7 @@ import {
   getEnvelopeThumbnailForUser,
   saveEnvelopeThumbnailForUser,
 } from "@/lib/envelopes";
+import { resolveEnvelopeViewerAccess } from "@/lib/envelope-access";
 import { logRouteError } from "@/lib/security/logging";
 import {
   applyRateLimit,
@@ -37,8 +38,9 @@ const privateNoStore = { "cache-control": "private, no-store" };
 // plan allows before it stops serving files.
 const privateRevalidate = { "cache-control": "private, no-cache" };
 
-// The picture of a document's first page that the dashboard shows. Only the
-// account that owns the envelope can read or write it.
+// The picture of a document's first page that the dashboard shows. The
+// account that owns the envelope can read and write it; an administrator,
+// who sees every envelope, can read it.
 export async function GET(
   request: Request,
   context: EnvelopeThumbnailRouteContext,
@@ -53,10 +55,21 @@ export async function GET(
   const { id } = await context.params;
 
   try {
-    const thumbnail = await getEnvelopeThumbnailForUser(session.user.id, id, {
-      database: getDb(),
-      ifNoneMatch: request.headers.get("if-none-match"),
-    });
+    // Its sender's, or any envelope for an administrator. Saving a picture
+    // (POST) stays with the sender.
+    const access = await resolveEnvelopeViewerAccess(
+      session.user.id,
+      id,
+      getDb(),
+    );
+    const thumbnail = await getEnvelopeThumbnailForUser(
+      access?.ownerUserId ?? session.user.id,
+      id,
+      {
+        database: getDb(),
+        ifNoneMatch: request.headers.get("if-none-match"),
+      },
+    );
 
     if (thumbnail.isNotModified) {
       return new Response(null, {

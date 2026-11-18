@@ -41,6 +41,12 @@ type EnvelopeDetailShellProps = {
   canDeleteFinished?: boolean;
   envelopeId: string;
   initialState?: "error" | "not-found";
+  /**
+   * Who sent it, when an administrator is looking at another member's
+   * envelope. They can read it, download its files and delete it once it
+   * is finished; the rest stays with its sender.
+   */
+  ownerLabel?: string;
   record?: EnvelopeDetailData;
 };
 
@@ -130,8 +136,10 @@ export function EnvelopeDetailShell({
   canDeleteFinished = false,
   envelopeId,
   initialState,
+  ownerLabel,
   record,
 }: EnvelopeDetailShellProps) {
+  const isOwnEnvelope = ownerLabel === undefined;
   const [activeModal, setActiveModal] = useState<ModalState>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isChangingDeadline, setIsChangingDeadline] = useState(false);
@@ -439,7 +447,12 @@ export function EnvelopeDetailShell({
         return;
       }
 
-      window.location.assign(payload?.redirectPath ?? "/dashboard");
+      // Back to the list it came from.
+      window.location.assign(
+        isOwnEnvelope
+          ? (payload?.redirectPath ?? "/dashboard")
+          : "/dashboard?view=all",
+      );
     } catch {
       // The request may or may not have reached the server.
       setActionError(
@@ -489,9 +502,9 @@ export function EnvelopeDetailShell({
       <section className="panel p-5 sm:p-8" data-animate="enter">
         <Link
           className="inline-flex items-center text-sm font-semibold text-(--secondary) transition hover:text-(--accent-ink)"
-          href="/dashboard"
+          href={isOwnEnvelope ? "/dashboard" : "/dashboard?view=all"}
         >
-          ← Documents
+          {isOwnEnvelope ? "← Documents" : "← All envelopes"}
         </Link>
 
         <div className="mt-5 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
@@ -525,6 +538,11 @@ export function EnvelopeDetailShell({
                 <p className="text-sm text-(--secondary)">
                   Created {activeRecord.createdAtLabel}
                 </p>
+                {ownerLabel ? (
+                  <p className="text-sm text-(--secondary)">
+                    Sent by {ownerLabel}
+                  </p>
+                ) : null}
                 {record.signatureTypeLabel ? (
                   <span className="pill pill-neutral">
                     {record.signatureTypeLabel}
@@ -535,7 +553,7 @@ export function EnvelopeDetailShell({
           </div>
 
           <div className="flex shrink-0 flex-col gap-3 sm:flex-row sm:flex-wrap lg:justify-end">
-            {activeRecord.status === "draft" ? (
+            {isOwnEnvelope && activeRecord.status === "draft" ? (
               <>
                 <ShellButton
                   onClick={() => setActiveModal("delete-draft")}
@@ -549,7 +567,7 @@ export function EnvelopeDetailShell({
               </>
             ) : null}
 
-            {activeRecord.status === "sent" ? (
+            {isOwnEnvelope && activeRecord.status === "sent" ? (
               <>
                 <ShellButton
                   onClick={() => setActiveModal("void-envelope")}
@@ -598,15 +616,17 @@ export function EnvelopeDetailShell({
 
             {activeRecord.status !== "draft" ? (
               <>
-                <ShellButton
-                  onClick={() => {
-                    setActionError(null);
-                    setActiveModal("copy-draft");
-                  }}
-                  variant="secondary"
-                >
-                  Copy to new draft
-                </ShellButton>
+                {isOwnEnvelope ? (
+                  <ShellButton
+                    onClick={() => {
+                      setActionError(null);
+                      setActiveModal("copy-draft");
+                    }}
+                    variant="secondary"
+                  >
+                    Copy to new draft
+                  </ShellButton>
+                ) : null}
                 <ShellButton
                   onClick={() =>
                     // A file download from an API route, not a page navigation.
@@ -658,16 +678,18 @@ export function EnvelopeDetailShell({
             >
               {deadlineText}
             </p>
-            <button
-              className="btn-quiet shrink-0"
-              onClick={() => {
-                setActionError(null);
-                setActiveModal("change-deadline");
-              }}
-              type="button"
-            >
-              {isExpired ? "Set a new deadline" : "Change deadline"}
-            </button>
+            {isOwnEnvelope ? (
+              <button
+                className="btn-quiet shrink-0"
+                onClick={() => {
+                  setActionError(null);
+                  setActiveModal("change-deadline");
+                }}
+                type="button"
+              >
+                {isExpired ? "Set a new deadline" : "Change deadline"}
+              </button>
+            ) : null}
           </div>
         ) : null}
 
@@ -676,16 +698,18 @@ export function EnvelopeDetailShell({
             <p className="text-sm leading-6 text-(--secondary)">
               {remindersText}
             </p>
-            <button
-              className="btn-quiet shrink-0"
-              onClick={() => {
-                setActionError(null);
-                setActiveModal("change-reminders");
-              }}
-              type="button"
-            >
-              Change reminders
-            </button>
+            {isOwnEnvelope ? (
+              <button
+                className="btn-quiet shrink-0"
+                onClick={() => {
+                  setActionError(null);
+                  setActiveModal("change-reminders");
+                }}
+                type="button"
+              >
+                Change reminders
+              </button>
+            ) : null}
           </div>
         ) : null}
 
@@ -704,7 +728,7 @@ export function EnvelopeDetailShell({
               View templates
             </Link>
           </div>
-        ) : activeRecord.signers.length > 0 ? (
+        ) : isOwnEnvelope && activeRecord.signers.length > 0 ? (
           <div
             className={`well flex flex-col gap-3 px-5 py-3.5 sm:flex-row sm:items-center sm:justify-between ${
               deadlineText || deadline ? "mt-3" : "mt-5"
@@ -796,7 +820,8 @@ export function EnvelopeDetailShell({
                               {signer.statusDateLabel}
                             </p>
                           ) : null}
-                          {activeRecord.status === "sent" &&
+                          {isOwnEnvelope &&
+                          activeRecord.status === "sent" &&
                           !record.part11 &&
                           (signer.status === "waiting" ||
                             signer.status === "pending") ? (

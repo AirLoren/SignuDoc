@@ -125,6 +125,7 @@ import {
   getManualNudgeAvailableAt,
   isManualNudgeAvailable,
 } from "./services/reminders.ts";
+import { formatEnvelopeOwner } from "./envelope-access.ts";
 import { PERMITTED_USE_VERSION } from "./permitted-uses.ts";
 import { hashAccessCode } from "./signer-checks.ts";
 import { escapeHtml } from "./utils/html.ts";
@@ -306,6 +307,8 @@ export type DashboardEnvelopeListItem = {
   expired?: boolean;
   id: string;
   searchableEmails: readonly string[];
+  /** Who sent it, in an administrator's list of every envelope. */
+  senderLabel?: string;
   status: EnvelopeRecord["status"];
   /** What the status pill says: the status, or how far signing has got. */
   statusLabel: string;
@@ -1787,10 +1790,29 @@ export async function listEnvelopesForUser(
   filters: Partial<EnvelopeListFilters> = {},
   database: DbExecutor = getDb(),
 ): Promise<DashboardEnvelopeListItem[]> {
+  return listEnvelopes(userId, filters, database);
+}
+
+/**
+ * Every envelope in the install, whoever sent it, each with its sender.
+ * For an administrator: the caller checks the role.
+ */
+export async function listAllEnvelopesForAdmin(
+  filters: Partial<EnvelopeListFilters> = {},
+  database: DbExecutor = getDb(),
+): Promise<DashboardEnvelopeListItem[]> {
+  return listEnvelopes(null, filters, database);
+}
+
+async function listEnvelopes(
+  ownerUserId: string | null,
+  filters: Partial<EnvelopeListFilters>,
+  database: DbExecutor,
+): Promise<DashboardEnvelopeListItem[]> {
   const parsedFilters = envelopeListFiltersSchema.parse(filters);
-  const values: unknown[] = [userId];
-  const clauses = ["user_id = $1"];
-  let nextParamIndex = 2;
+  const values: unknown[] = ownerUserId === null ? [] : [ownerUserId];
+  const clauses = ownerUserId === null ? ["TRUE"] : ["user_id = $1"];
+  let nextParamIndex = values.length + 1;
 
   if (parsedFilters.status) {
     clauses.push(`status = $${String(nextParamIndex)}`);
@@ -1863,12 +1885,30 @@ export async function listEnvelopesForUser(
       listFieldsForEnvelopeIds(envelopeIds, database),
       listCopyRecipientsForEnvelopeIds(envelopeIds, database),
     ]);
+  const sendersById =
+    ownerUserId === null
+      ? await listSendersById(
+          envelopes.map((envelope) => envelope.userId),
+          database,
+        )
+      : null;
 
   return envelopes.map((envelope) => {
     const signers = signersByEnvelope.get(envelope.id) ?? [];
     const fields = fieldsByEnvelope.get(envelope.id) ?? [];
+    const sender = sendersById?.get(envelope.userId);
 
     return {
+      ...(sendersById
+        ? {
+            senderLabel: sender
+              ? formatEnvelopeOwner({
+                  ownerEmail: sender.email,
+                  ownerName: sender.name,
+                })
+              : "Unknown sender",
+          }
+        : {}),
       contextLine: buildDashboardContextLine(envelope, signers, fields),
       createdAtLabel: formatShortDate(envelope.createdAt),
       expired: isEnvelopeExpired(envelope, Math.floor(Date.now() / 1000)),
@@ -1883,6 +1923,27 @@ export async function listEnvelopesForUser(
       title: envelope.title,
     };
   });
+}
+
+type SenderRow = { email: string; id: string; name: string | null };
+
+async function listSendersById(
+  userIds: readonly string[],
+  database: DbExecutor,
+): Promise<Map<string, SenderRow>> {
+  const uniqueIds = [...new Set(userIds)];
+
+  if (uniqueIds.length === 0) {
+    return new Map();
+  }
+
+  const rows = await queryMany<SenderRow>(
+    database,
+    `SELECT id, name, email FROM public."user" WHERE id = ANY($1::text[])`,
+    [uniqueIds],
+  );
+
+  return new Map(rows.map((row) => [row.id, row]));
 }
 
 export async function getEnvelopeDetailDataForUser(

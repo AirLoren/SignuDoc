@@ -10,6 +10,7 @@ import {
   dashboardStatusFilterMap,
   type DashboardFilter,
   type DashboardShellState,
+  type DashboardView,
 } from "@/components/dashboard/dashboard-documents-surface";
 import { DocumentThumbnail } from "@/components/shared/document-thumbnail";
 import { ShellButton } from "@/components/shared/form-shell";
@@ -17,11 +18,14 @@ import { ShellButton } from "@/components/shared/form-shell";
 type DashboardShellProps = {
   envelopes?: readonly DashboardEnvelopeListItem[];
   initialState?: DashboardShellState;
+  /** For an administrator: their own envelopes, or everyone's. */
+  view?: DashboardView;
 };
 
 export function DashboardShell({
   envelopes: providedEnvelopes,
   initialState = "default",
+  view,
 }: DashboardShellProps) {
   const [searchValue, setSearchValue] = useState("");
   const [selectedFilter, setSelectedFilter] = useState<DashboardFilter>("All");
@@ -66,10 +70,14 @@ export function DashboardShell({
 
   return (
     <div className="space-y-5">
-      <DashboardDocumentsHeader />
+      <DashboardDocumentsHeader view={view} />
 
       {initialState === "empty" ? (
-        <EmptyDashboardState />
+        view === "all" ? (
+          <EmptyInstallState />
+        ) : (
+          <EmptyDashboardState />
+        )
       ) : (
         <DashboardDocumentsPanel
           envelopes={envelopes}
@@ -84,6 +92,23 @@ export function DashboardShell({
         />
       )}
     </div>
+  );
+}
+
+function EmptyInstallState() {
+  return (
+    <section
+      className="panel px-6 py-14 text-center sm:py-20"
+      data-animate="enter"
+      data-animate-delay="1"
+    >
+      <h2 className="text-2xl font-extrabold tracking-[-0.03em] text-(--fg)">
+        No envelopes yet
+      </h2>
+      <p className="mt-2 text-[0.9375rem] leading-6 text-(--secondary)">
+        Nobody in your organization has started an envelope.
+      </p>
+    </section>
   );
 }
 

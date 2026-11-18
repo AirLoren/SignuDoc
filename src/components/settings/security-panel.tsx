@@ -25,6 +25,7 @@ const EVENT_LABELS: Record<SystemAuditEvent["event"], string> = {
   account_deleted: "Account deleted",
   email_domain_changed: "Email domain changed",
   envelope_deleted: "Finished envelope deleted",
+  envelope_file_downloaded: "Another member's file downloaded",
   identity_verification_revoked: "Identity confirmation taken back",
   identity_verified: "Identity confirmed",
   logo_changed: "Logo changed",
@@ -100,6 +101,20 @@ function describeEvent(event: SystemAuditEvent): string {
         typeof metadata.title === "string" ? `"${metadata.title}"` : null,
         typeof metadata.status === "string" ? metadata.status : null,
         typeof metadata.reason === "string" ? metadata.reason : null,
+        typeof metadata.ownerEmail === "string"
+          ? `sent by ${metadata.ownerEmail}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+    case "envelope_file_downloaded":
+      return [
+        typeof metadata.file === "string"
+          ? (downloadedFileLabels[metadata.file] ?? metadata.file)
+          : null,
+        typeof metadata.ownerEmail === "string"
+          ? `sent by ${metadata.ownerEmail}`
+          : null,
       ]
         .filter(Boolean)
         .join(", ");
@@ -107,6 +122,12 @@ function describeEvent(event: SystemAuditEvent): string {
       return target ?? "";
   }
 }
+
+const downloadedFileLabels: Record<string, string> = {
+  audit_trail: "audit trail",
+  evidence: "certificate",
+  signed: "signed PDF",
+};
 
 function describeMinutes(minutes: number): string {
   return minutes < 60
