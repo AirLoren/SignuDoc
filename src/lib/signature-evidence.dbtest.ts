@@ -431,3 +431,80 @@ test("retention keeps working on a database the scheduled-deletion migration has
 
   assert.equal(await envelopeOwner(record), null);
 });
+
+test("a deletion scheduled after the retention period's list was read still keeps the envelope", async () => {
+  const owner = await createUser();
+  const now = 2_000_000_000;
+  const day = 24 * 60 * 60;
+  const record = await createEnvelope(
+    owner,
+    "completed",
+    "scheduled-meanwhile@example.test",
+    now - 400 * day,
+  );
+  const emailService = {
+    send: async (message: { to: string }) => ({
+      accepted: [message.to],
+      rejected: [],
+    }),
+    sendBatch: async () => [],
+  } as unknown as EmailService;
+
+  await database.query(
+    `update envelopes set retention_warned_at = $1 where id = $2`,
+    [now - 60 * day, record],
+  );
+  await database.query(
+    `insert into app_settings (id, signup_mode, retention_days, created_at, updated_at)
+     values (true, 'closed', 30, 1, 1)
+     on conflict (id) do update set retention_days = 30`,
+  );
+
+  // Once the sweep has read which envelopes are due, an administrator
+  // schedules this one's deletion.
+  let scheduled = false;
+  const watched = new Proxy(database, {
+    get(target, property) {
+      if (property === "query") {
+        return async (...args: Parameters<pg.Pool["query"]>) => {
+          const result = await (
+            target.query as (...a: unknown[]) => Promise<unknown>
+          )(...args);
+
+          if (
+            !scheduled &&
+            typeof args[0] === "string" &&
+            args[0].includes("retention_warned_at AS")
+          ) {
+            scheduled = true;
+            await target.query(
+              `
+                insert into scheduled_envelope_deletions (
+                  envelope_id, requested_by_user_id, requested_by_email,
+                  requested_at, delete_after, sender_notified_at
+                ) values ($1, $2, 'admin@example.test', $3, $4, $3)
+              `,
+              [record, owner, now, now + 14 * day],
+            );
+          }
+
+          return result;
+        };
+      }
+
+      const value: unknown = Reflect.get(target, property);
+
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  await runRetentionSweep({
+    database: watched,
+    emailService,
+    now,
+    storageService: storage(),
+  });
+
+  assert.equal(scheduled, true);
+  assert.equal(await envelopeOwner(record), owner);
+});
