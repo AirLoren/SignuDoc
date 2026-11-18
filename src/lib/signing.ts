@@ -30,6 +30,7 @@ import {
 import {
   signerCheckRequestSchema,
   signerConsentRequestSchema,
+  signingFieldFitRequestSchema,
   signingPayloadSchema,
   signingDeclineResponseSchema,
   type SigningVerificationState,
@@ -318,6 +319,10 @@ function getSigningSubmitUrl(token: string): string {
 
 function getSigningConsentUrl(token: string): string {
   return `/api/signing/${encodeURIComponent(token)}/consent`;
+}
+
+function getSigningFieldFitUrl(token: string): string {
+  return `/api/signing/${encodeURIComponent(token)}/fit`;
 }
 
 function getSigningDeclineUrl(token: string): string {
@@ -1617,6 +1622,47 @@ export async function verifySignerCheck(
 }
 
 /** Records that the signer agreed to use electronic records and signatures. */
+/**
+ * Whether what the signer has typed so far fits the field's box on the
+ * finished document, checked as they type, so they learn before they finish.
+ * The same check signing makes, with the same fonts.
+ */
+export async function checkSigningFieldFit(
+  token: string,
+  input: unknown,
+  {
+    database = getDb(),
+    verifiedMethods = [],
+  }: Pick<SubmitSigningOptions, "database" | "verifiedMethods"> = {},
+): Promise<{ fits: true } | { fits: false; maxCharacters: number }> {
+  const parsed = signingFieldFitRequestSchema.parse(input);
+  const context = await resolveSigningContext(token, { database });
+
+  await assertSignerChecksPassed(context, verifiedMethods, database);
+
+  const field = context.fields.find(
+    (entry) =>
+      entry.id === parsed.fieldId &&
+      entry.signerId === context.signer.id &&
+      (entry.type === "text" ||
+        entry.type === "number" ||
+        entry.type === "dropdown"),
+  );
+
+  if (!field) {
+    throw new SigningMutationError("That field is not yours to fill in.", 404);
+  }
+
+  const tooLong = await findTypedValueTooLongForField(
+    [{ field, value: parsed.value }],
+    context.pages,
+  );
+
+  return tooLong
+    ? { fits: false, maxCharacters: tooLong.maxCharacters }
+    : { fits: true };
+}
+
 export async function recordSignerConsent(
   token: string,
   input: unknown,
@@ -1872,6 +1918,7 @@ export async function getSigningPayloadForToken(
 
   return signingPayloadSchema.parse({
     consentUrl: getSigningConsentUrl(token),
+    fieldFitUrl: getSigningFieldFitUrl(token),
     consentedAt: checkState.consentedAt,
     currentSignerFields,
     disclosure: {

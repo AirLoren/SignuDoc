@@ -10,6 +10,7 @@ import type { EmailService } from "./services/email.ts";
 import { issueSigningLink } from "./services/signing-links.ts";
 import type { StorageService } from "./services/storage.ts";
 import {
+  checkSigningFieldFit,
   recordSignerConsent,
   SigningMutationError,
   submitSigningForToken,
@@ -165,6 +166,33 @@ test("an answer too long for its box is refused, one that wraps to fit is taken"
 
     return { status: signer.rows[0]?.status, value: field.rows[0]?.value };
   };
+
+  // As the signer types: the same answer, checked before they finish.
+  const tooLongNow = await checkSigningFieldFit(
+    link.token,
+    { fieldId: textId, value: `BEGIN ${"W".repeat(240)} FINISH-MARKER` },
+    { database },
+  );
+
+  assert.equal(tooLongNow.fits, false);
+  assert.ok(!tooLongNow.fits && tooLongNow.maxCharacters > 0);
+  assert.deepEqual(
+    await checkSigningFieldFit(
+      link.token,
+      { fieldId: textId, value: "Approved" },
+      { database },
+    ),
+    { fits: true },
+  );
+  await assert.rejects(
+    checkSigningFieldFit(
+      link.token,
+      { fieldId: signatureId, value: "Riley Recipient" },
+      { database },
+    ),
+    (error: unknown) =>
+      error instanceof SigningMutationError && error.statusCode === 404,
+  );
 
   await assert.rejects(
     sign(`BEGIN ${"W".repeat(240)} FINISH-MARKER`),
