@@ -686,12 +686,23 @@ export function SigningLiveShell({
               return;
             }
 
-            setTooLongAnswers((current) =>
+            const maxCharacters =
               payload.fits === false &&
               typeof payload.maxCharacters === "number"
-                ? { ...current, [field.id]: payload.maxCharacters }
-                : withoutKey(current, field.id),
+                ? payload.maxCharacters
+                : null;
+
+            setTooLongAnswers((current) =>
+              maxCharacters === null
+                ? withoutKey(current, field.id)
+                : { ...current, [field.id]: maxCharacters },
             );
+
+            // Opened before the answer was found too long: back to the
+            // page, where the box and the panel say what to shorten.
+            if (maxCharacters !== null) {
+              setIsFinishDialogOpen(false);
+            }
           })
           .catch(giveUp);
       }
