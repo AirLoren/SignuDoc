@@ -297,6 +297,191 @@ function getFieldPadding(widthPt: number, heightPt: number): number {
   return Math.max(2, Math.min(widthPt, heightPt) * 0.12);
 }
 
+/**
+ * The smallest size an answer typed into a field is allowed to need. Signing
+ * refuses an answer that only fits its box below this, so every answer on a
+ * finished document can be read.
+ */
+export const MIN_FIELD_TEXT_SIZE = 4;
+
+/** Below this, a value already accepted is still drawn whole, however small. */
+const LAST_RESORT_FIELD_TEXT_SIZE = 0.5;
+
+const FIELD_TEXT_LINE_HEIGHT = 1.15;
+
+type FieldTextLayout = {
+  /** From the top of the first line to the foot of the last, in points. */
+  blockHeight: number;
+  fits: boolean;
+  lines: string[];
+  size: number;
+};
+
+function layoutAtSize(
+  font: TextFace,
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+  size: number,
+): FieldTextLayout {
+  const lines = wrapText(font, size, maxWidth, text).map((line) => line.text);
+  const blockHeight =
+    lines.length === 0
+      ? 0
+      : (lines.length - 1) * size * FIELD_TEXT_LINE_HEIGHT + size;
+
+  return { blockHeight, fits: blockHeight <= maxHeight, lines, size };
+}
+
+/**
+ * Lays a value out in its box: one line at the preferred size when it fits,
+ * otherwise wrapped onto as many lines as it needs, at the largest size, no
+ * smaller than minSize, at which every line fits. When even minSize is too
+ * big, the layout at minSize is returned with fits false.
+ */
+function layoutFieldText(
+  font: TextFace,
+  text: string,
+  maxWidth: number,
+  maxHeight: number,
+  preferredSize: number,
+  minSize: number,
+): FieldTextLayout {
+  const largest = Math.max(minSize, Math.min(preferredSize, maxHeight));
+  const atLargest = layoutAtSize(font, text, maxWidth, maxHeight, largest);
+
+  if (atLargest.fits) {
+    return atLargest;
+  }
+
+  const atSmallest = layoutAtSize(font, text, maxWidth, maxHeight, minSize);
+
+  if (!atSmallest.fits) {
+    return atSmallest;
+  }
+
+  // A smaller size never needs more room, so the size is found by halving.
+  let best = atSmallest;
+  let low = minSize;
+  let high = largest;
+
+  while (high - low > 0.1) {
+    const middle = (low + high) / 2;
+    const layout = layoutAtSize(font, text, maxWidth, maxHeight, middle);
+
+    if (layout.fits) {
+      best = layout;
+      low = middle;
+    } else {
+      high = middle;
+    }
+  }
+
+  return best;
+}
+
+/** The room a text value has inside its field, as the stamp lays it out. */
+function getTextFieldBox(rect: { heightPt: number; widthPt: number }) {
+  const padding = getFieldPadding(rect.widthPt, rect.heightPt);
+
+  return {
+    maxHeight: Math.max(10, rect.heightPt - padding * 2),
+    maxWidth: Math.max(12, rect.widthPt - padding * 2),
+    padding,
+    preferredSize: Math.min(
+      Math.max(10, rect.heightPt - padding * 2),
+      rect.heightPt * 0.64,
+    ),
+  };
+}
+
+/**
+ * Whether a value typed into a field fits its box at a readable size on the
+ * page it is placed on. When it does not, also the most of its characters
+ * that would.
+ */
+export function measureFieldTextFit(
+  font: TextFace,
+  field: Pick<FieldRecord, "height" | "width" | "x" | "y">,
+  page: Pick<StoredPageSize, "heightPt" | "widthPt">,
+  value: string,
+): { fits: true } | { fits: false; maxCharacters: number } {
+  const text = value.trim();
+  const box = getTextFieldBox(normalizedRectToPdfRect(field, page));
+  const fitsText = (candidate: string) =>
+    layoutFieldText(
+      font,
+      candidate,
+      box.maxWidth,
+      box.maxHeight,
+      box.preferredSize,
+      MIN_FIELD_TEXT_SIZE,
+    ).fits;
+
+  if (fitsText(text)) {
+    return { fits: true };
+  }
+
+  const characters = Array.from(text);
+  let low = 0;
+  let high = characters.length - 1;
+
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+
+    if (fitsText(characters.slice(0, middle).join(""))) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return { fits: false, maxCharacters: low };
+}
+
+/**
+ * The first value a signer typed that would not fit its box at a readable
+ * size, with the most of its characters that would, or null when all fit.
+ * Measured with the fonts the finished document is drawn with.
+ */
+export async function findTypedValueTooLongForField(
+  entries: ReadonlyArray<{
+    field: Pick<FieldRecord, "height" | "page" | "width" | "x" | "y">;
+    value: string;
+  }>,
+  pages: readonly StoredPageSize[],
+): Promise<{ maxCharacters: number; page: number } | null> {
+  const measurable = entries.flatMap((entry) => {
+    const page = pages.find((stored) => stored.pageNumber === entry.field.page);
+
+    return page && entry.value.trim() ? [{ ...entry, pageSize: page }] : [];
+  });
+
+  if (measurable.length === 0) {
+    return null;
+  }
+
+  const faces = await embedTextFaces(
+    await PDFDocument.create(),
+    measurable.map((entry) => entry.value),
+  );
+
+  for (const entry of measurable) {
+    const fit = measureFieldTextFit(
+      faces.regular,
+      entry.field,
+      entry.pageSize,
+      entry.value,
+    );
+
+    if (!fit.fits) {
+      return { maxCharacters: fit.maxCharacters, page: entry.field.page };
+    }
+  }
+
+  return null;
+}
+
 export function shouldStampField(field: FieldRecord): boolean {
   if (field.type === "checkbox" || field.type === "radio") {
     return typeof field.checked === "boolean";
@@ -530,21 +715,40 @@ async function drawFieldValue(
         return;
       }
 
-      const maxWidth = Math.max(12, rect.widthPt - padding * 2);
-      const maxHeight = Math.max(10, rect.heightPt - padding * 2);
-      const fontSize = fitTextSize(
+      // Wrapped and made smaller until the whole value is inside the box.
+      // Signing refuses a value that would only fit below a readable size,
+      // but one accepted earlier is still drawn whole, never cut off.
+      const box = getTextFieldBox(rect);
+      let layout = layoutFieldText(
         fonts.auditRegular,
         textValue,
-        maxWidth,
-        maxHeight,
-        Math.min(maxHeight, rect.heightPt * 0.64),
+        box.maxWidth,
+        box.maxHeight,
+        box.preferredSize,
+        MIN_FIELD_TEXT_SIZE,
       );
 
-      fonts.auditRegular.drawText(page, textValue, {
-        color: rgb(0.12, 0.12, 0.12),
-        size: fontSize,
-        x: rect.xPt + padding,
-        y: rect.yPt + (rect.heightPt - fontSize) / 2 + fontSize * 0.2,
+      if (!layout.fits) {
+        layout = layoutFieldText(
+          fonts.auditRegular,
+          textValue,
+          box.maxWidth,
+          box.maxHeight,
+          MIN_FIELD_TEXT_SIZE,
+          LAST_RESORT_FIELD_TEXT_SIZE,
+        );
+      }
+
+      const { size } = layout;
+      const top = rect.yPt + (rect.heightPt + layout.blockHeight) / 2;
+
+      layout.lines.forEach((line, index) => {
+        fonts.auditRegular.drawText(page, line, {
+          color: rgb(0.12, 0.12, 0.12),
+          size,
+          x: rect.xPt + box.padding,
+          y: top - size * 0.8 - index * size * FIELD_TEXT_LINE_HEIGHT,
+        });
       });
 
       return;

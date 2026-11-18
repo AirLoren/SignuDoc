@@ -66,6 +66,7 @@ import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import { hashOpaqueToken } from "./services/opaque-tokens.ts";
 import {
   finalizeEnvelope,
+  findTypedValueTooLongForField,
   loadInstallSealer,
   storeEnvelopeCertificatePdf,
   storeRecipientEnvelopeCertificatePdf,
@@ -2105,6 +2106,35 @@ async function assertStillSignersTurn(
 type SigningContext = Awaited<ReturnType<typeof resolveSigningContext>>;
 
 /**
+ * Refuses an answer too long to be read in its box on the finished document,
+ * before anything is saved, so the signer can shorten it. Without this the
+ * value would be drawn so small that no one could read it.
+ */
+async function assertTypedValuesFitTheirFields(
+  context: SigningContext,
+  fieldUpdates: ReadonlyMap<string, FieldPersistenceUpdate>,
+) {
+  const entries = context.fields.flatMap((field) => {
+    const value = field.id ? fieldUpdates.get(field.id)?.value : null;
+
+    return (field.type === "text" ||
+      field.type === "number" ||
+      field.type === "dropdown") &&
+      value
+      ? [{ field, value }]
+      : [];
+  });
+  const tooLong = await findTypedValueTooLongForField(entries, context.pages);
+
+  if (tooLong) {
+    throw new SigningMutationError(
+      `An answer on page ${tooLong.page} is too long to fit in its box on the document. Shorten it to ${tooLong.maxCharacters} characters or fewer, or ask the sender for a bigger box.`,
+      400,
+    );
+  }
+}
+
+/**
  * What the signer's submission changes: each of their fields' new value,
  * checked against what the field accepts, and the drawn signatures to store.
  */
@@ -2382,6 +2412,8 @@ export async function submitSigningForToken(
     drawnSignatureUploads,
     fieldUpdates,
   } = buildSignerSubmission(context, parsedInput, submittedAt);
+
+  await assertTypedValuesFitTheirFields(context, fieldUpdates);
   const presentedTokenHash = hashOpaqueToken(token);
 
   let signingStatePersisted = false;
@@ -3009,6 +3041,8 @@ export async function prepareSignerSubmission(
 
   const { currentSignerId, drawnSignatureUploads, fieldUpdates } =
     buildSignerSubmission(context, parsedInput, submittedAt);
+
+  await assertTypedValuesFitTheirFields(context, fieldUpdates);
 
   return {
     context,
