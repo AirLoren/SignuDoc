@@ -11,7 +11,9 @@ import {
   findTypedValueTooLongForField,
   renderEnvelopeCertificatePdf,
   renderFinalizedEnvelopePdf,
+  wrapFieldText,
 } from "./pdf-finalize.ts";
+import { embedTextFaces } from "./pdf-fonts.ts";
 import { sha256Hex } from "./pdf-seal.ts";
 import type { StorageService } from "./storage.ts";
 
@@ -850,5 +852,19 @@ test("a box shorter than two readable lines takes only one", async () => {
       [{ field, value: LONG_ANSWER }],
       [LETTER_PAGE],
     ),
+  );
+});
+
+test("spaces inside an answer are kept as they were typed", async () => {
+  const faces = await embedTextFaces(await PDFDocument.create(), [
+    "AB  12 and more words",
+  ]);
+
+  // pdf.js merges runs of spaces when it extracts text, so the lines are
+  // checked as they are laid out.
+  assert.deepEqual(wrapFieldText(faces.regular, 10, 500, "AB  12"), ["AB  12"]);
+  assert.deepEqual(
+    wrapFieldText(faces.regular, 10, 60, "AB  12 and more words"),
+    ["AB  12 and", "more words"],
   );
 });

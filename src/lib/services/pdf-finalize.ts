@@ -317,6 +317,53 @@ type FieldTextLayout = {
   size: number;
 };
 
+/**
+ * Wraps a field value. Unlike wrapText, the spaces inside a line are kept as
+ * the signer typed them; only those where a line breaks are dropped.
+ */
+export function wrapFieldText(
+  font: TextFace,
+  size: number,
+  maxWidth: number,
+  text: string,
+): string[] {
+  const parts = text.trim().split(/(\s+)/);
+  const lines: string[] = [];
+  let currentLine = "";
+  let pendingSpace = "";
+
+  for (let index = 0; index < parts.length; index += 2) {
+    const word = parts[index] ?? "";
+
+    if (!word) {
+      continue;
+    }
+
+    for (const chunk of chunkLongWord(font, size, maxWidth, word)) {
+      const candidate = currentLine
+        ? `${currentLine}${pendingSpace}${chunk}`
+        : chunk;
+
+      if (!currentLine || font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+        currentLine = candidate;
+      } else {
+        lines.push(currentLine);
+        currentLine = chunk;
+      }
+
+      pendingSpace = "";
+    }
+
+    pendingSpace = parts[index + 1] ?? "";
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines;
+}
+
 function layoutAtSize(
   font: TextFace,
   text: string,
@@ -324,7 +371,7 @@ function layoutAtSize(
   maxHeight: number,
   size: number,
 ): FieldTextLayout {
-  const lines = wrapText(font, size, maxWidth, text).map((line) => line.text);
+  const lines = wrapFieldText(font, size, maxWidth, text);
   const blockHeight =
     lines.length === 0
       ? 0
