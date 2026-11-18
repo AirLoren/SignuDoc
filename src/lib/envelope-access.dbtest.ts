@@ -118,7 +118,11 @@ test("an administrator's list of every envelope names each sender", async () => 
   const firstEnvelope = await createEnvelope(first.userId, "First lease");
   const secondEnvelope = await createEnvelope(second.userId, "Second lease");
 
-  const all = await listAllEnvelopesForAdmin(second.userId, { limit: 100 }, database);
+  const all = await listAllEnvelopesForAdmin(
+    second.userId,
+    { limit: 100 },
+    database,
+  );
   const byId = new Map(
     all.envelopes.map((envelope) => [envelope.id, envelope]),
   );
@@ -212,7 +216,9 @@ test("another member's draft stays theirs: an administrator neither lists nor op
   );
   assert.ok(await resolveEnvelopeViewerAccess(admin.userId, sentId, database));
   // The sender still sees it.
-  assert.ok(await resolveEnvelopeViewerAccess(sender.userId, draftId, database));
+  assert.ok(
+    await resolveEnvelopeViewerAccess(sender.userId, draftId, database),
+  );
 
   const all = await listAllEnvelopesForAdmin(
     admin.userId,

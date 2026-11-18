@@ -224,7 +224,10 @@ function scheduleAs(
   );
 }
 
-function cancelAs(actor: { email: string; userId: string }, envelopeId: string) {
+function cancelAs(
+  actor: { email: string; userId: string },
+  envelopeId: string,
+) {
   return cancelEnvelopeDeletion(
     envelopeId,
     { actor, ipAddress: "203.0.113.9", userAgent: "Test browser" },
@@ -282,12 +285,18 @@ for (const status of ["completed", "declined", "voided"] as const) {
     assert.equal(request?.metadata?.reason, "Kept long enough.");
 
     // A day early, still nothing.
-    assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT - DAY), false);
+    assert.equal(
+      await deleteWhenDue(envelope.envelopeId, now + WAIT - DAY),
+      false,
+    );
     assert.equal(await envelopeExists(envelope.envelopeId), true);
 
     assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT), true);
     assert.equal(await envelopeExists(envelope.envelopeId), false);
-    assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+    assert.equal(
+      await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+      null,
+    );
     assert.deepEqual(
       await filesExist(envelope.stored),
       envelope.stored.map(() => false),
@@ -333,7 +342,10 @@ test("someone who is not an administrator cannot schedule a deletion", async () 
 
   await assert.rejects(scheduleAs(user, envelope.envelopeId), rejectsWith(403));
 
-  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+  assert.equal(
+    await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+    null,
+  );
   assert.deepEqual(await listSystemAuditEvents({ limit: 1 }, database), before);
 });
 
@@ -366,8 +378,11 @@ test("another member's envelope: its sender is emailed, and the records name the
   const [notice] = emailsTo(owner.email);
 
   assert.equal(notice?.template, "deletion_notice");
-  assert.match(notice?.subject ?? "", /^"Lease" will be deleted on \d{4}-\d{2}-\d{2}$/);
-  assert.match(notice?.textBody ?? "", new RegExp(admin.email.replace(/[.]/g, "\\.")));
+  assert.match(
+    notice?.subject ?? "",
+    /^"Lease" will be deleted on \d{4}-\d{2}-\d{2}$/,
+  );
+  assert.ok(notice?.textBody.includes(admin.email));
   // The reason is for administrators.
   assert.doesNotMatch(notice?.textBody ?? "", /legal/);
 
@@ -403,7 +418,10 @@ test("someone who is not an administrator cannot find another member's envelope"
   const other = await createUser("user");
   const envelope = await createEnvelope(owner.userId, { status: "completed" });
 
-  await assert.rejects(scheduleAs(other, envelope.envelopeId), rejectsWith(404));
+  await assert.rejects(
+    scheduleAs(other, envelope.envelopeId),
+    rejectsWith(404),
+  );
   await assert.rejects(cancelAs(other, envelope.envelopeId), rejectsWith(404));
   await assert.rejects(scheduleAs(owner, randomUUID()), rejectsWith(404));
 });
@@ -413,7 +431,10 @@ test("a deletion already scheduled is not scheduled twice", async () => {
   const envelope = await createEnvelope(admin.userId, { status: "completed" });
 
   await scheduleAs(admin, envelope.envelopeId);
-  await assert.rejects(scheduleAs(admin, envelope.envelopeId), rejectsWith(409));
+  await assert.rejects(
+    scheduleAs(admin, envelope.envelopeId),
+    rejectsWith(409),
+  );
 });
 
 test("any administrator can cancel, the sender is told, and nothing is deleted", async () => {
@@ -427,7 +448,10 @@ test("any administrator can cancel, the sender is told, and nothing is deleted",
   await scheduleAs(admin, envelope.envelopeId, "Tidying up.", { now });
   await cancelAs(otherAdmin, envelope.envelopeId);
 
-  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+  assert.equal(
+    await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+    null,
+  );
 
   const event = await latestEvent();
 
@@ -436,7 +460,11 @@ test("any administrator can cancel, the sender is told, and nothing is deleted",
   assert.equal(event?.metadata?.requestedByEmail, admin.email);
   assert.deepEqual(
     emailsTo(owner.email).map((message) => message.subject),
-    ['"Lease" will be deleted on ' + new Date((now + WAIT) * 1000).toISOString().slice(0, 10), '"Lease" will not be deleted'],
+    [
+      '"Lease" will be deleted on ' +
+        new Date((now + WAIT) * 1000).toISOString().slice(0, 10),
+      '"Lease" will not be deleted',
+    ],
   );
 
   // The day it would have gone, it stays.
@@ -447,7 +475,10 @@ test("any administrator can cancel, the sender is told, and nothing is deleted",
   // Nothing left to cancel; a member cannot cancel at all.
   await assert.rejects(cancelAs(admin, envelope.envelopeId), rejectsWith(409));
   await assert.rejects(cancelAs(owner, envelope.envelopeId), rejectsWith(403));
-  await assert.rejects(scheduleAs(owner, envelope.envelopeId), rejectsWith(403));
+  await assert.rejects(
+    scheduleAs(owner, envelope.envelopeId),
+    rejectsWith(403),
+  );
 });
 
 test("a Part 11 record needs a reason before it is scheduled", async () => {
@@ -462,9 +493,14 @@ test("a Part 11 record needs a reason before it is scheduled", async () => {
     scheduleAs(admin, envelope.envelopeId, "   "),
     rejectsWith(400),
   );
-  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+  assert.equal(
+    await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+    null,
+  );
 
-  await scheduleAs(admin, envelope.envelopeId, "Retention period over.", { now });
+  await scheduleAs(admin, envelope.envelopeId, "Retention period over.", {
+    now,
+  });
   await deleteWhenDue(envelope.envelopeId, now + WAIT);
 
   assert.equal(await envelopeExists(envelope.envelopeId), false);
@@ -479,12 +515,18 @@ test("a reason that is not text, or too long, is refused", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "voided" });
 
-  await assert.rejects(scheduleAs(admin, envelope.envelopeId, 42), rejectsWith(400));
+  await assert.rejects(
+    scheduleAs(admin, envelope.envelopeId, 42),
+    rejectsWith(400),
+  );
   await assert.rejects(
     scheduleAs(admin, envelope.envelopeId, "x".repeat(1001)),
     rejectsWith(400),
   );
-  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+  assert.equal(
+    await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+    null,
+  );
 });
 
 test("when the email to the sender fails, the deletion is still scheduled and the daily run sends it", async () => {
@@ -609,9 +651,15 @@ test("a deletion that is not due touches no file", async () => {
   } as StorageService;
 
   // Not scheduled at all, then scheduled but not due.
-  assert.equal(await deleteWhenDue(envelope.envelopeId, now + WAIT, countingStorage), false);
+  assert.equal(
+    await deleteWhenDue(envelope.envelopeId, now + WAIT, countingStorage),
+    false,
+  );
   await scheduleAs(admin, envelope.envelopeId, undefined, { now });
-  assert.equal(await deleteWhenDue(envelope.envelopeId, now, countingStorage), false);
+  assert.equal(
+    await deleteWhenDue(envelope.envelopeId, now, countingStorage),
+    false,
+  );
   assert.equal(deletes, 0);
   assert.equal(await envelopeExists(envelope.envelopeId), true);
   assert.ok((await filesExist(envelope.stored)).every(Boolean));
@@ -644,7 +692,10 @@ test("an administrator whose role is being taken away waits for it, and is then 
     demotion.release();
   }
 
-  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+  assert.equal(
+    await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+    null,
+  );
 });
 
 test("a request running while the administrator's handed-over envelopes move does not deadlock", async () => {
@@ -684,7 +735,10 @@ test("a request running while the administrator's handed-over envelopes move doe
     demotion.release();
   }
 
-  assert.equal(await getScheduledEnvelopeDeletion(envelope.envelopeId, database), null);
+  assert.equal(
+    await getScheduledEnvelopeDeletion(envelope.envelopeId, database),
+    null,
+  );
 });
 
 test("a scheduled deletion still runs after the administrator who asked loses the role", async () => {

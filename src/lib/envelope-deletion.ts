@@ -312,7 +312,12 @@ async function sendDeletionNotice(
  */
 export async function scheduleEnvelopeDeletion(
   envelopeId: string,
-  { actor, ipAddress = null, reason, userAgent = null }: EnvelopeDeletionRequest,
+  {
+    actor,
+    ipAddress = null,
+    reason,
+    userAgent = null,
+  }: EnvelopeDeletionRequest,
   {
     database = getDb(),
     emailService,

@@ -56,7 +56,10 @@ export async function resolveEnvelopeViewerAccess(
 
   // Someone else's envelope only for an administrator, and never their
   // draft.
-  if (!viewerIsOwner && (row.viewerRole !== "admin" || row.status === "draft")) {
+  if (
+    !viewerIsOwner &&
+    (row.viewerRole !== "admin" || row.status === "draft")
+  ) {
     return null;
   }
 

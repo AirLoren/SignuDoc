@@ -1437,14 +1437,16 @@ test("a signer who declines is told the decline was recorded, not that the link 
       .getByRole("button", { name: "Cancel deletion" })
       .click();
     await expect(page.getByText(/Scheduled to be deleted on/)).toHaveCount(0);
-    await expect.poll(async () => {
-      const latest = await waitForEmail({
-        template: "deletion_notice",
-        to: memberEmail,
-      });
+    await expect
+      .poll(async () => {
+        const latest = await waitForEmail({
+          template: "deletion_notice",
+          to: memberEmail,
+        });
 
-      return latest.subject;
-    }).toBe('"Terms to decline" will not be deleted');
+        return latest.subject;
+      })
+      .toBe('"Terms to decline" will not be deleted');
 
     await scheduleDeletion("Never agreed.");
 

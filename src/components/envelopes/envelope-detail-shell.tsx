@@ -1101,7 +1101,9 @@ export function EnvelopeDetailShell({
             "The envelope stays as it is and will not be deleted.",
             ...(isOwnEnvelope
               ? []
-              : ["If its sender was told it would be deleted, they are told it will not."]),
+              : [
+                  "If its sender was told it would be deleted, they are told it will not.",
+                ]),
           ]}
           errorMessage={actionError}
           onCancel={() => setActiveModal(null)}
