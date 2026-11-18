@@ -97,6 +97,27 @@ export function bulkSendPreviewKey(input: {
   });
 }
 
+/** The batch key a send will confirm with, and the checked request it is for. */
+export type BulkSendBatchKey = { key: string; requestKey: string | null };
+
+/**
+ * A retry of the same checked request keeps its batch key, so a send that
+ * failed after the server saved the batch does not send twice. Checking a
+ * changed request starts a new batch, since the server refuses a saved key
+ * with a different list.
+ */
+export function bulkSendBatchKeyForCheck(
+  current: BulkSendBatchKey,
+  checkedRequestKey: string,
+  newKey: () => string,
+): BulkSendBatchKey {
+  if (current.requestKey === null || current.requestKey === checkedRequestKey) {
+    return { key: current.key, requestKey: checkedRequestKey };
+  }
+
+  return { key: newKey(), requestKey: checkedRequestKey };
+}
+
 /**
  * A copy recipient needs both a name and an email, or neither. One filled
  * field is not sent as an empty list: the sender has to finish it or clear

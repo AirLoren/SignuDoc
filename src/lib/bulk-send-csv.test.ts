@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   ambiguousBulkSendColumnsMessage,
+  bulkSendBatchKeyForCheck,
   bulkSendCapMessage,
   bulkSendPreviewKey,
   copyRecipientPairError,
@@ -334,4 +335,21 @@ test("a results CSV records each row without turning a cell into a formula", () 
     ]),
     "a,b\r\n1,2\r\n",
   );
+});
+
+test("a changed checked list starts a new batch key, a retry keeps it", () => {
+  let next = 0;
+  const newKey = () => `key-${String(++next)}`;
+  const first = bulkSendBatchKeyForCheck(
+    { key: "key-0", requestKey: null },
+    "list-a",
+    newKey,
+  );
+
+  assert.deepEqual(first, { key: "key-0", requestKey: "list-a" });
+  assert.deepEqual(bulkSendBatchKeyForCheck(first, "list-a", newKey), first);
+  assert.deepEqual(bulkSendBatchKeyForCheck(first, "list-b", newKey), {
+    key: "key-1",
+    requestKey: "list-b",
+  });
 });

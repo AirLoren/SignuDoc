@@ -15,8 +15,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  type BulkSendBatchKey,
   type BulkSendResult,
   type BulkSendRowResult,
+  bulkSendBatchKeyForCheck,
   bulkSendPreviewKey,
   copyRecipientPairError,
   serializeBulkSendResultsCsv,
@@ -127,7 +129,10 @@ export function BulkSendShell({
   );
   const [copyName, setCopyName] = useState("");
   const [copyEmail, setCopyEmail] = useState("");
-  const batchKeyRef = useRef(newBulkSendBatchKey());
+  const batchKeyRef = useRef<BulkSendBatchKey>({
+    key: newBulkSendBatchKey(),
+    requestKey: null,
+  });
   const [requireEmailCode, setRequireEmailCode] = useState(false);
   const [signatureMeaning, setSignatureMeaning] = useState<
     SignatureMeaning | ""
@@ -201,7 +206,7 @@ export function BulkSendShell({
     const response = await fetch(`/api/templates/${current.id}/bulk-send`, {
       body: JSON.stringify({
         ...request,
-        batchKey: confirm ? batchKeyRef.current : undefined,
+        batchKey: confirm ? batchKeyRef.current.key : undefined,
         confirm,
         permittedUseConfirmed,
       }),
@@ -242,6 +247,11 @@ export function BulkSendShell({
     try {
       const checkedPreview = await postBulkSend(request, false);
 
+      batchKeyRef.current = bulkSendBatchKeyForCheck(
+        batchKeyRef.current,
+        key,
+        newBulkSendBatchKey,
+      );
       setChecked({
         key,
         preview: checkedPreview,
@@ -286,7 +296,10 @@ export function BulkSendShell({
       setResults(sent);
       setChecked(null);
       setIsConfirming(false);
-      batchKeyRef.current = newBulkSendBatchKey();
+      batchKeyRef.current = {
+        key: newBulkSendBatchKey(),
+        requestKey: null,
+      };
     } catch (error) {
       setActionError(error instanceof Error ? error.message : genericError);
     } finally {
@@ -331,7 +344,10 @@ export function BulkSendShell({
             </ShellButton>
             <ShellButton
               onClick={() => {
-                batchKeyRef.current = newBulkSendBatchKey();
+                batchKeyRef.current = {
+                  key: newBulkSendBatchKey(),
+                  requestKey: null,
+                };
                 setResults(null);
                 setChecked(null);
                 setActionError(null);
