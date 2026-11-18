@@ -2,6 +2,10 @@ import { EnvelopeDetailShell } from "@/components/envelopes/envelope-detail-shel
 import { isAdminUser } from "@/lib/auth/admin";
 import { getAuthSession } from "@/lib/auth/server";
 import { getDb } from "@/lib/db/connection";
+import {
+  formatEnvelopeOwner,
+  resolveEnvelopeViewerAccess,
+} from "@/lib/envelope-access";
 import { getEnvelopeDetailDataForUser } from "@/lib/envelopes";
 
 type EnvelopeDetailPageProps = {
@@ -19,13 +23,21 @@ export default async function EnvelopeDetailPage({
     null;
   let initialState: "error" | "not-found" | undefined;
   let canDeleteFinished = false;
+  let ownerLabel: string | undefined;
 
   try {
     const session = await getAuthSession();
-    detailRecord = session
-      ? await getEnvelopeDetailDataForUser(session.user.id, id, getDb())
+    // Its sender's, or, for an administrator, anyone's.
+    const access = session
+      ? await resolveEnvelopeViewerAccess(session.user.id, id, getDb())
+      : null;
+
+    detailRecord = access
+      ? await getEnvelopeDetailDataForUser(access.ownerUserId, id, getDb())
       : null;
     initialState = detailRecord ? undefined : "not-found";
+    ownerLabel =
+      access && !access.viewerIsOwner ? formatEnvelopeOwner(access) : undefined;
     // Only an administrator may delete a finished envelope.
     canDeleteFinished =
       detailRecord !== null &&
@@ -41,6 +53,7 @@ export default async function EnvelopeDetailPage({
       envelopeId={id}
       initialState={initialState}
       key={id}
+      ownerLabel={ownerLabel}
       record={detailRecord ?? undefined}
     />
   );
