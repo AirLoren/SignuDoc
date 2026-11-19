@@ -36,6 +36,7 @@ import {
   optionsTextToShow,
   parseOptionLines,
 } from "@/lib/field-choices";
+import { getInitials } from "@/lib/initials";
 import {
   type FieldPlacement,
   type ReplaceFieldsResponse,
@@ -1465,10 +1466,7 @@ function SignerCard({
             color: signer.color,
           }}
         >
-          {signer.name
-            .split(" ")
-            .map((part) => part[0])
-            .join("")}
+          {getInitials(signer.name, { max: 4 })}
         </span>
         <div className="min-w-0">
           <p className="truncate text-sm font-bold text-(--fg)">
@@ -1535,10 +1533,7 @@ function SelectedSignerPanel({
             color: selectedSigner.color,
           }}
         >
-          {selectedSigner.name
-            .split(" ")
-            .map((part) => part[0])
-            .join("")}
+          {getInitials(selectedSigner.name, { max: 4 })}
         </span>
         <div className="min-w-0">
           <p className="truncate text-sm font-bold text-(--fg)">

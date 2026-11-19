@@ -53,6 +53,8 @@ import {
   isNumberEntry,
   NUMBER_ENTRY_MESSAGE,
 } from "@/lib/field-choices";
+import { getInitials } from "@/lib/initials";
+import { truncateToWholeCharacters } from "@/lib/text-truncate";
 
 const typedSignatureFont =
   '"Snell Roundhand", "Brush Script MT", "Segoe Script", cursive';
@@ -94,14 +96,8 @@ export const declinedConfirmation = {
 const compactFieldHeightThreshold = 0.045;
 const compactFieldWidthThreshold = 0.12;
 
-function getInitials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 4)
-    .toUpperCase();
+function getSignerInitials(name: string): string {
+  return getInitials(name, { max: 4 });
 }
 
 function getFieldFrame(field: SigningCurrentField | SigningVisibleField) {
@@ -1178,7 +1174,7 @@ export function SigningLiveShell({
               <p className="section-eyebrow">Current signer</p>
               <div className="mt-3 flex items-center gap-3">
                 <span className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-(--accent-soft) text-[0.9375rem] font-bold text-(--accent-ink)">
-                  {getInitials(record.signer.name)}
+                  {getSignerInitials(record.signer.name)}
                 </span>
                 <div className="min-w-0">
                   <p className="truncate text-[0.9375rem] font-bold text-(--fg)">
@@ -1992,7 +1988,11 @@ function SignatureModal({
       return existingEntry.value;
     }
 
-    return fieldType === "initials" ? getInitials(signerName) : signerName;
+    // The same whole-character cut as typing, so applying the default
+    // submits what editing it would.
+    return fieldType === "initials"
+      ? truncateToWholeCharacters(getSignerInitials(signerName), 4)
+      : signerName;
   });
   const drawPreviewMessage =
     drawnSignatureVersion === 0
@@ -2008,7 +2008,7 @@ function SignatureModal({
 
   function handleTypedSignatureValueChange(value: string) {
     if (fieldType === "initials") {
-      setTypedSignatureValue(value.toUpperCase().slice(0, 4));
+      setTypedSignatureValue(truncateToWholeCharacters(value.toUpperCase(), 4));
       return;
     }
 
