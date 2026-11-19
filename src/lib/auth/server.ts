@@ -421,7 +421,7 @@ export function createAppAuth({
             actorUserId: user.id,
             event: "password_reset",
             targetUserId: user.id,
-            ...getRequestClient(request?.headers),
+            ...getRequestClient(request?.headers, env),
           });
         } catch (error) {
           console.error("[auth] Could not record a password reset:", error);
