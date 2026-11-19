@@ -28,16 +28,18 @@ export function getInitials(name: string, options: InitialsOptions): string {
   const namedWords = words.filter((word) => startsWithLetterOrDigit.test(word));
   const sourceWords = namedWords.length > 0 ? namedWords : words.slice(0, 1);
 
-  if (sourceWords.length === 1 && options.singleWordLength) {
-    return splitIntoWholeCharacters(sourceWords[0]!)
-      .slice(0, Math.min(options.singleWordLength, options.max))
-      .join("")
-      .toUpperCase();
-  }
+  const initials =
+    sourceWords.length === 1 && options.singleWordLength
+      ? splitIntoWholeCharacters(sourceWords[0]!)
+          .slice(0, options.singleWordLength)
+          .join("")
+      : sourceWords
+          .map((word) => splitIntoWholeCharacters(word)[0] ?? "")
+          .join("");
 
-  return sourceWords
+  // Uppercasing can lengthen a character ("ß" becomes "SS"), so the limit
+  // is applied after it.
+  return splitIntoWholeCharacters(initials.toUpperCase())
     .slice(0, options.max)
-    .map((word) => splitIntoWholeCharacters(word)[0] ?? "")
-    .join("")
-    .toUpperCase();
+    .join("");
 }

@@ -1988,8 +1988,10 @@ function SignatureModal({
       return existingEntry.value;
     }
 
+    // The same whole-character cut as typing, so applying the default
+    // submits what editing it would.
     return fieldType === "initials"
-      ? getSignerInitials(signerName)
+      ? truncateToWholeCharacters(getSignerInitials(signerName), 4)
       : signerName;
   });
   const drawPreviewMessage =

@@ -48,3 +48,8 @@ test("max and single-word length match each avatar", () => {
   assert.equal(getInitials("Robin 😀", { max: 2, singleWordLength: 2 }), "RO");
   assert.equal(getInitials("   ", { max: 2 }), "");
 });
+
+test("uppercasing that lengthens a letter still respects max", () => {
+  assert.equal(getInitials("ßeta Roy", { max: 2 }), "SS");
+  assert.equal(getInitials("Anna ßeta Roy", { max: 2 }), "AS");
+});
