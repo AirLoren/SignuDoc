@@ -719,7 +719,12 @@ export async function sendManualEnvelopeNudge(
       await deliverReminder(persisted, "manual", database, service);
       reminded.push(persisted);
     } catch (error) {
-      // Put back as it was by deliverReminder. The others still go.
+      // Put back as it was by deliverReminder. The others still go, and
+      // the sender is told only who was reminded, so this one is logged.
+      console.error(
+        `Failed to send the reminder for envelope ${envelopeId} to signer ${persisted.signerId}:`,
+        error,
+      );
       deliveryError ??= error;
     }
   }
