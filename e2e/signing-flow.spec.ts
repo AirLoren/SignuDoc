@@ -1487,6 +1487,136 @@ test("a signer who declines is told the decline was recorded, not that the link 
   });
 });
 
+test("a long Text answer keeps the signing page within the window", async ({
+  browser,
+  page,
+}, testInfo) => {
+  const runId = String(Date.now());
+  const signerEmail = `long-answer+${runId}@example.com`;
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    const admin = await database.query<{ email: string }>(
+      `select email from public."user" where role = 'admin' limit 1`,
+    );
+
+    adminEmail = admin.rows[0]?.email ?? "";
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  await test.step("the sender sends a signature and a Text field", async () => {
+    const pdfPath = await writeSamplePdf(testInfo.outputPath("form.pdf"));
+
+    await page.goto("/login");
+    await page.getByLabel("Email").fill(adminEmail);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    await page.goto("/envelopes/new");
+    await page.getByLabel("Envelope title").fill("Form with a long answer");
+    await page.getByLabel("Upload PDF").setInputFiles(pdfPath);
+    await page.getByRole("button", { name: "Next ->" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+\/signers$/);
+
+    await page.getByLabel("Signer 1 name").fill("Lee Longanswer");
+    await page.getByLabel("Signer 1 email").fill(signerEmail);
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/prepare$/);
+
+    const placeField = async (tool: string, x: number, y: number) => {
+      await page.getByRole("button", { exact: true, name: tool }).click();
+
+      const target = page.getByLabel(`Place ${tool} on page 1`);
+      const box = await target.boundingBox();
+
+      expect(box).not.toBeNull();
+      await target.click({
+        position: { x: box!.width * x, y: box!.height * y },
+      });
+    };
+
+    await placeField("Signature", 0.3, 0.7);
+    await expect(page.getByRole("status")).toHaveText("Saved");
+    await placeField("Text", 0.3, 0.4);
+    await expect(page.getByRole("status")).toHaveText("Saved");
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/review$/);
+    await page.getByRole("button", { name: "Send envelope" }).click();
+
+    const confirmation = page.getByRole("dialog", {
+      name: "Send this envelope?",
+    });
+
+    await confirmation.getByRole("checkbox").check();
+    await confirmation.getByRole("button", { name: "Send now" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+$/);
+  });
+
+  await test.step("typing a long unbroken answer does not widen the page", async () => {
+    const invitation = await waitForEmail({
+      template: "signing_invitation",
+      to: signerEmail,
+    });
+    // Narrower than the two-column layout, as in the report.
+    const signerContext = await browser.newContext({
+      viewport: { height: 900, width: 1200 },
+    });
+    const signerPage = await signerContext.newPage();
+
+    await signerPage.goto(extractLink(invitation.text, "/sign/"));
+
+    const consent = signerPage.getByRole("dialog", { name: "Before you sign" });
+
+    await consent
+      .getByRole("checkbox", {
+        name: "I agree to use electronic records and signatures",
+      })
+      .check();
+    await consent.getByRole("button", { name: "Agree and continue" }).click();
+    await expect(consent).toBeHidden();
+
+    const pdfPage = signerPage.getByRole("img", {
+      name: "Rendered PDF page 1",
+    });
+
+    await expect(pdfPage).toBeVisible();
+
+    const answer = signerPage.getByLabel("Enter text", { exact: true });
+    const measure = () =>
+      signerPage.evaluate(() => document.documentElement.scrollWidth);
+
+    await answer.fill("Short");
+    await expect(signerPage.getByText("Short", { exact: true })).toBeVisible();
+
+    const shortWidth = (await pdfPage.boundingBox())?.width ?? 0;
+
+    expect(await measure()).toBeLessThanOrEqual(1200);
+
+    const longAnswer = "W".repeat(230);
+
+    await answer.fill(longAnswer);
+    await expect(
+      signerPage.getByText(longAnswer, { exact: true }),
+    ).toBeAttached();
+    expect(await measure()).toBeLessThanOrEqual(1200);
+    expect((await pdfPage.boundingBox())?.width).toBeCloseTo(shortWidth, 0);
+    // The whole answer is still there to edit.
+    await expect(answer).toHaveValue(longAnswer);
+
+    await answer.fill("Short again");
+    expect(await measure()).toBeLessThanOrEqual(1200);
+
+    await signerContext.close();
+  });
+});
+
 test("with local disk storage a PDF just under 20 MB uploads, and a larger request is refused", async ({
   page,
 }, testInfo) => {

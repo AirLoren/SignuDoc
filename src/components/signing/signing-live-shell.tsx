@@ -984,7 +984,7 @@ export function SigningLiveShell({
             )}
           </div>
         ) : null}
-        <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <section className="grid grid-cols-[minmax(0,1fr)] gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="flex min-w-0 flex-col gap-4">
             <div className="panel rounded-[1.25rem] px-4 py-3">
               <div className="flex flex-col gap-3 xl:grid xl:grid-cols-[1fr_auto_1fr] xl:items-center">
@@ -1173,7 +1173,7 @@ export function SigningLiveShell({
             </div>
           </div>
 
-          <aside className="space-y-4 xl:sticky xl:top-[5.25rem] xl:self-start">
+          <aside className="min-w-0 space-y-4 xl:sticky xl:top-[5.25rem] xl:self-start">
             <section className="panel rounded-[1.25rem] p-5">
               <p className="section-eyebrow">Current signer</p>
               <div className="mt-3 flex items-center gap-3">
