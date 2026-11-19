@@ -118,7 +118,7 @@ function hangulJoins(previous: HangulPart, next: HangulPart): boolean {
 // Characters that join the character after them (Arabic number signs and
 // a few others Unicode calls Prepend).
 const prepend =
-  /^[\u{0600}-\u{0605}\u{06DD}\u{070F}\u{0890}\u{0891}\u{08E2}\u{0D4E}\u{110BD}\u{110CD}\u{111C2}\u{111C3}\u{1193F}\u{11941}\u{11A3A}\u{11A84}-\u{11A89}\u{11D46}\u{11F02}]$/u;
+  /^[\u{0600}-\u{0605}\u{06DD}\u{070F}\u{0890}\u{0891}\u{08E2}\u{0D4E}\u{110BD}\u{110CD}\u{111C2}\u{111C3}\u{113D1}\u{1193F}\u{11941}\u{11A84}-\u{11A89}\u{11D46}\u{11F02}]$/u;
 const formatCharacter = /^\p{Cf}$/u;
 const controlCharacter = /^[\p{Cc}\p{Zl}\p{Zp}]$/u;
 
