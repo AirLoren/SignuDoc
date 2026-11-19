@@ -1433,11 +1433,19 @@ export async function sendSignerEmailCode(
       );
     }
 
-    // Another request claimed the window first and sent the code.
+    // Another request claimed the window first. Its code is the one to use,
+    // unless that send failed and cleared it again in the meantime.
     const current = await getSignerCheckState(context.signer.id!, database);
 
+    if (current.emailCodeHash === null || current.emailCodeSentAt === null) {
+      throw new SigningMutationError(
+        "The code could not be sent right now. Try again.",
+        503,
+      );
+    }
+
     return cooldownResult(
-      current.emailCodeSentAt ?? now,
+      current.emailCodeSentAt,
       now,
       maskEmailAddress(context.signer.email),
     );

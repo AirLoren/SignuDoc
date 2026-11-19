@@ -131,11 +131,18 @@ export function SignerVerificationScreen({
     }
 
     const timer = window.setTimeout(() => {
-      setResendWait((seconds) => Math.max(0, seconds - 1));
+      if (resendWait <= 1) {
+        setResendWait(0);
+        setNotice(
+          `A code was sent to ${state.maskedEmail}. If it has not arrived, you can send a new one now.`,
+        );
+      } else {
+        setResendWait(resendWait - 1);
+      }
     }, 1000);
 
     return () => window.clearTimeout(timer);
-  }, [resendWait]);
+  }, [resendWait, state.maskedEmail]);
 
   const copy = METHOD_COPY[method];
   const step = state.required.indexOf(method) + 1;
