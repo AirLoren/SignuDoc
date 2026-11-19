@@ -108,6 +108,29 @@ test("a sender opens the document while it is out for signature, and after voidi
     await expect(thumbnailLink).toHaveAttribute("href", documentUrl());
     await expect(thumbnailLink).toHaveAttribute("target", "_blank");
 
+    // Clicking each one opens a new tab on the document and leaves this
+    // page where it was.
+    for (const link of [viewButton, thumbnailLink]) {
+      const documentResponse = page
+        .context()
+        .waitForEvent(
+          "response",
+          (response) =>
+            new URL(response.url()).pathname === documentUrl() &&
+            response.request().resourceType() === "document",
+        );
+      const popupOpened = page.waitForEvent("popup");
+
+      await link.click();
+
+      const popup = await popupOpened;
+
+      expect((await documentResponse).status()).toBe(200);
+      expect(popup).not.toBe(page);
+      await expect(page).toHaveURL(new RegExp(`/envelopes/${envelopeId}$`));
+      await popup.close();
+    }
+
     await expectTheDocumentAsSent(page, documentUrl());
     // The sender looking at their own document is nothing to record.
     expect(await countOriginalViews(envelopeId)).toBe(0);
