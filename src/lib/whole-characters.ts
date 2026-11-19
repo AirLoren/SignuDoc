@@ -1,7 +1,8 @@
 // Helpers for cutting text only between whole characters. They run in the
 // browser too, so they don't rely on Intl.Segmenter (Firefox 125+) or
 // String.prototype.toWellFormed (Firefox 119+) being present: Firefox 115 ESR
-// has neither.
+// has neither. The server always has both, so the fallback has to find the
+// same character boundaries, or a server-rendered avatar won't hydrate.
 
 const graphemeSegmenter =
   typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
@@ -35,14 +36,7 @@ export function toWellFormedWithoutBuiltIn(value: string): string {
   return result;
 }
 
-// Code points that belong to the character before them: combining marks,
-// variation selectors, emoji skin tones, tag characters and the zero-width
-// joiner, plus the code point a joiner glues on.
-const extendsCharacter = /^[\p{M}‍︀-️\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]$/u;
-
-// Splits text into whole characters (grapheme clusters). Without
-// Intl.Segmenter it keeps marks, joiners and modifiers with their base
-// character, which covers accents and most emoji.
+// Splits text into whole characters (grapheme clusters).
 export function splitIntoWholeCharacters(value: string): string[] {
   const text = toWellFormedText(value);
 
@@ -56,22 +50,191 @@ export function splitIntoWholeCharacters(value: string): string[] {
   return splitWithoutSegmenter(text);
 }
 
-// Exported for tests: the path browsers without Intl.Segmenter take.
+// Code points that belong to the character before them: combining and
+// spacing marks (Thai and Lao AM are letters Unicode treats as marks here),
+// the zero-width non-joiner and joiner, halfwidth kana voicing marks,
+// variation selectors, emoji skin tones and tag characters.
+const extendsCharacter =
+  /^[\p{M}\u{0E33}\u{0EB3}\u{200C}\u{200D}\u{FF9E}\u{FF9F}\u{FE00}-\u{FE0F}\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]$/u;
+const zeroWidthJoiner = "\u{200D}";
+const spacingMark = /^[\p{Mc}\u{0E33}\u{0EB3}]$/u;
+const extendedPictographic = /^\p{Extended_Pictographic}$/u;
+
+type HangulPart = "L" | "V" | "T" | "LV" | "LVT";
+
+function hangulPart(code: number): HangulPart | null {
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0xa960 && code <= 0xa97c)
+  ) {
+    return "L";
+  }
+
+  if (
+    (code >= 0x1160 && code <= 0x11a7) ||
+    (code >= 0xd7b0 && code <= 0xd7c6)
+  ) {
+    return "V";
+  }
+
+  if (
+    (code >= 0x11a8 && code <= 0x11ff) ||
+    (code >= 0xd7cb && code <= 0xd7fb)
+  ) {
+    return "T";
+  }
+
+  if (code >= 0xac00 && code <= 0xd7a3) {
+    return (code - 0xac00) % 28 === 0 ? "LV" : "LVT";
+  }
+
+  return null;
+}
+
+// Unicode's rules for which Hangul jamo join into one syllable.
+function hangulJoins(previous: HangulPart, next: HangulPart): boolean {
+  if (previous === "L") {
+    return next !== "T";
+  }
+
+  if (previous === "V" || previous === "LV") {
+    return next === "V" || next === "T";
+  }
+
+  return next === "T";
+}
+
+// Characters that join the character after them (Arabic number signs and
+// a few others Unicode calls Prepend).
+const prepend =
+  /^[\u{0600}-\u{0605}\u{06DD}\u{070F}\u{0890}\u{0891}\u{08E2}\u{0D4E}\u{110BD}\u{110CD}\u{111C2}\u{111C3}\u{1193F}\u{11941}\u{11A3A}\u{11A84}-\u{11A89}\u{11D46}\u{11F02}]$/u;
+const formatCharacter = /^\p{Cf}$/u;
+const controlCharacter = /^[\p{Cc}\p{Zl}\p{Zp}]$/u;
+
+// Unicode's Control class: nothing joins onto or after these, apart from CR LF.
+function isControl(codePoint: string): boolean {
+  if (controlCharacter.test(codePoint)) {
+    return true;
+  }
+
+  return (
+    formatCharacter.test(codePoint) &&
+    !extendsCharacter.test(codePoint) &&
+    !prepend.test(codePoint)
+  );
+}
+
+function isRegionalIndicator(code: number): boolean {
+  return code >= 0x1f1e6 && code <= 0x1f1ff;
+}
+
+// Indic conjuncts (consonant, virama, consonant) are one character. These
+// are Unicode's InCB=Linker viramas and InCB=Consonant letters, for
+// Devanagari, Bengali, Gujarati, Oriya, Telugu and Malayalam.
+const indicLinkers = new Set([0x94d, 0x9cd, 0xacd, 0xb4d, 0xc4d, 0xd4d]);
+const indicConsonantRanges: ReadonlyArray<readonly [number, number]> = [
+  [0x915, 0x939],
+  [0x958, 0x95f],
+  [0x978, 0x97f],
+  [0x995, 0x9a8],
+  [0x9aa, 0x9b0],
+  [0x9b2, 0x9b2],
+  [0x9b6, 0x9b9],
+  [0x9dc, 0x9dd],
+  [0x9df, 0x9df],
+  [0x9f0, 0x9f1],
+  [0xa95, 0xaa8],
+  [0xaaa, 0xab0],
+  [0xab2, 0xab3],
+  [0xab5, 0xab9],
+  [0xaf9, 0xaf9],
+  [0xb15, 0xb28],
+  [0xb2a, 0xb30],
+  [0xb32, 0xb33],
+  [0xb35, 0xb39],
+  [0xb5c, 0xb5d],
+  [0xb5f, 0xb5f],
+  [0xb71, 0xb71],
+  [0xc15, 0xc28],
+  [0xc2a, 0xc39],
+  [0xc58, 0xc5a],
+  [0xd15, 0xd3a],
+];
+
+function isIndicConsonant(code: number): boolean {
+  return indicConsonantRanges.some(([from, to]) => code >= from && code <= to);
+}
+
+// Exported for tests: the path browsers without Intl.Segmenter take. It
+// follows the parts of the Unicode grapheme rules a name can plausibly hit:
+// CR LF, marks and modifiers, emoji joined by ZWJ, flag pairs, Hangul jamo
+// and Indic conjuncts.
 export function splitWithoutSegmenter(text: string): string[] {
   const characters: string[] = [];
-  let joinNext = false;
+  let previous = "";
+  let previousControl = false;
+  let previousPrepend = false;
+  let previousHangul: HangulPart | null = null;
+  let regionalIndicatorRun = 0;
+  let inPictographicSequence = false;
+  let pictographicBeforeJoiner = false;
+  // "consonant" after an Indic consonant, "linked" once a virama follows it.
+  let conjunct: "consonant" | "linked" | null = null;
 
   for (const codePoint of text) {
-    if (
+    const code = codePoint.codePointAt(0)!;
+    const hangul = hangulPart(code);
+    const regional = isRegionalIndicator(code);
+    const pictographic = extendedPictographic.test(codePoint);
+    const indicConsonant = isIndicConsonant(code);
+    const control = isControl(codePoint);
+
+    const joins =
       characters.length > 0 &&
-      (joinNext || extendsCharacter.test(codePoint))
-    ) {
+      ((previous === "\r" && codePoint === "\n") ||
+        (!previousControl &&
+          !control &&
+          (previousPrepend ||
+            extendsCharacter.test(codePoint) ||
+            (pictographic && pictographicBeforeJoiner) ||
+            (regional && regionalIndicatorRun % 2 === 1) ||
+            (indicConsonant && conjunct === "linked") ||
+            (hangul !== null &&
+              previousHangul !== null &&
+              hangulJoins(previousHangul, hangul)))));
+
+    if (joins) {
       characters[characters.length - 1] += codePoint;
     } else {
       characters.push(codePoint);
     }
 
-    joinNext = codePoint === "‍";
+    // Spacing marks join the character but, unlike other marks, end an
+    // emoji ZWJ sequence or an Indic conjunct.
+    const nonSpacingExtend =
+      extendsCharacter.test(codePoint) && !spacingMark.test(codePoint);
+
+    pictographicBeforeJoiner =
+      codePoint === zeroWidthJoiner && inPictographicSequence;
+    inPictographicSequence =
+      pictographic ||
+      (inPictographicSequence &&
+        nonSpacingExtend &&
+        codePoint !== zeroWidthJoiner);
+
+    if (indicConsonant) {
+      conjunct = "consonant";
+    } else if (conjunct !== null && indicLinkers.has(code)) {
+      conjunct = "linked";
+    } else if (conjunct !== null && !nonSpacingExtend) {
+      conjunct = null;
+    }
+
+    regionalIndicatorRun = regional ? regionalIndicatorRun + 1 : 0;
+    previousHangul = hangul;
+    previous = codePoint;
+    previousControl = control;
+    previousPrepend = prepend.test(codePoint);
   }
 
   return characters;
