@@ -30,6 +30,7 @@ const samples = [
   "😀\u{200D}",
   "\u{1019}\u{102C}",
   "\u{113D1}\u{11392}",
+  "\u{D15}\u{D4D}\u{D3E}\u{D15}",
   "\u{915}\u{94D}\u{200C}\u{924}",
   "a\u{200D}😀",
 ];
@@ -93,4 +94,50 @@ test("the toWellFormed fallback matches the built-in", () => {
   ]) {
     assert.equal(toWellFormedWithoutBuiltIn(sample), sample.toWellFormed());
   }
+});
+
+// Every code point after each kind of character the fallback tracks. Indic
+// conjuncts are checked only within the six scripts the table covers: newer
+// ICU versions join more scripts there, and browsers differ on those anyway.
+test("the fallback agrees on every code point after each kind of start", () => {
+  const ranges: Array<[number, number]> = [
+    [0x0, 0xd7ff],
+    [0xe000, 0xffff],
+    [0x11000, 0x11fff],
+    [0x1f000, 0x1faff],
+    [0xe0000, 0xe01ef],
+  ];
+  const starts = [
+    "a",
+    "\u{1F469}\u{200D}",
+    "\u{1F1FA}",
+    "\u{1100}",
+    "x\u{600}",
+    "\r",
+  ];
+  const mismatches: string[] = [];
+
+  function check(sample: string) {
+    const expected = splitIntoWholeCharacters(sample);
+    const actual = splitWithoutSegmenter(sample);
+
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      mismatches.push(JSON.stringify(sample));
+    }
+  }
+
+  for (const start of starts) {
+    for (const [from, to] of ranges) {
+      for (let code = from; code <= to; code += 1) {
+        check(`${start}${String.fromCodePoint(code)}b`);
+      }
+    }
+  }
+
+  for (let code = 0x900; code <= 0xd7f; code += 1) {
+    check(`\u{915}\u{94D}${String.fromCodePoint(code)}\u{915}`);
+    check(`\u{D15}\u{D4D}${String.fromCodePoint(code)}\u{D15}`);
+  }
+
+  assert.deepEqual(mismatches.slice(0, 20), []);
 });

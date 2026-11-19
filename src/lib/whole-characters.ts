@@ -68,7 +68,18 @@ function extendsPrevious(codePoint: string): boolean {
     extendsCharacter.test(codePoint) && !markThatStandsAlone.test(codePoint)
   );
 }
-const spacingMark = /^[\p{Mc}\u{0E33}\u{0EB3}]$/u;
+// Spacing marks (\p{Mc}) that Unicode nonetheless counts as plain grapheme
+// extension, mostly vowel length marks: these keep an emoji ZWJ sequence or
+// an Indic conjunct going, where other spacing marks end it.
+const spacingMarkThatExtends =
+  /^[\u{9BE}\u{9D7}\u{B3E}\u{B57}\u{BBE}\u{BD7}\u{CC0}\u{CC2}\u{CC7}-\u{CC8}\u{CCA}-\u{CCB}\u{CD5}-\u{CD6}\u{D3E}\u{D57}\u{DCF}\u{DDF}\u{1715}\u{1734}\u{1B35}\u{1B3B}\u{1B3D}\u{1B43}-\u{1B44}\u{1BAA}\u{1BF2}-\u{1BF3}\u{302E}-\u{302F}\u{A953}\u{A9C0}\u{111C0}\u{11235}\u{1133E}\u{1134D}\u{11357}\u{113B8}\u{113C2}\u{113C5}\u{113C7}-\u{113C9}\u{113CF}\u{114B0}\u{114BD}\u{115AF}\u{116B6}\u{11930}\u{1193D}\u{11F41}\u{16FF0}-\u{16FF1}\u{1D165}-\u{1D166}\u{1D16D}-\u{1D172}]$/u;
+
+function isSpacingMark(codePoint: string): boolean {
+  return (
+    /^[\p{Mc}\u{0E33}\u{0EB3}]$/u.test(codePoint) &&
+    !spacingMarkThatExtends.test(codePoint)
+  );
+}
 const extendedPictographic = /^\p{Extended_Pictographic}$/u;
 
 type HangulPart = "L" | "V" | "T" | "LV" | "LVT";
@@ -121,10 +132,17 @@ const prepend =
   /^[\u{0600}-\u{0605}\u{06DD}\u{070F}\u{0890}\u{0891}\u{08E2}\u{0D4E}\u{110BD}\u{110CD}\u{111C2}\u{111C3}\u{113D1}\u{1193F}\u{11941}\u{11A84}-\u{11A89}\u{11D46}\u{11F02}]$/u;
 const formatCharacter = /^\p{Cf}$/u;
 const controlCharacter = /^[\p{Cc}\p{Zl}\p{Zp}]$/u;
+const unassigned = /^\p{Cn}$/u;
+const defaultIgnorable = /^\p{Default_Ignorable_Code_Point}$/u;
 
 // Unicode's Control class: nothing joins onto or after these, apart from CR LF.
 function isControl(codePoint: string): boolean {
   if (controlCharacter.test(codePoint)) {
+    return true;
+  }
+
+  // Unassigned code points reserved as invisible also count as Control.
+  if (unassigned.test(codePoint) && defaultIgnorable.test(codePoint)) {
     return true;
   }
 
@@ -223,7 +241,7 @@ export function splitWithoutSegmenter(text: string): string[] {
     // Spacing marks join the character but, unlike other marks, end an
     // emoji ZWJ sequence or an Indic conjunct.
     const nonSpacingExtend =
-      extendsPrevious(codePoint) && !spacingMark.test(codePoint);
+      extendsPrevious(codePoint) && !isSpacingMark(codePoint);
 
     pictographicBeforeJoiner =
       codePoint === zeroWidthJoiner && inPictographicSequence;
