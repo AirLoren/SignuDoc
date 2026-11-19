@@ -4,7 +4,7 @@ import pg from "pg";
 import { e2eDatabaseUrl, e2eSetupToken } from "../playwright.config";
 import { extractLink, extractLinks, waitForEmail } from "./support/outbox";
 import { totpCode } from "./support/totp";
-import { writeSamplePdf } from "./support/sample-pdf";
+import { writeLargePdf, writeSamplePdf } from "./support/sample-pdf";
 
 const PASSWORD = "correct horse battery staple 42";
 // The ampersand is on purpose: the name goes into HTML emails and page titles.
@@ -1213,6 +1213,474 @@ test("a signer signs with a qualified signature in their own name, through the s
         `Signed by ${signerName} with a qualified electronic signature through eID Easy`,
       ),
     ).toBeVisible();
+  });
+});
+
+test("a signer who declines is told the decline was recorded, not that the link expired", async ({
+  browser,
+  page,
+}, testInfo) => {
+  const runId = String(Date.now());
+  const signerEmail = `decliner+${runId}@example.com`;
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    const admin = await database.query<{ email: string }>(
+      `select email from public."user" where role = 'admin' limit 1`,
+    );
+
+    adminEmail = admin.rows[0]?.email ?? "";
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  let envelopeId = "";
+
+  await test.step("the sender sends a document to one signer", async () => {
+    const pdfPath = await writeSamplePdf(testInfo.outputPath("terms.pdf"));
+
+    await page.goto("/login");
+    await page.getByLabel("Email").fill(adminEmail);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    await page.goto("/envelopes/new");
+    await page.getByLabel("Envelope title").fill("Terms to decline");
+    await page.getByLabel("Upload PDF").setInputFiles(pdfPath);
+    await page.getByRole("button", { name: "Next ->" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+\/signers$/);
+    envelopeId = /\/envelopes\/([^/]+)\/signers$/.exec(page.url())?.[1] ?? "";
+
+    await page.getByLabel("Signer 1 name").fill("Dana Decliner");
+    await page.getByLabel("Signer 1 email").fill(signerEmail);
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/prepare$/);
+
+    await page.getByRole("button", { exact: true, name: "Signature" }).click();
+
+    const placementTarget = page.getByLabel("Place Signature on page 1");
+    const box = await placementTarget.boundingBox();
+
+    await placementTarget.click({
+      position: { x: box!.width * 0.3, y: box!.height * 0.6 },
+    });
+    await expect(page.getByRole("status")).toHaveText("Saved");
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/review$/);
+    await page.getByRole("button", { name: "Send envelope" }).click();
+
+    const confirmation = page.getByRole("dialog", {
+      name: "Send this envelope?",
+    });
+
+    await confirmation.getByRole("checkbox").check();
+    await confirmation.getByRole("button", { name: "Send now" }).click();
+    await expect(page).toHaveURL(new RegExp(`/envelopes/${envelopeId}$`));
+  });
+
+  await test.step("the signer declines and sees that it was recorded", async () => {
+    const invitation = await waitForEmail({
+      template: "signing_invitation",
+      to: signerEmail,
+    });
+    const signerContext = await browser.newContext({
+      viewport: { height: 900, width: 1440 },
+    });
+    const signerPage = await signerContext.newPage();
+
+    await signerPage.goto(extractLink(invitation.text, "/sign/"));
+
+    const consent = signerPage.getByRole("dialog", { name: "Before you sign" });
+
+    await consent
+      .getByRole("checkbox", {
+        name: "I agree to use electronic records and signatures",
+      })
+      .check();
+    await consent.getByRole("button", { name: "Agree and continue" }).click();
+    await signerPage
+      .getByRole("button", { exact: true, name: "Decline" })
+      .click();
+
+    const decline = signerPage.getByRole("dialog", {
+      name: "Decline to sign?",
+    });
+
+    await decline
+      .getByLabel("Reason (optional)")
+      .fill("Terms in section 2 are not what we agreed.");
+    await decline.getByRole("button", { name: "Decline to sign" }).click();
+
+    const declined = signerPage.getByRole("heading", {
+      name: "You declined to sign",
+    });
+
+    await expect(declined).toBeVisible();
+    // Focus moves to the outcome, so a screen reader reads it out.
+    await expect(declined).toBeFocused();
+    await expect(signerPage.getByText("This link has expired")).toHaveCount(0);
+    await expect(
+      signerPage.getByText(/Request a new signing link/),
+    ).toHaveCount(0);
+    await signerContext.close();
+  });
+
+  await test.step("the sender sees the decline and its reason", async () => {
+    await waitForEmail({ template: "decline_notification", to: adminEmail });
+    await page.goto(`/envelopes/${envelopeId}`);
+    await expect(
+      page.getByText(
+        "Decline reason: Terms in section 2 are not what we agreed.",
+      ),
+    ).toBeVisible();
+  });
+
+  await test.step("an administrator sees another member's envelope and schedules its deletion", async () => {
+    // The envelope becomes a plain member's, as if they had sent it.
+    const memberId = `member-${runId}`;
+    const memberEmail = `member+${runId}@example.com`;
+    const db = new pg.Client({ connectionString: e2eDatabaseUrl });
+
+    await db.connect();
+
+    try {
+      await db.query(
+        `insert into public."user" (id, name, email, role, "emailVerified") values ($1, 'Mira Member', $2, 'user', true)`,
+        [memberId, memberEmail],
+      );
+      await db.query(`update envelopes set user_id = $1 where id = $2`, [
+        memberId,
+        envelopeId,
+      ]);
+    } finally {
+      await db.end();
+    }
+
+    const senderLabel = `Mira Member (${memberEmail})`;
+
+    // Gone from the administrator's own list, there in everyone's.
+    await page.goto("/dashboard");
+    await expect(
+      page.getByRole("heading", { name: "Terms to decline" }),
+    ).toHaveCount(0);
+    await page.getByRole("link", { name: "Everyone's" }).click();
+    await expect(page).toHaveURL(/\/dashboard\?view=all$/);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "All envelopes" }),
+    ).toBeVisible();
+
+    const card = page.getByRole("link").filter({ hasText: "Terms to decline" });
+
+    await expect(card).toContainText(senderLabel);
+
+    // Enter searches every envelope, the sender's address included.
+    const search = page.getByRole("searchbox", {
+      name: "Search by title or email...",
+    });
+
+    await search.fill(memberEmail);
+    await search.press("Enter");
+    await expect(page).toHaveURL(/\/dashboard\?view=all&q=/);
+    await expect(card).toBeVisible();
+
+    // Switching views drops the search, in the box too.
+    await page.getByRole("link", { name: "Mine" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(search).toHaveValue("");
+    await page.getByRole("link", { name: "Everyone's" }).click();
+    await expect(page).toHaveURL(/\/dashboard\?view=all$/);
+    await expect(search).toHaveValue("");
+    await card.click();
+    await expect(page).toHaveURL(new RegExp(`/envelopes/${envelopeId}$`));
+    await expect(page.getByText(`Sent by ${senderLabel}`)).toBeVisible();
+    // What changes the envelope stays with its sender.
+    await expect(
+      page.getByRole("button", { name: "Copy to new draft" }),
+    ).toHaveCount(0);
+
+    // A copy of someone else's certificate is on record.
+    const download = page.waitForEvent("download");
+
+    await page.getByRole("button", { name: "Download certificate" }).click();
+    expect((await download).suggestedFilename()).toMatch(/\.pdf$/);
+
+    // Nothing goes at once: the deletion is scheduled, and the sender is
+    // emailed a link to download it.
+    async function scheduleDeletion(reason: string) {
+      await page.getByRole("button", { name: "Delete envelope" }).click();
+
+      const confirm = page.getByRole("dialog", {
+        name: "Schedule this envelope for deletion?",
+      });
+
+      await confirm.getByLabel("Reason (optional)").fill(reason);
+      await confirm.getByRole("button", { name: "Schedule deletion" }).click();
+      await expect(page.getByText(/Scheduled to be deleted on/)).toBeVisible();
+      await expect(page.getByText(`Reason: ${reason}`)).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Delete envelope" }),
+      ).toHaveCount(0);
+    }
+
+    await scheduleDeletion("Changed my mind.");
+
+    const notice = await waitForEmail({
+      template: "deletion_notice",
+      to: memberEmail,
+    });
+
+    expect(notice.subject).toMatch(/^"Terms to decline" will be deleted on /);
+    expect(notice.text).toContain(`/envelopes/${envelopeId}`);
+
+    // Any administrator can cancel until then; the sender is told.
+    await page.getByRole("button", { name: "Cancel deletion" }).click();
+    await page
+      .getByRole("dialog", { name: "Cancel this deletion?" })
+      .getByRole("button", { name: "Cancel deletion" })
+      .click();
+    await expect(page.getByText(/Scheduled to be deleted on/)).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const latest = await waitForEmail({
+          template: "deletion_notice",
+          to: memberEmail,
+        });
+
+        return latest.subject;
+      })
+      .toBe('"Terms to decline" will not be deleted');
+
+    await scheduleDeletion("Never agreed.");
+
+    // The envelope itself stays until the wait is over.
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "Terms to decline" }),
+    ).toBeVisible();
+
+    // The download, the request and its cancellation stay on record in the
+    // install's audit trail, with whose envelope it was.
+    const audit = await page.request.get("/api/admin/audit");
+    const { events } = (await audit.json()) as {
+      events: { event: string; metadata: Record<string, unknown> | null }[];
+    };
+
+    expect(
+      events.find((event) => event.event === "envelope_file_downloaded")
+        ?.metadata,
+    ).toMatchObject({
+      envelopeId,
+      file: "evidence",
+      ownerEmail: memberEmail,
+    });
+    expect(
+      events.find((event) => event.event === "envelope_deletion_scheduled")
+        ?.metadata,
+    ).toMatchObject({
+      envelopeId,
+      ownerEmail: memberEmail,
+      reason: "Never agreed.",
+      status: "declined",
+    });
+    expect(
+      events.find((event) => event.event === "envelope_deletion_cancelled")
+        ?.metadata,
+    ).toMatchObject({ envelopeId, ownerEmail: memberEmail });
+  });
+});
+
+test("a long Text answer keeps the signing page within the window", async ({
+  browser,
+  page,
+}, testInfo) => {
+  const runId = String(Date.now());
+  const signerEmail = `long-answer+${runId}@example.com`;
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    const admin = await database.query<{ email: string }>(
+      `select email from public."user" where role = 'admin' limit 1`,
+    );
+
+    adminEmail = admin.rows[0]?.email ?? "";
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  await test.step("the sender sends a signature and a Text field", async () => {
+    const pdfPath = await writeSamplePdf(testInfo.outputPath("form.pdf"));
+
+    await page.goto("/login");
+    await page.getByLabel("Email").fill(adminEmail);
+    await page.getByLabel("Password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Log in" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+
+    await page.goto("/envelopes/new");
+    await page.getByLabel("Envelope title").fill("Form with a long answer");
+    await page.getByLabel("Upload PDF").setInputFiles(pdfPath);
+    await page.getByRole("button", { name: "Next ->" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+\/signers$/);
+
+    await page.getByLabel("Signer 1 name").fill("Lee Longanswer");
+    await page.getByLabel("Signer 1 email").fill(signerEmail);
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/prepare$/);
+
+    const placeField = async (tool: string, x: number, y: number) => {
+      await page.getByRole("button", { exact: true, name: tool }).click();
+
+      const target = page.getByLabel(`Place ${tool} on page 1`);
+      const box = await target.boundingBox();
+
+      expect(box).not.toBeNull();
+      await target.click({
+        position: { x: box!.width * x, y: box!.height * y },
+      });
+    };
+
+    await placeField("Signature", 0.3, 0.7);
+    await expect(page.getByRole("status")).toHaveText("Saved");
+    await placeField("Text", 0.3, 0.4);
+    await expect(page.getByRole("status")).toHaveText("Saved");
+    await page.getByRole("button", { name: "Next →" }).click();
+    await expect(page).toHaveURL(/\/review$/);
+    await page.getByRole("button", { name: "Send envelope" }).click();
+
+    const confirmation = page.getByRole("dialog", {
+      name: "Send this envelope?",
+    });
+
+    await confirmation.getByRole("checkbox").check();
+    await confirmation.getByRole("button", { name: "Send now" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+$/);
+  });
+
+  await test.step("typing a long unbroken answer does not widen the page", async () => {
+    const invitation = await waitForEmail({
+      template: "signing_invitation",
+      to: signerEmail,
+    });
+    // Narrower than the two-column layout, as in the report.
+    const signerContext = await browser.newContext({
+      viewport: { height: 900, width: 1200 },
+    });
+    const signerPage = await signerContext.newPage();
+
+    await signerPage.goto(extractLink(invitation.text, "/sign/"));
+
+    const consent = signerPage.getByRole("dialog", { name: "Before you sign" });
+
+    await consent
+      .getByRole("checkbox", {
+        name: "I agree to use electronic records and signatures",
+      })
+      .check();
+    await consent.getByRole("button", { name: "Agree and continue" }).click();
+    await expect(consent).toBeHidden();
+
+    const pdfPage = signerPage.getByRole("img", {
+      name: "Rendered PDF page 1",
+    });
+
+    await expect(pdfPage).toBeVisible();
+
+    const answer = signerPage.getByLabel("Enter text", { exact: true });
+    const measure = () =>
+      signerPage.evaluate(() => document.documentElement.scrollWidth);
+
+    await answer.fill("Short");
+    await expect(signerPage.getByText("Short", { exact: true })).toBeVisible();
+
+    const shortWidth = (await pdfPage.boundingBox())?.width ?? 0;
+
+    expect(await measure()).toBeLessThanOrEqual(1200);
+
+    const longAnswer = "W".repeat(230);
+
+    await answer.fill(longAnswer);
+    await expect(
+      signerPage.getByText(longAnswer, { exact: true }),
+    ).toBeAttached();
+    expect(await measure()).toBeLessThanOrEqual(1200);
+    expect((await pdfPage.boundingBox())?.width).toBeCloseTo(shortWidth, 0);
+    // The whole answer is still there to edit.
+    await expect(answer).toHaveValue(longAnswer);
+
+    await answer.fill("Short again");
+    expect(await measure()).toBeLessThanOrEqual(1200);
+
+    await signerContext.close();
+  });
+});
+
+test("with local disk storage a PDF just under 20 MB uploads, and a larger request is refused", async ({
+  page,
+}, testInfo) => {
+  const database = new pg.Client({ connectionString: e2eDatabaseUrl });
+  let adminEmail = "";
+
+  await database.connect();
+
+  try {
+    const admin = await database.query<{ email: string }>(
+      `select email from public."user" where role = 'admin' limit 1`,
+    );
+
+    adminEmail = admin.rows[0]?.email ?? "";
+  } finally {
+    await database.end();
+  }
+
+  expect(adminEmail).not.toBe("");
+
+  await page.goto("/login");
+  await page.getByLabel("Email").fill(adminEmail);
+  await page.getByLabel("Password").fill(PASSWORD);
+  await page.getByRole("button", { name: "Log in" }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+
+  await test.step("a 19 MB PDF, over Next.js's 10 MB default, makes a draft", async () => {
+    const pdfPath = await writeLargePdf(
+      testInfo.outputPath("large.pdf"),
+      19 * 1024 * 1024,
+    );
+
+    await page.goto("/envelopes/new");
+    await page.getByLabel("Envelope title").fill("Large agreement");
+    await page.getByLabel("Upload PDF").setInputFiles(pdfPath);
+    await page.getByRole("button", { name: "Next ->" }).click();
+    await expect(page).toHaveURL(/\/envelopes\/[^/]+\/signers$/);
+  });
+
+  await test.step("a request over the limit gets the size message", async () => {
+    const response = await page.request.post("/api/envelopes", {
+      headers: { origin: new URL(page.url()).origin },
+      multipart: {
+        file: {
+          buffer: Buffer.alloc(22 * 1024 * 1024),
+          mimeType: "application/pdf",
+          name: "too-large.pdf",
+        },
+        title: "Too large",
+      },
+    });
+
+    expect(response.status()).toBe(413);
+    expect(await response.json()).toEqual({
+      error: "This file exceeds the 20 MB limit.",
+    });
   });
 });
 
