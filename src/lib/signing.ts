@@ -1328,6 +1328,34 @@ function signerAuditMetadata(context: ResolvedSigningContext) {
   };
 }
 
+export type SignerEmailCodeResult = {
+  emailCodeSentAt: number;
+  maskedEmail: string;
+  /** Seconds until a new code can be sent; 0 when this call sent one. */
+  retryAfterSeconds: number;
+  /**
+   * Whether this call emailed a new code. False during the resend cooldown,
+   * when the code sent a moment ago is still the one to use.
+   */
+  sent: boolean;
+};
+
+function cooldownResult(
+  emailCodeSentAt: number,
+  now: number,
+  maskedEmail: string,
+): SignerEmailCodeResult {
+  return {
+    emailCodeSentAt,
+    maskedEmail,
+    retryAfterSeconds: Math.max(
+      1,
+      emailCodeSentAt + EMAIL_CODE_RESEND_SECONDS - now,
+    ),
+    sent: false,
+  };
+}
+
 /** Emails the signer a one-time code, when the sender asked for one. */
 export async function sendSignerEmailCode(
   token: string,
@@ -1335,7 +1363,7 @@ export async function sendSignerEmailCode(
     database = getDb(),
     emailService = createEmailService(),
   }: { database?: DbPool; emailService?: EmailService } = {},
-): Promise<{ emailCodeSentAt: number; maskedEmail: string }> {
+): Promise<SignerEmailCodeResult> {
   const context = await resolveSigningContext(token, { database });
   const state = await getSignerCheckState(context.signer.id!, database);
   const now = Math.floor(Date.now() / 1000);
@@ -1349,10 +1377,11 @@ export async function sendSignerEmailCode(
     now - state.emailCodeSentAt < EMAIL_CODE_RESEND_SECONDS &&
     state.emailCodeHash
   ) {
-    return {
-      emailCodeSentAt: state.emailCodeSentAt,
-      maskedEmail: maskEmailAddress(context.signer.email),
-    };
+    return cooldownResult(
+      state.emailCodeSentAt,
+      now,
+      maskEmailAddress(context.signer.email),
+    );
   }
 
   const issued = issueEmailCode();
@@ -1404,12 +1433,22 @@ export async function sendSignerEmailCode(
       );
     }
 
+    // Another request claimed the window first. Its code is the one to use,
+    // unless that send failed and cleared it again in the meantime.
     const current = await getSignerCheckState(context.signer.id!, database);
 
-    return {
-      emailCodeSentAt: current.emailCodeSentAt ?? now,
-      maskedEmail: maskEmailAddress(context.signer.email),
-    };
+    if (current.emailCodeHash === null || current.emailCodeSentAt === null) {
+      throw new SigningMutationError(
+        "The code could not be sent right now. Try again.",
+        503,
+      );
+    }
+
+    return cooldownResult(
+      current.emailCodeSentAt,
+      now,
+      maskEmailAddress(context.signer.email),
+    );
   }
 
   const minutes = Math.round(EMAIL_CODE_TTL_SECONDS / 60);
@@ -1470,6 +1509,8 @@ export async function sendSignerEmailCode(
   return {
     emailCodeSentAt: now,
     maskedEmail: maskEmailAddress(context.signer.email),
+    retryAfterSeconds: 0,
+    sent: true,
   };
 }
 

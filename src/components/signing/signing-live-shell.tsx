@@ -53,6 +53,8 @@ import {
   isNumberEntry,
   NUMBER_ENTRY_MESSAGE,
 } from "@/lib/field-choices";
+import { getInitials } from "@/lib/initials";
+import { truncateToWholeCharacters } from "@/lib/text-truncate";
 
 const typedSignatureFont =
   '"Snell Roundhand", "Brush Script MT", "Segoe Script", cursive';
@@ -94,14 +96,8 @@ export const declinedConfirmation = {
 const compactFieldHeightThreshold = 0.045;
 const compactFieldWidthThreshold = 0.12;
 
-function getInitials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 4)
-    .toUpperCase();
+function getSignerInitials(name: string): string {
+  return getInitials(name, { max: 4 });
 }
 
 function getFieldFrame(field: SigningCurrentField | SigningVisibleField) {
@@ -572,6 +568,48 @@ export function SigningLiveShell({
     signatureValues,
     textValues,
   };
+  // Nothing the signer enters is saved until Finish, so leaving or
+  // reloading the page first would lose it. The browser asks before that
+  // happens (issue #99). Finishing or declining leaves on purpose.
+  const hasUnsubmittedEntries =
+    !hasDeclined &&
+    (Object.keys(signatureValues).length > 0 ||
+      Object.values(textValues).some((value) => value.trim().length > 0) ||
+      Object.values(checkboxValues).some(Boolean));
+  const leavingOnPurposeRef = useRef(false);
+
+  useEffect(() => {
+    if (!hasUnsubmittedEntries) {
+      return;
+    }
+
+    function warnBeforeLeaving(event: BeforeUnloadEvent) {
+      if (leavingOnPurposeRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      // Older browsers ask only when this is set.
+      event.returnValue = " ";
+    }
+
+    // Coming back to this page with the browser's Back button (after a
+    // signing provider's redirect, say) restores it as it was left, so the
+    // signer is asked again before a later reload.
+    function askAgainOnReturn(event: PageTransitionEvent) {
+      if (event.persisted) {
+        leavingOnPurposeRef.current = false;
+      }
+    }
+
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    window.addEventListener("pageshow", askAgainOnReturn);
+
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeLeaving);
+      window.removeEventListener("pageshow", askAgainOnReturn);
+    };
+  }, [hasUnsubmittedEntries]);
   // A group of radio buttons is one question: it is listed and counted once.
   const seenRadioGroups = new Set<string>();
   const actionSummaryFields = record.currentSignerFields.filter((field) => {
@@ -790,6 +828,7 @@ export function SigningLiveShell({
 
       if (!response.ok) {
         if (payload?.state) {
+          leavingOnPurposeRef.current = true;
           window.location.reload();
           return;
         }
@@ -807,12 +846,14 @@ export function SigningLiveShell({
           return;
         }
 
+        leavingOnPurposeRef.current = true;
         window.location.assign(payload.redirectUrl);
         return;
       }
 
       const fallbackRedirectPath = `${window.location.pathname.replace(/\/$/, "")}/done?title=${encodeURIComponent(record.envelopeTitle)}`;
 
+      leavingOnPurposeRef.current = true;
       window.location.assign(payload?.redirectPath ?? fallbackRedirectPath);
     } catch {
       setSubmitError(defaultSubmitErrorMessage);
@@ -875,6 +916,7 @@ export function SigningLiveShell({
 
       if (!response.ok) {
         if (payload?.state) {
+          leavingOnPurposeRef.current = true;
           window.location.reload();
           return;
         }
@@ -1178,7 +1220,7 @@ export function SigningLiveShell({
               <p className="section-eyebrow">Current signer</p>
               <div className="mt-3 flex items-center gap-3">
                 <span className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-(--accent-soft) text-[0.9375rem] font-bold text-(--accent-ink)">
-                  {getInitials(record.signer.name)}
+                  {getSignerInitials(record.signer.name)}
                 </span>
                 <div className="min-w-0">
                   <p className="truncate text-[0.9375rem] font-bold text-(--fg)">
@@ -1992,7 +2034,11 @@ function SignatureModal({
       return existingEntry.value;
     }
 
-    return fieldType === "initials" ? getInitials(signerName) : signerName;
+    // The same whole-character cut as typing, so applying the default
+    // submits what editing it would.
+    return fieldType === "initials"
+      ? truncateToWholeCharacters(getSignerInitials(signerName), 4)
+      : signerName;
   });
   const drawPreviewMessage =
     drawnSignatureVersion === 0
@@ -2008,7 +2054,7 @@ function SignatureModal({
 
   function handleTypedSignatureValueChange(value: string) {
     if (fieldType === "initials") {
-      setTypedSignatureValue(value.toUpperCase().slice(0, 4));
+      setTypedSignatureValue(truncateToWholeCharacters(value.toUpperCase(), 4));
       return;
     }
 
@@ -2335,10 +2381,29 @@ function DialogFrame({
   onClose: () => void;
   title: string;
 }) {
+  // These dialogs open from state, not from a Radix trigger, so on close
+  // Radix has nowhere to send focus and it falls to the top of the page.
+  // Remember what had focus when the dialog first rendered (before Radix
+  // moves focus into it) and send focus back there, as a keyboard user
+  // expects.
+  const [returnFocusTarget] = useState(() =>
+    typeof document === "undefined" ? null : document.activeElement,
+  );
+
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         className="max-h-[calc(100dvh-2rem)] max-w-[600px] overflow-y-auto p-0"
+        onCloseAutoFocus={(event) => {
+          if (
+            returnFocusTarget instanceof HTMLElement &&
+            returnFocusTarget !== document.body &&
+            returnFocusTarget.isConnected
+          ) {
+            event.preventDefault();
+            returnFocusTarget.focus();
+          }
+        }}
         showCloseButton={false}
       >
         <div>
