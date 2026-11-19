@@ -2308,11 +2308,15 @@ export async function getPrepareEnvelopeDataForUser(
     return null;
   }
 
-  const [fieldsByEnvelope, pages, signers, fieldsRevision] = await Promise.all([
+  // Read before the fields, so a save landing in between pairs the newer
+  // fields with the older revision: the editor's first save is then
+  // refused and it asks for a reload, rather than an older list being
+  // taken as the latest.
+  const fieldsRevision = await readFieldsRevision(envelopeId, database);
+  const [fieldsByEnvelope, pages, signers] = await Promise.all([
     listFieldsForEnvelopeIds([envelopeId], database),
     listEnvelopePagesForEnvelopeId(envelopeId, database),
     listSignersForEnvelopeId(envelopeId, database),
-    readFieldsRevision(envelopeId, database),
   ]);
 
   return {

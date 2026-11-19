@@ -591,18 +591,36 @@ function PrepareLiveShellContent({
         return;
       }
 
-      // After any save still on its way, so this one lands last.
-      void saveChainRef.current.then(() =>
-        fetch(`/api/envelopes/${envelopeId}/fields`, {
-          body: JSON.stringify({
-            ...buildFieldRequest(unsaved),
-            expectedRevision: fieldsRevisionRef.current,
-          }),
-          headers: { "content-type": "application/json" },
-          keepalive: true,
-          method: "PUT",
-        }).catch(() => undefined),
-      );
+      const signature = serializeFieldRequest(unsaved);
+
+      // After any save still on its way, so this one lands last, and in the
+      // chain itself: a page the browser keeps and later shows again (Back
+      // after leaving) picks up the revision this save made before it
+      // saves again, instead of having its next save refused.
+      saveChainRef.current = saveChainRef.current.then(async () => {
+        try {
+          const response = await fetch(`/api/envelopes/${envelopeId}/fields`, {
+            body: JSON.stringify({
+              ...buildFieldRequest(unsaved),
+              expectedRevision: fieldsRevisionRef.current,
+            }),
+            headers: { "content-type": "application/json" },
+            keepalive: true,
+            method: "PUT",
+          });
+
+          if (!response.ok) {
+            return;
+          }
+
+          const saved = (await response.json()) as ReplaceFieldsResponse;
+
+          fieldsRevisionRef.current = saved.fieldsRevision;
+          lastSavedSignatureRef.current = signature;
+        } catch {
+          // The page has gone, or the save did not arrive: nothing to do.
+        }
+      });
     }
 
     // A full page exit (closing the tab, reloading, typing an address)
