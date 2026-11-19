@@ -81,6 +81,19 @@ test("the example CSV round-trips for role names a spreadsheet would read as for
   assert.match(csv, /^- Client name,- Client email,=Vendor name,/);
 });
 
+test("the example rows pass validation for role names with punctuation or non-English letters", () => {
+  const roleNames = ["Buyer (Tenant)", "Vendeur/Bailleur", "Käufer"];
+  const roles = roleNames.map((name) => ({ name }));
+  const parsed = parseBulkSendCsv(
+    exampleCsvForRoles(roleNames),
+    roles,
+    "Lease",
+  );
+
+  assert.equal(parsed.error, null);
+  assert.equal(validateBulkSendRows(parsed.rows)[0]?.status, "ok");
+});
+
 test("a multi-role CSV names each role's columns, and the example round-trips", () => {
   const csv = exampleCsvForRoles(["Tenant", "Landlord"]);
   const parsed = parseBulkSendCsv(csv, twoRoles, "Lease");
@@ -111,8 +124,8 @@ test("roles that differ only in spacing keep their own columns", () => {
   assert.deepEqual(
     example.rows[0]?.signers.map((signer) => [signer.roleName, signer.email]),
     [
-      ["Client Advisor", "client.advisor@company.com"],
-      ["Client  Advisor", "client.advisor.2@company.com"],
+      ["Client Advisor", "signer1@company.com"],
+      ["Client  Advisor", "signer2@company.com"],
     ],
   );
 

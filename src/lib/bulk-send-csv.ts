@@ -288,18 +288,13 @@ export function exampleCsvForRoles(roleNames: readonly string[]): string {
     );
   }
 
-  const usedLocalParts = new Set<string>();
+  // Role names can hold punctuation and non-English letters, so the
+  // sample addresses are numbered rather than built from the role name.
   const sample = [
-    ...roleNames.flatMap((name, index) => {
-      const base = name.trim().replace(/\s+/g, ".").toLowerCase();
-      const localPart = usedLocalParts.has(base)
-        ? `${base}.${String(index + 1)}`
-        : base;
-
-      usedLocalParts.add(localPart);
-
-      return [`${name} person`, `${localPart}@company.com`];
-    }),
+    ...roleNames.flatMap((name, index) => [
+      `${name} person`,
+      `signer${String(index + 1)}@company.com`,
+    ]),
     "Agreement",
   ];
 
