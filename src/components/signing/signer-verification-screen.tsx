@@ -1,7 +1,7 @@
 "use client";
 
 import { ShieldCheckIcon } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { Brand } from "@/components/layout/brand";
 import { PublicLegalFooter } from "@/components/layout/public-legal-links";
@@ -44,6 +44,9 @@ export function SignerVerificationScreen({
   );
   const [isChecking, setIsChecking] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  // Seconds left before the server will send another code, counted down
+  // after it says the last one is still in its resend cooldown.
+  const [resendWait, setResendWait] = useState(0);
   const base = `/api/signing/${encodeURIComponent(token)}`;
 
   async function sendCode() {
@@ -57,6 +60,8 @@ export function SignerVerificationScreen({
       const payload = (await response.json().catch(() => null)) as {
         error?: string;
         maskedEmail?: string;
+        retryAfterSeconds?: number;
+        sent?: boolean;
       } | null;
 
       if (!response.ok) {
@@ -64,8 +69,20 @@ export function SignerVerificationScreen({
         return;
       }
 
+      const maskedEmail = payload?.maskedEmail ?? state.maskedEmail;
+
+      if (payload?.sent === false) {
+        setNotice(
+          `A code was already sent to ${maskedEmail} less than a minute ago, so no new email went out. Use that code, or send a new one when the countdown on the button ends.`,
+        );
+        setResendWait(Math.max(1, Math.ceil(payload.retryAfterSeconds ?? 60)));
+        return;
+      }
+
       setNotice(
-        `A code was sent to ${payload?.maskedEmail ?? state.maskedEmail}.`,
+        notice
+          ? `A new code was sent to ${maskedEmail}.`
+          : `A code was sent to ${maskedEmail}.`,
       );
     } catch {
       setError("The code could not be sent right now.");
@@ -107,6 +124,18 @@ export function SignerVerificationScreen({
       setIsChecking(false);
     }
   }
+
+  useEffect(() => {
+    if (resendWait <= 0) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setResendWait((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [resendWait]);
 
   const copy = METHOD_COPY[method];
   const step = state.required.indexOf(method) + 1;
@@ -187,11 +216,16 @@ export function SignerVerificationScreen({
               </ShellButton>
               {method === "email_code" ? (
                 <ShellButton
+                  disabled={resendWait > 0}
                   loading={isSending}
                   onClick={sendCode}
                   variant="secondary"
                 >
-                  {notice ? "Send a new code" : "Email me a code"}
+                  {!notice
+                    ? "Email me a code"
+                    : resendWait > 0
+                      ? `Send a new code in ${String(resendWait)}s`
+                      : "Send a new code"}
                 </ShellButton>
               ) : null}
             </div>
