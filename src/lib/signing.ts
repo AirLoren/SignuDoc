@@ -274,6 +274,7 @@ const signingUnavailableStatusCodeMap: Record<
   number
 > = {
   "already-signed": 409,
+  completed: 409,
   declined: 409,
   expired: 410,
   voided: 409,
@@ -300,6 +301,8 @@ function getSigningUnavailableMessage(
   switch (state) {
     case "already-signed":
       return "You've already signed.";
+    case "completed":
+      return "This envelope has been completed.";
     case "declined":
       return "This envelope has been declined.";
     case "voided":
@@ -1756,6 +1759,47 @@ export async function recordSignerConsent(
   return { consentedAt };
 }
 
+/**
+ * What a link that signing, declining or voiding took away should say. It
+ * opens nothing: it only tells the signer what became of the envelope, so
+ * they are not sent to ask for a new link the sender cannot send. Any other
+ * link that opens nothing has expired.
+ */
+async function getSpentSigningLinkState(
+  tokenHash: string,
+  database: DbExecutor,
+): Promise<SigningUnavailableResponse["state"]> {
+  const spent = await queryOne<{
+    envelopeStatus: SigningEnvelopeRow["status"];
+    signerStatus: SigningSignerRow["status"];
+  }>(
+    database,
+    `
+      SELECT
+        envelopes.status AS "envelopeStatus",
+        signers.status AS "signerStatus"
+      FROM signers
+      JOIN envelopes ON envelopes.id = signers.envelope_id
+      WHERE signers.spent_signing_token_hash = $1
+      LIMIT 1
+    `,
+    [tokenHash],
+  );
+
+  switch (spent?.envelopeStatus) {
+    case "completed":
+      return "completed";
+    case "declined":
+      return "declined";
+    case "voided":
+      return "voided";
+    case "sent":
+      return spent.signerStatus === "signed" ? "already-signed" : "expired";
+    default:
+      return "expired";
+  }
+}
+
 async function resolveSigningContext(
   token: string,
   {
@@ -1770,7 +1814,9 @@ async function resolveSigningContext(
   );
 
   if (!signerRow) {
-    throw new SigningAccessError("expired");
+    throw new SigningAccessError(
+      await getSpentSigningLinkState(hashOpaqueToken(token), database),
+    );
   }
 
   const envelopeRow = await getEnvelopeRow(signerRow.envelopeId, database);
@@ -2628,6 +2674,7 @@ export async function submitSigningForToken(
             UPDATE signers
             SET
               status = 'signed',
+              spent_signing_token_hash = signing_token_hash,
               signing_token_hash = NULL,
               signing_token_expires_at = NULL,
               signed_at = $1,
@@ -2894,6 +2941,7 @@ export async function submitSigningForToken(
             UPDATE signers
             SET
               status = 'signed',
+              spent_signing_token_hash = signing_token_hash,
               signing_token_hash = NULL,
               signing_token_expires_at = NULL,
               signed_at = $1,
@@ -3269,6 +3317,7 @@ export async function declineSigningForToken(
         UPDATE signers
         SET
           status = 'declined',
+          spent_signing_token_hash = signing_token_hash,
           signing_token_hash = NULL,
           signing_token_expires_at = NULL,
           declined_at = $1,
