@@ -41,6 +41,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { SigningStateScreen } from "@/components/signing/signing-state-screen";
 import {
   type SigningCurrentField,
   type SigningPayload,
@@ -52,6 +53,8 @@ import {
   isNumberEntry,
   NUMBER_ENTRY_MESSAGE,
 } from "@/lib/field-choices";
+import { getInitials } from "@/lib/initials";
+import { truncateToWholeCharacters } from "@/lib/text-truncate";
 
 const typedSignatureFont =
   '"Snell Roundhand", "Brush Script MT", "Segoe Script", cursive';
@@ -84,17 +87,17 @@ const defaultSubmitErrorMessage =
   "We couldn't finish signing right now. Reload the page or request a fresh signing link from the sender.";
 const defaultDeclineErrorMessage =
   "We couldn't record your decline right now. Reload the page or request a fresh signing link from the sender.";
+/** What a signer sees once their decline is recorded. */
+export const declinedConfirmation = {
+  description:
+    "Your decline has been recorded. No further action is needed, and this link no longer opens the document.",
+  title: "You declined to sign",
+};
 const compactFieldHeightThreshold = 0.045;
 const compactFieldWidthThreshold = 0.12;
 
-function getInitials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 4)
-    .toUpperCase();
+function getSignerInitials(name: string): string {
+  return getInitials(name, { max: 4 });
 }
 
 function getFieldFrame(field: SigningCurrentField | SigningVisibleField) {
@@ -135,6 +138,8 @@ function getCanvasFieldLabel(
       return "Initial";
     case "date":
       return "Date";
+    case "name":
+      return "Name";
     case "text":
       return "Text";
     case "checkbox":
@@ -174,6 +179,8 @@ function getFieldLabel(
       return "Initial here";
     case "date":
       return "Date";
+    case "name":
+      return "Name";
     case "text":
       return "Enter text";
     case "checkbox":
@@ -211,6 +218,22 @@ function getRadioGroup(
   );
 }
 
+function withoutKey(record: Record<string, number>, key: string) {
+  if (!(key in record)) {
+    return record;
+  }
+
+  const next = { ...record };
+
+  delete next[key];
+
+  return next;
+}
+
+function describeTooLongAnswer(maxCharacters: number) {
+  return `This answer is too long to fit in its box on the document. Shorten it to ${maxCharacters} characters or fewer.`;
+}
+
 /** A number field holding something that is not a number. */
 function hasInvalidNumber(
   field: SigningCurrentField,
@@ -229,6 +252,8 @@ function getSummaryLabel(field: SigningCurrentField) {
       return "Initials";
     case "date":
       return "Date";
+    case "name":
+      return "Name";
     case "text":
       return "Text input";
     case "checkbox":
@@ -271,11 +296,16 @@ function getCompletionValue(
     checkboxValues,
     localDateLabel,
     signatureValues,
+    signerName,
     textValues,
-  }: EnteredValues & { localDateLabel: string },
+  }: EnteredValues & { localDateLabel: string; signerName: string },
 ) {
   if (field.type === "signature" || field.type === "initials") {
     return signatureValues[field.id]?.value ?? "Tap to sign";
+  }
+
+  if (field.type === "name") {
+    return signerName;
   }
 
   if (field.type === "text") {
@@ -455,6 +485,7 @@ export function SigningLiveShell({
   record: SigningPayload;
   signatureProblem?: ProviderSignatureProblem | null;
 }) {
+  const [hasDeclined, setHasDeclined] = useState(false);
   const [activePage, setActivePage] = useState(
     record.currentSignerFields[0]?.page ??
       record.visibleFields[0]?.page ??
@@ -503,6 +534,14 @@ export function SigningLiveShell({
     useState<SignatureModalState | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [textValues, setTextValues] = useState<Record<string, string>>({});
+  // Text answers too long for their box on the finished document, with how
+  // many characters would fit. Checked on the server as the signer types,
+  // with the fonts the document is drawn with.
+  const [tooLongAnswers, setTooLongAnswers] = useState<Record<string, number>>(
+    {},
+  );
+  const checkedAnswersRef = useRef<Record<string, string>>({});
+  const latestTextValuesRef = useRef(textValues);
   const [drawnSignatureVersion, setDrawnSignatureVersion] = useState(0);
   const [zoomLevel, setZoomLevel] = useState(DEFAULT_DOCUMENT_ZOOM_LEVEL);
   const [localDateLabel] = useState(() =>
@@ -529,6 +568,48 @@ export function SigningLiveShell({
     signatureValues,
     textValues,
   };
+  // Nothing the signer enters is saved until Finish, so leaving or
+  // reloading the page first would lose it. The browser asks before that
+  // happens (issue #99). Finishing or declining leaves on purpose.
+  const hasUnsubmittedEntries =
+    !hasDeclined &&
+    (Object.keys(signatureValues).length > 0 ||
+      Object.values(textValues).some((value) => value.trim().length > 0) ||
+      Object.values(checkboxValues).some(Boolean));
+  const leavingOnPurposeRef = useRef(false);
+
+  useEffect(() => {
+    if (!hasUnsubmittedEntries) {
+      return;
+    }
+
+    function warnBeforeLeaving(event: BeforeUnloadEvent) {
+      if (leavingOnPurposeRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      // Older browsers ask only when this is set.
+      event.returnValue = " ";
+    }
+
+    // Coming back to this page with the browser's Back button (after a
+    // signing provider's redirect, say) restores it as it was left, so the
+    // signer is asked again before a later reload.
+    function askAgainOnReturn(event: PageTransitionEvent) {
+      if (event.persisted) {
+        leavingOnPurposeRef.current = false;
+      }
+    }
+
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    window.addEventListener("pageshow", askAgainOnReturn);
+
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeLeaving);
+      window.removeEventListener("pageshow", askAgainOnReturn);
+    };
+  }, [hasUnsubmittedEntries]);
   // A group of radio buttons is one question: it is listed and counted once.
   const seenRadioGroups = new Set<string>();
   const actionSummaryFields = record.currentSignerFields.filter((field) => {
@@ -559,7 +640,16 @@ export function SigningLiveShell({
   const invalidNumberCount = record.currentSignerFields.filter((field) =>
     hasInvalidNumber(field, textValues),
   ).length;
-  const canFinish = remainingFields === 0 && invalidNumberCount === 0;
+  const tooLongFields = record.currentSignerFields.filter(
+    (field) => field.type === "text" && tooLongAnswers[field.id] !== undefined,
+  );
+  const canFinish =
+    remainingFields === 0 &&
+    invalidNumberCount === 0 &&
+    tooLongFields.length === 0;
+  const isInvalidEntry = (field: SigningCurrentField) =>
+    hasInvalidNumber(field, textValues) ||
+    (field.type === "text" && tooLongAnswers[field.id] !== undefined);
   const requiredFieldCount = countAnswerableFields(
     record.currentSignerFields,
     (field) => field.required,
@@ -571,6 +661,93 @@ export function SigningLiveShell({
           ((requiredFieldCount - remainingFields) / requiredFieldCount) * 100,
         );
   const isDocumentReady = pdfRenderState === "ready";
+
+  useEffect(() => {
+    latestTextValuesRef.current = textValues;
+
+    const changed = record.currentSignerFields.filter(
+      (field) =>
+        field.type === "text" &&
+        (textValues[field.id] ?? "").trim() !==
+          (checkedAnswersRef.current[field.id] ?? ""),
+    );
+
+    if (changed.length === 0) {
+      return;
+    }
+
+    // After a pause in typing, not on every key.
+    const timer = window.setTimeout(() => {
+      for (const field of changed) {
+        const value = (textValues[field.id] ?? "").trim();
+
+        checkedAnswersRef.current[field.id] = value;
+
+        if (!value) {
+          setTooLongAnswers((current) => withoutKey(current, field.id));
+          continue;
+        }
+
+        const isStillCurrent = () =>
+          (latestTextValuesRef.current[field.id] ?? "").trim() === value;
+        // A check that could not be made leaves no warning, so it never
+        // keeps Finish off: signing makes the same check when they finish.
+        // The answer is checked again the next time it changes.
+        const giveUp = () => {
+          if (checkedAnswersRef.current[field.id] === value) {
+            delete checkedAnswersRef.current[field.id];
+          }
+
+          if (isStillCurrent()) {
+            setTooLongAnswers((current) => withoutKey(current, field.id));
+          }
+        };
+
+        void fetch(record.fieldFitUrl, {
+          body: JSON.stringify({ fieldId: field.id, value }),
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        })
+          .then(async (response) => {
+            const payload = (await response.json().catch(() => null)) as {
+              fits?: boolean;
+              maxCharacters?: number;
+            } | null;
+
+            if (!response.ok || !payload) {
+              giveUp();
+              return;
+            }
+
+            // An answer changed since is checked again on its own.
+            if (!isStillCurrent()) {
+              return;
+            }
+
+            const maxCharacters =
+              payload.fits === false &&
+              typeof payload.maxCharacters === "number"
+                ? payload.maxCharacters
+                : null;
+
+            setTooLongAnswers((current) =>
+              maxCharacters === null
+                ? withoutKey(current, field.id)
+                : { ...current, [field.id]: maxCharacters },
+            );
+
+            // Opened before the answer was found too long: back to the
+            // page, where the box and the panel say what to shorten.
+            if (maxCharacters !== null) {
+              setIsFinishDialogOpen(false);
+            }
+          })
+          .catch(giveUp);
+      }
+    }, 400);
+
+    return () => window.clearTimeout(timer);
+  }, [record.currentSignerFields, record.fieldFitUrl, textValues]);
 
   function applyZoomLevel(nextZoomLevel: number) {
     if (nextZoomLevel <= DEFAULT_DOCUMENT_ZOOM_LEVEL) {
@@ -651,6 +828,7 @@ export function SigningLiveShell({
 
       if (!response.ok) {
         if (payload?.state) {
+          leavingOnPurposeRef.current = true;
           window.location.reload();
           return;
         }
@@ -668,12 +846,14 @@ export function SigningLiveShell({
           return;
         }
 
+        leavingOnPurposeRef.current = true;
         window.location.assign(payload.redirectUrl);
         return;
       }
 
       const fallbackRedirectPath = `${window.location.pathname.replace(/\/$/, "")}/done?title=${encodeURIComponent(record.envelopeTitle)}`;
 
+      leavingOnPurposeRef.current = true;
       window.location.assign(payload?.redirectPath ?? fallbackRedirectPath);
     } catch {
       setSubmitError(defaultSubmitErrorMessage);
@@ -736,6 +916,7 @@ export function SigningLiveShell({
 
       if (!response.ok) {
         if (payload?.state) {
+          leavingOnPurposeRef.current = true;
           window.location.reload();
           return;
         }
@@ -745,7 +926,10 @@ export function SigningLiveShell({
         return;
       }
 
-      window.location.reload();
+      // Not a reload: a decline retires this link, so reloading would land
+      // on "This link has expired" instead of saying the decline was
+      // recorded (issue #55).
+      setHasDeclined(true);
     } catch {
       setDeclineError(defaultDeclineErrorMessage);
       setIsDeclining(false);
@@ -782,6 +966,16 @@ export function SigningLiveShell({
     ) {
       documentPanGestureRef.current = null;
     }
+  }
+
+  if (hasDeclined) {
+    return (
+      <SigningStateScreen
+        description={declinedConfirmation.description}
+        focusHeading
+        title={declinedConfirmation.title}
+      />
+    );
   }
 
   return (
@@ -832,7 +1026,7 @@ export function SigningLiveShell({
             )}
           </div>
         ) : null}
-        <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <section className="grid grid-cols-[minmax(0,1fr)] gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="flex min-w-0 flex-col gap-4">
             <div className="panel rounded-[1.25rem] px-4 py-3">
               <div className="flex flex-col gap-3 xl:grid xl:grid-cols-[1fr_auto_1fr] xl:items-center">
@@ -950,7 +1144,15 @@ export function SigningLiveShell({
                               field={field}
                               key={field.id}
                               localDateLabel={localDateLabel}
-                              isInvalid={hasInvalidNumber(field, textValues)}
+                              isInvalid={isInvalidEntry(field)}
+                              tooLongMessage={
+                                tooLongAnswers[field.id] !== undefined
+                                  ? describeTooLongAnswer(
+                                      tooLongAnswers[field.id]!,
+                                    )
+                                  : null
+                              }
+                              signerName={record.signer.name}
                               onCheckboxChange={(checked) => {
                                 setSubmitError(null);
                                 setCheckboxValues((current) => {
@@ -1013,12 +1215,12 @@ export function SigningLiveShell({
             </div>
           </div>
 
-          <aside className="space-y-4 xl:sticky xl:top-[5.25rem] xl:self-start">
+          <aside className="min-w-0 space-y-4 xl:sticky xl:top-[5.25rem] xl:self-start">
             <section className="panel rounded-[1.25rem] p-5">
               <p className="section-eyebrow">Current signer</p>
               <div className="mt-3 flex items-center gap-3">
                 <span className="inline-flex size-11 shrink-0 items-center justify-center rounded-full bg-(--accent-soft) text-[0.9375rem] font-bold text-(--accent-ink)">
-                  {getInitials(record.signer.name)}
+                  {getSignerInitials(record.signer.name)}
                 </span>
                 <div className="min-w-0">
                   <p className="truncate text-[0.9375rem] font-bold text-(--fg)">
@@ -1046,6 +1248,17 @@ export function SigningLiveShell({
                     {NUMBER_ENTRY_MESSAGE}
                   </p>
                 ) : null}
+                {tooLongFields.map((field) => (
+                  <p
+                    className="mt-1.5 text-[0.8125rem] font-semibold leading-5 text-(--danger)"
+                    key={field.id}
+                    role="alert"
+                  >
+                    A text box on page {field.page} is full: shorten your answer
+                    to {tooLongAnswers[field.id]} characters or fewer so all of
+                    it fits on the document.
+                  </p>
+                ))}
                 <div
                   aria-hidden="true"
                   className="mt-3 h-2 overflow-hidden rounded-full bg-(--surface-strong)"
@@ -1092,13 +1305,17 @@ export function SigningLiveShell({
                       record.currentSignerFields,
                       enteredValues,
                     )}
-                    isInvalid={hasInvalidNumber(field, textValues)}
+                    isInvalid={isInvalidEntry(field)}
                     key={field.id}
                     label={`${getSummaryLabel(field)} · Page ${field.page}`}
                     value={getCompletionValue(
                       field,
                       record.currentSignerFields,
-                      { ...enteredValues, localDateLabel },
+                      {
+                        ...enteredValues,
+                        localDateLabel,
+                        signerName: record.signer.name,
+                      },
                     )}
                   />
                 ))}
@@ -1439,7 +1656,9 @@ function CurrentSignerField({
   onSignatureClick,
   onTextChange,
   signatureEntry,
+  signerName,
   textValue,
+  tooLongMessage = null,
 }: {
   checkboxValue: boolean;
   field: SigningCurrentField;
@@ -1450,7 +1669,11 @@ function CurrentSignerField({
   onSignatureClick: () => void;
   onTextChange: (value: string) => void;
   signatureEntry?: SignatureEntry;
+  /** What a name field shows: the name the sender gave this signer. */
+  signerName: string;
   textValue: string;
+  /** Set when a text answer is too long for its box on the document. */
+  tooLongMessage?: string | null;
 }) {
   const frame = getFieldFrame(field);
   const showInlineLabel = shouldShowInlineFieldLabel(field);
@@ -1508,7 +1731,8 @@ function CurrentSignerField({
     );
   }
 
-  if (field.type === "date") {
+  // Filled in for the signer: the day they sign, or their name.
+  if (field.type === "date" || field.type === "name") {
     return (
       <div
         className="absolute z-2 overflow-hidden rounded-[0.375rem] border border-(--border-strong) bg-white/92 text-sm text-(--fg)"
@@ -1517,7 +1741,7 @@ function CurrentSignerField({
       >
         {showInlineValue ? (
           <p className="flex h-full items-center truncate px-2 text-[12px] font-semibold">
-            {localDateLabel}
+            {field.type === "date" ? localDateLabel : signerName}
           </p>
         ) : null}
       </div>
@@ -1527,11 +1751,17 @@ function CurrentSignerField({
   if (field.type === "text") {
     return (
       <div
-        className="absolute z-2 overflow-hidden rounded-[0.375rem] border-2 border-(--accent) bg-[rgb(var(--accent-rgb)/0.07)] focus-within:bg-white"
+        className={`absolute z-2 overflow-hidden rounded-[0.375rem] border-2 focus-within:bg-white ${
+          tooLongMessage
+            ? "border-(--danger) bg-(--danger-soft)"
+            : "border-(--accent) bg-[rgb(var(--accent-rgb)/0.07)]"
+        }`}
         data-signing-field="true"
         style={frame}
+        title={tooLongMessage ?? undefined}
       >
         <input
+          aria-invalid={tooLongMessage ? true : undefined}
           aria-label={getFieldLabel(field)}
           className="h-full w-full border-none bg-transparent px-2 text-sm text-(--fg) outline-none placeholder:text-(--placeholder)"
           id={`signing-field-${field.id}`}
@@ -1804,7 +2034,11 @@ function SignatureModal({
       return existingEntry.value;
     }
 
-    return fieldType === "initials" ? getInitials(signerName) : signerName;
+    // The same whole-character cut as typing, so applying the default
+    // submits what editing it would.
+    return fieldType === "initials"
+      ? truncateToWholeCharacters(getSignerInitials(signerName), 4)
+      : signerName;
   });
   const drawPreviewMessage =
     drawnSignatureVersion === 0
@@ -1820,7 +2054,7 @@ function SignatureModal({
 
   function handleTypedSignatureValueChange(value: string) {
     if (fieldType === "initials") {
-      setTypedSignatureValue(value.toUpperCase().slice(0, 4));
+      setTypedSignatureValue(truncateToWholeCharacters(value.toUpperCase(), 4));
       return;
     }
 
@@ -1896,12 +2130,9 @@ function SignatureModal({
         <div className="well p-3">
           <SignatureDrawCanvas
             emptyMessage={drawPreviewMessage}
-            initialDataUrl={
-              drawnSignatureVersion === 0 &&
-              existingEntry?.inputMethod === "drawn"
-                ? (existingEntry.imageDataUrl ?? null)
-                : null
-            }
+            // The canvas unmounts while the Type tab is shown, so it is seeded
+            // from the drawing that Apply would use, never a stale one.
+            initialDataUrl={drawnSignatureDataUrl}
             key={drawnSignatureVersion}
             onChange={setDrawnSignatureDataUrl}
           />
@@ -2150,10 +2381,29 @@ function DialogFrame({
   onClose: () => void;
   title: string;
 }) {
+  // These dialogs open from state, not from a Radix trigger, so on close
+  // Radix has nowhere to send focus and it falls to the top of the page.
+  // Remember what had focus when the dialog first rendered (before Radix
+  // moves focus into it) and send focus back there, as a keyboard user
+  // expects.
+  const [returnFocusTarget] = useState(() =>
+    typeof document === "undefined" ? null : document.activeElement,
+  );
+
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         className="max-h-[calc(100dvh-2rem)] max-w-[600px] overflow-y-auto p-0"
+        onCloseAutoFocus={(event) => {
+          if (
+            returnFocusTarget instanceof HTMLElement &&
+            returnFocusTarget !== document.body &&
+            returnFocusTarget.isConnected
+          ) {
+            event.preventDefault();
+            returnFocusTarget.focus();
+          }
+        }}
         showCloseButton={false}
       >
         <div>

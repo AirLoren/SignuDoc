@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { type Branding } from "./branding.ts";
+import { removeUnclaimedEnvelopeCertificates } from "./certificate-cleanup.ts";
 import {
   type DbExecutor,
   type DbPool,
@@ -81,12 +82,15 @@ import {
 } from "./services/audit.ts";
 import {
   createEmailService,
+  EMAIL_NOT_CONNECTED_MESSAGE,
+  isEmailNotConnectedError,
   resolveEmailAddresses,
   type EmailService,
 } from "./services/email.ts";
 import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import { buildSigningInvitationEmail } from "./services/signing-invitation-email.ts";
 import {
+  loadInstallSealer,
   storeEnvelopeCertificatePdf,
   storeRecipientEnvelopeCertificatePdf,
 } from "./services/pdf-finalize.ts";
@@ -121,6 +125,7 @@ import {
   getManualNudgeAvailableAt,
   isManualNudgeAvailable,
 } from "./services/reminders.ts";
+import { formatEnvelopeOwner } from "./envelope-access.ts";
 import { PERMITTED_USE_VERSION } from "./permitted-uses.ts";
 import { hashAccessCode } from "./signer-checks.ts";
 import { escapeHtml } from "./utils/html.ts";
@@ -305,6 +310,8 @@ export type DashboardEnvelopeListItem = {
   expired?: boolean;
   id: string;
   searchableEmails: readonly string[];
+  /** Who sent it, in an administrator's list of every envelope. */
+  senderLabel?: string;
   status: EnvelopeRecord["status"];
   /** What the status pill says: the status, or how far signing has got. */
   statusLabel: string;
@@ -316,6 +323,7 @@ type ReviewFieldSummary =
   | "Date"
   | "Dropdown"
   | "Initials"
+  | "Name"
   | "Number"
   | "Radio group"
   | "Signature"
@@ -372,6 +380,8 @@ export type DraftSignerStepData = {
 export type PrepareEnvelopeData = {
   envelopeId: string;
   fields: readonly FieldRecord[];
+  /** Sent back with each save, so a save from an older page is refused. */
+  fieldsRevision: number;
   pageCount: number;
   pages: readonly EnvelopePageRecord[];
   pdfUrl: string;
@@ -455,6 +465,23 @@ export class EnvelopeMutationError extends Error {
   }
 }
 
+/**
+ * The email service for a send. With no provider connected, sending is
+ * refused with a message that says so, before anything changes, instead of
+ * failing as an unexpected server error (issue #53).
+ */
+function createEmailServiceForSending(): EmailService {
+  try {
+    return createEmailService();
+  } catch (error) {
+    if (isEmailNotConnectedError(error)) {
+      throw new EnvelopeMutationError(EMAIL_NOT_CONNECTED_MESSAGE, 503);
+    }
+
+    throw error;
+  }
+}
+
 export class EnvelopeDocumentAccessError extends Error {
   readonly statusCode: number;
 
@@ -485,6 +512,7 @@ const FIELD_TYPE_SUMMARY_LABELS: Record<
   date: "Date",
   dropdown: "Dropdown",
   initials: "Initials",
+  name: "Name",
   number: "Number",
   radio: "Radio group",
   signature: "Signature",
@@ -492,14 +520,15 @@ const FIELD_TYPE_SUMMARY_LABELS: Record<
 };
 
 const FIELD_TYPE_SORT_ORDER: Record<FieldRecord["type"], number> = {
-  checkbox: 6,
+  checkbox: 7,
   date: 2,
-  dropdown: 5,
+  dropdown: 6,
   initials: 1,
-  number: 4,
-  radio: 7,
+  name: 3,
+  number: 5,
+  radio: 8,
   signature: 0,
-  text: 3,
+  text: 4,
 };
 
 const TIMELINE_TONE_MAP: Record<
@@ -1537,18 +1566,23 @@ function buildVoidNotificationEmail(input: {
   senderName: string;
   signerEmail: string;
   signerName: string;
+  /** The signer had already signed, so the document they signed won't be completed. */
+  signerSigned?: boolean;
 }) {
   const subject = `"${input.envelopeTitle}" was voided by ${input.senderName}`;
+  const outcome = input.signerSigned
+    ? "The signing process has been canceled, so the document you signed will not be completed. No further action is needed."
+    : "The signing process has been canceled. No further action is needed.";
   const textBody = [
     `Hi ${input.signerName},`,
     "",
     `${input.senderName} voided "${input.envelopeTitle}" in ${input.branding.productName}.`,
-    "The signing process has been canceled. No further action is needed.",
+    outcome,
   ].join("\n");
   const htmlBody = [
     `<p>Hi ${escapeHtml(input.signerName)},</p>`,
     `<p>${escapeHtml(input.senderName)} voided &ldquo;${escapeHtml(input.envelopeTitle)}&rdquo; in ${escapeHtml(input.branding.productName)}.</p>`,
-    "<p>The signing process has been canceled. No further action is needed.</p>",
+    `<p>${escapeHtml(outcome)}</p>`,
   ].join("");
   const legalFooter = withUserEmailLegalFooter(
     {
@@ -1761,15 +1795,48 @@ function buildDetailSignerMetaLabel(
   return `${pluralize(assignedFieldCount, "field")} assigned`;
 }
 
+/** One page of a dashboard list, newest first. */
+export type DashboardEnvelopePage = {
+  envelopes: DashboardEnvelopeListItem[];
+  /** There are older envelopes on the next page. */
+  hasMore: boolean;
+};
+
 export async function listEnvelopesForUser(
   userId: string,
   filters: Partial<EnvelopeListFilters> = {},
   database: DbExecutor = getDb(),
-): Promise<DashboardEnvelopeListItem[]> {
+): Promise<DashboardEnvelopePage> {
+  return listEnvelopes(userId, filters, database);
+}
+
+/**
+ * Every envelope in the install, whoever sent it, each with its sender.
+ * Other members' drafts are left out: a draft is its sender's own until it
+ * is sent. For an administrator: the caller checks the role.
+ */
+export async function listAllEnvelopesForAdmin(
+  adminUserId: string,
+  filters: Partial<EnvelopeListFilters> = {},
+  database: DbExecutor = getDb(),
+): Promise<DashboardEnvelopePage> {
+  return listEnvelopes(null, filters, database, adminUserId);
+}
+
+async function listEnvelopes(
+  ownerUserId: string | null,
+  filters: Partial<EnvelopeListFilters>,
+  database: DbExecutor,
+  adminUserId?: string,
+): Promise<DashboardEnvelopePage> {
   const parsedFilters = envelopeListFiltersSchema.parse(filters);
-  const values: unknown[] = [userId];
-  const clauses = ["user_id = $1"];
-  let nextParamIndex = 2;
+  const values: unknown[] =
+    ownerUserId === null ? [adminUserId ?? ""] : [ownerUserId];
+  const clauses =
+    ownerUserId === null
+      ? ["(status <> 'draft' OR user_id = $1)"]
+      : ["user_id = $1"];
+  let nextParamIndex = values.length + 1;
 
   if (parsedFilters.status) {
     clauses.push(`status = $${String(nextParamIndex)}`);
@@ -1787,7 +1854,21 @@ export async function listEnvelopesForUser(
           FROM signers
           WHERE signers.envelope_id = envelopes.id
             AND lower(signers.email) LIKE ${searchPlaceholder} ESCAPE '\\'
-        )
+        )${
+          // Across the install, the sender too.
+          ownerUserId === null
+            ? `
+        OR EXISTS (
+          SELECT 1
+          FROM public."user" sender
+          WHERE sender.id = envelopes.user_id
+            AND (
+              lower(sender.email) LIKE ${searchPlaceholder} ESCAPE '\\'
+              OR lower(sender.name) LIKE ${searchPlaceholder} ESCAPE '\\'
+            )
+        )`
+            : ""
+        }
       )`,
     );
     values.push(`%${escapeLike(parsedFilters.search.toLowerCase())}%`);
@@ -1795,7 +1876,8 @@ export async function listEnvelopesForUser(
   }
 
   const limitPlaceholder = `$${String(nextParamIndex)}`;
-  values.push(parsedFilters.limit);
+  // One more than a page, to tell whether there is a next one.
+  values.push(parsedFilters.limit + 1);
   nextParamIndex += 1;
   const offsetPlaceholder = `$${String(nextParamIndex)}`;
   values.push((parsedFilters.page - 1) * parsedFilters.limit);
@@ -1834,7 +1916,8 @@ export async function listEnvelopesForUser(
     values,
   );
 
-  const envelopes = rows.map(mapEnvelopeRow);
+  const hasMore = rows.length > parsedFilters.limit;
+  const envelopes = rows.slice(0, parsedFilters.limit).map(mapEnvelopeRow);
   const envelopeIds = envelopes.map((envelope) => envelope.id);
   const [signersByEnvelope, fieldsByEnvelope, copyRecipientsByEnvelope] =
     await Promise.all([
@@ -1842,12 +1925,30 @@ export async function listEnvelopesForUser(
       listFieldsForEnvelopeIds(envelopeIds, database),
       listCopyRecipientsForEnvelopeIds(envelopeIds, database),
     ]);
+  const sendersById =
+    ownerUserId === null
+      ? await listSendersById(
+          envelopes.map((envelope) => envelope.userId),
+          database,
+        )
+      : null;
 
-  return envelopes.map((envelope) => {
+  const items = envelopes.map((envelope) => {
     const signers = signersByEnvelope.get(envelope.id) ?? [];
     const fields = fieldsByEnvelope.get(envelope.id) ?? [];
+    const sender = sendersById?.get(envelope.userId);
 
     return {
+      ...(sendersById
+        ? {
+            senderLabel: sender
+              ? formatEnvelopeOwner({
+                  ownerEmail: sender.email,
+                  ownerName: sender.name,
+                })
+              : "Unknown sender",
+          }
+        : {}),
       contextLine: buildDashboardContextLine(envelope, signers, fields),
       createdAtLabel: formatShortDate(envelope.createdAt),
       expired: isEnvelopeExpired(envelope, Math.floor(Date.now() / 1000)),
@@ -1856,12 +1957,37 @@ export async function listEnvelopesForUser(
       searchableEmails: [
         ...signers,
         ...(copyRecipientsByEnvelope.get(envelope.id) ?? []),
+        // Across the install, the sender too.
+        ...(sender ? [sender] : []),
       ].map((recipient) => recipient.email),
       status: envelope.status,
       statusLabel: buildDashboardStatusLabel(envelope, signers),
       title: envelope.title,
     };
   });
+
+  return { envelopes: items, hasMore };
+}
+
+type SenderRow = { email: string; id: string; name: string | null };
+
+async function listSendersById(
+  userIds: readonly string[],
+  database: DbExecutor,
+): Promise<Map<string, SenderRow>> {
+  const uniqueIds = [...new Set(userIds)];
+
+  if (uniqueIds.length === 0) {
+    return new Map();
+  }
+
+  const rows = await queryMany<SenderRow>(
+    database,
+    `SELECT id, name, email FROM public."user" WHERE id = ANY($1::text[])`,
+    [uniqueIds],
+  );
+
+  return new Map(rows.map((row) => [row.id, row]));
 }
 
 export async function getEnvelopeDetailDataForUser(
@@ -2185,6 +2311,11 @@ export async function getPrepareEnvelopeDataForUser(
     return null;
   }
 
+  // Read before the fields, so a save landing in between pairs the newer
+  // fields with the older revision: the editor's first save is then
+  // refused and it asks for a reload, rather than an older list being
+  // taken as the latest.
+  const fieldsRevision = await readFieldsRevision(envelopeId, database);
   const [fieldsByEnvelope, pages, signers] = await Promise.all([
     listFieldsForEnvelopeIds([envelopeId], database),
     listEnvelopePagesForEnvelopeId(envelopeId, database),
@@ -2194,6 +2325,7 @@ export async function getPrepareEnvelopeDataForUser(
   return {
     envelopeId,
     fields: fieldsByEnvelope.get(envelopeId) ?? [],
+    fieldsRevision,
     pageCount: envelope.pageCount,
     pages,
     pdfUrl: `/api/envelopes/${encodeURIComponent(envelopeId)}/document`,
@@ -2294,6 +2426,22 @@ async function readDraftParties(envelopeId: string, database: DbExecutor) {
  * The lock an UPDATE takes, not FOR UPDATE: the signer rows written next
  * need a share of this row for their foreign key.
  */
+/** What a sender is told when their field save was made on an older page. */
+export const FIELDS_CHANGED_MESSAGE =
+  "These fields were changed somewhere else, so this change was not saved. Reload the page to see the latest fields.";
+
+async function readFieldsRevision(
+  envelopeId: string,
+  database: DbExecutor,
+): Promise<number> {
+  const result = await database.query<{ fields_revision: number }>(
+    `SELECT fields_revision FROM envelopes WHERE id = $1`,
+    [envelopeId],
+  );
+
+  return result.rows[0]?.fields_revision ?? 0;
+}
+
 async function lockDraftEnvelope(
   userId: string,
   envelopeId: string,
@@ -2436,7 +2584,7 @@ export async function sendDraftEnvelope(
     );
   }
 
-  const emailService = createEmailService();
+  const emailService = createEmailServiceForSending();
   const storageService = createStorageService();
   const sourcePdfHead = await storageService.headObject(envelope.sourcePdfKey);
 
@@ -2510,6 +2658,7 @@ export async function sendDraftEnvelope(
           SET
             status = 'pending',
             signing_token_hash = NULL,
+            spent_signing_token_hash = NULL,
             signing_token_expires_at = NULL,
             turn_started_at = NULL,
             last_notified_at = NULL,
@@ -2645,7 +2794,7 @@ export async function sendDraftEnvelope(
     ).messageId;
   } catch (error) {
     await withTransaction(async (tx) => {
-      await tx.query(
+      const revertedEnvelope = await tx.query(
         `
           UPDATE envelopes
           SET
@@ -2664,12 +2813,19 @@ export async function sendDraftEnvelope(
         [envelope.updatedAt, envelopeId, userId],
       );
 
+      // Something else ended the envelope after it went out (it was voided,
+      // say). Its signers and history are that envelope's now: leave them.
+      if (revertedEnvelope.rowCount !== 1) {
+        return;
+      }
+
       await tx.query(
         `
           UPDATE signers
           SET
             status = 'pending',
             signing_token_hash = NULL,
+            spent_signing_token_hash = NULL,
             signing_token_expires_at = NULL,
             turn_started_at = NULL,
             last_notified_at = NULL,
@@ -3253,6 +3409,12 @@ export async function voidSentEnvelope(
     (signer) => signer.status === "notified",
   );
   const currentSigner = notifiedSigners[0];
+  // Everyone who was sent the envelope hears that it was voided: the signer
+  // whose turn it is, and those who already signed it. Signers still waiting
+  // for their turn were never invited, so they get nothing.
+  const invitedSigners = signers.filter(
+    (signer) => signer.status === "notified" || signer.status === "signed",
+  );
   const voidedAt = Math.floor(Date.now() / 1000);
   const emailService = createEmailService();
   const storageService = createStorageService();
@@ -3322,11 +3484,40 @@ export async function voidSentEnvelope(
     voidedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
-  let certificate: { key: string; sha256: string };
-  let recipientCertificateSha256: string;
+  // The seal's key and the install's name, read before the transaction:
+  // sealing inside it then needs no second connection from the pool.
+  const seal = await loadInstallSealer();
 
-  try {
-    certificate = await storeEnvelopeCertificatePdf(
+  await withTransaction(async (tx) => {
+    // Taken before the certificates are made. They have fixed keys, so a
+    // second void, a decline or the last signature at the same time waits
+    // here, then stops below: it never writes over, or deletes, the files
+    // the first one saved.
+    const locked = await queryOne<{ status: EnvelopeRecord["status"] }>(
+      tx,
+      `
+        SELECT status
+        FROM envelopes
+        WHERE id = $1 AND user_id = $2
+        -- The lock an UPDATE takes, not FOR UPDATE: storing an audit event
+        -- needs a share of this row for its foreign key.
+        FOR NO KEY UPDATE
+      `,
+      [envelopeId, userId],
+    );
+
+    if (!locked) {
+      throw new EnvelopeMutationError("Envelope not found.", 404);
+    }
+
+    if (locked.status !== "sent") {
+      throw new EnvelopeMutationError(
+        "Only sent envelopes can be voided.",
+        409,
+      );
+    }
+
+    const certificate = await storeEnvelopeCertificatePdf(
       {
         auditEvents,
         certificate: canonicalCertificate,
@@ -3334,6 +3525,7 @@ export async function voidSentEnvelope(
         signers: voidedSigners,
       },
       {
+        seal,
         storageService,
       },
     );
@@ -3353,112 +3545,94 @@ export async function voidSentEnvelope(
         signers: voidedSigners,
       },
       {
+        seal,
         storageService,
       },
     );
     storedCertificateKeys.push(recipientCertificate.key);
-    recipientCertificateSha256 = recipientCertificate.sha256;
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
-    throw error;
-  }
 
-  try {
-    await withTransaction(async (tx) => {
-      const persistedEnvelope = await getEnvelopeByIdForUser(
-        userId,
+    const updatedEnvelope = await tx.query(
+      `
+        UPDATE envelopes
+        SET
+          status = 'voided',
+          evidence_key = $1,
+          voided_at = $2,
+          updated_at = $3,
+          evidence_sha256 = $6,
+          recipient_evidence_sha256 = $7
+        WHERE id = $4
+          AND user_id = $5
+          AND status = 'sent'
+      `,
+      [
+        certificate.key,
+        voidedAt,
+        voidedAt,
         envelopeId,
-        tx,
-      );
-
-      if (!persistedEnvelope) {
-        throw new EnvelopeMutationError("Envelope not found.", 404);
-      }
-
-      if (persistedEnvelope.status !== "sent") {
-        throw new EnvelopeMutationError(
-          "Only sent envelopes can be voided.",
-          409,
-        );
-      }
-
-      const updatedEnvelope = await tx.query(
-        `
-          UPDATE envelopes
-          SET
-            status = 'voided',
-            evidence_key = $1,
-            voided_at = $2,
-            updated_at = $3,
-            evidence_sha256 = $6,
-            recipient_evidence_sha256 = $7
-          WHERE id = $4
-            AND user_id = $5
-            AND status = 'sent'
-        `,
-        [
-          certificate.key,
-          voidedAt,
-          voidedAt,
-          envelopeId,
-          userId,
-          certificate.sha256,
-          recipientCertificateSha256,
-        ],
-      );
-
-      if (updatedEnvelope.rowCount !== 1) {
-        throw new EnvelopeMutationError(
-          "This envelope can no longer be voided.",
-          409,
-        );
-      }
-
-      await tx.query(
-        `
-          UPDATE signers
-          SET
-            signing_token_hash = NULL,
-            signing_token_expires_at = NULL,
-            updated_at = $1
-          WHERE envelope_id = $2
-            AND status = 'notified'
-        `,
-        [voidedAt, envelopeId],
-      );
-
-      await recordAuditEvent(
-        {
-          actorEmail: voidedAuditEvent.actorEmail,
-          actorType: voidedAuditEvent.actorType,
-          id: voidedAuditEvent.id,
-          createdAt: voidedAuditEvent.createdAt,
-          envelopeId: voidedAuditEvent.envelopeId,
-          event: voidedAuditEvent.event,
-          ipAddress: voidedAuditEvent.ipAddress,
-          metadata: voidedAuditEvent.metadata,
-          userAgent: voidedAuditEvent.userAgent,
-        },
-        tx,
-      );
-    }, database);
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
+        userId,
+        certificate.sha256,
+        recipientCertificate.sha256,
+      ],
     );
+
+    if (updatedEnvelope.rowCount !== 1) {
+      throw new EnvelopeMutationError(
+        "This envelope can no longer be voided.",
+        409,
+      );
+    }
+
+    await tx.query(
+      `
+        UPDATE signers
+        SET
+          spent_signing_token_hash = signing_token_hash,
+          signing_token_hash = NULL,
+          signing_token_expires_at = NULL,
+          updated_at = $1
+        WHERE envelope_id = $2
+          AND status = 'notified'
+      `,
+      [voidedAt, envelopeId],
+    );
+
+    await recordAuditEvent(
+      {
+        actorEmail: voidedAuditEvent.actorEmail,
+        actorType: voidedAuditEvent.actorType,
+        id: voidedAuditEvent.id,
+        createdAt: voidedAuditEvent.createdAt,
+        envelopeId: voidedAuditEvent.envelopeId,
+        event: voidedAuditEvent.event,
+        ipAddress: voidedAuditEvent.ipAddress,
+        metadata: voidedAuditEvent.metadata,
+        userAgent: voidedAuditEvent.userAgent,
+      },
+      tx,
+    );
+  }, database).catch(async (error: unknown) => {
+    // Only files this call stored, so only once the envelope was its to end.
+    // That includes a failed COMMIT: the cleanup keeps the files if the
+    // envelope did end after all.
+    if (storedCertificateKeys.length > 0) {
+      await removeUnclaimedEnvelopeCertificates(
+        {
+          envelopeId: envelopeId,
+          keys: storedCertificateKeys,
+          storageService,
+        },
+        database,
+      );
+    }
+
     throw error;
-  }
+  });
 
   const branding = await getBranding().catch(() => null);
 
   await Promise.all(
-    notifiedSigners.map(async (signer) => {
+    invitedSigners.map(async (signer) => {
       try {
         if (!branding) {
           throw new Error(
@@ -3474,6 +3648,7 @@ export async function voidSentEnvelope(
             senderName: input.senderName,
             signerEmail: signer.email,
             signerName: signer.name,
+            signerSigned: signer.status === "signed",
           }),
         );
 
@@ -3569,8 +3744,20 @@ export async function replaceDraftEnvelopeFields(
     };
   });
 
-  await withTransaction(async (tx) => {
+  const fieldsRevision = await withTransaction(async (tx) => {
     await lockDraftEnvelope(userId, envelopeId, tx);
+
+    // Under the draft's lock, so two saves cannot both pass this check: a
+    // save made against an older list (from a page the sender has since
+    // left, say) does not overwrite a newer one.
+    if (
+      parsedInput.expectedRevision !== undefined &&
+      parsedInput.expectedRevision !==
+        (await readFieldsRevision(envelopeId, tx))
+    ) {
+      throw new EnvelopeMutationError(FIELDS_CHANGED_MESSAGE, 409);
+    }
+
     await tx.query(
       `
         DELETE FROM fields
@@ -3629,14 +3816,17 @@ export async function replaceDraftEnvelopeFields(
       );
     }
 
-    await tx.query(
+    const updated = await tx.query<{ fields_revision: number }>(
       `
         UPDATE envelopes
-        SET updated_at = $1
+        SET updated_at = $1, fields_revision = fields_revision + 1
         WHERE id = $2 AND user_id = $3
+        RETURNING fields_revision
       `,
       [updatedAt, envelopeId, userId],
     );
+
+    return updated.rows[0]?.fields_revision ?? 0;
   }, database);
 
   return replaceFieldsResponseSchema.parse({
@@ -3645,6 +3835,7 @@ export async function replaceDraftEnvelopeFields(
       (await listFieldsForEnvelopeIds([envelopeId], database)).get(
         envelopeId,
       ) ?? [],
+    fieldsRevision,
     redirectPath: `/envelopes/${envelopeId}/review`,
     updatedAt,
   }) as ReplaceDraftFieldsResult;
