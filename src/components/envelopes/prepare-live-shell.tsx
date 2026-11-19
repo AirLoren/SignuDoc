@@ -568,27 +568,40 @@ function PrepareLiveShellContent({
   }, [envelopeId, record.pdfUrl]);
 
   useEffect(() => {
-    return () => {
+    // Leaving the page before the autosave ran would drop the last change.
+    // Send it on the way out; keepalive lets the request finish after the
+    // page has gone.
+    function flushUnsavedFields() {
       if (autosaveTimeoutRef.current) {
         window.clearTimeout(autosaveTimeoutRef.current);
+        autosaveTimeoutRef.current = null;
       }
 
-      // Leaving the page (a link in the header, say) before the autosave
-      // ran would drop the last change. Send it on the way out; keepalive
-      // lets the request finish after the page has gone.
       const unsaved = currentFieldsRef.current;
 
-      if (serializeFieldRequest(unsaved) !== lastSavedSignatureRef.current) {
-        // After any save still on its way, so this one lands last.
-        void saveChainRef.current.then(() =>
-          fetch(`/api/envelopes/${envelopeId}/fields`, {
-            body: JSON.stringify(buildFieldRequest(unsaved)),
-            headers: { "content-type": "application/json" },
-            keepalive: true,
-            method: "PUT",
-          }).catch(() => undefined),
-        );
+      if (serializeFieldRequest(unsaved) === lastSavedSignatureRef.current) {
+        return;
       }
+
+      // After any save still on its way, so this one lands last.
+      void saveChainRef.current.then(() =>
+        fetch(`/api/envelopes/${envelopeId}/fields`, {
+          body: JSON.stringify(buildFieldRequest(unsaved)),
+          headers: { "content-type": "application/json" },
+          keepalive: true,
+          method: "PUT",
+        }).catch(() => undefined),
+      );
+    }
+
+    // A full page exit (closing the tab, reloading, typing an address)
+    // never unmounts the editor, so it is caught here.
+    window.addEventListener("pagehide", flushUnsavedFields);
+
+    return () => {
+      window.removeEventListener("pagehide", flushUnsavedFields);
+      // A link inside the app (the header, say) unmounts it instead.
+      flushUnsavedFields();
     };
   }, [envelopeId]);
 
@@ -765,6 +778,18 @@ function PrepareLiveShellContent({
   // save fails, the sender stays here with the error, so nothing they can
   // see on the page is lost.
   async function handleBack(event: MouseEvent<HTMLAnchorElement>) {
+    // A click that opens Back in a new tab or window leaves this page open,
+    // and its autosave still runs, so the browser handles it as usual.
+    if (
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+
     if (
       serializeFieldRequest(currentFieldsRef.current) ===
       lastSavedSignatureRef.current
