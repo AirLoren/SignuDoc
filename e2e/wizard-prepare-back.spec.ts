@@ -9,6 +9,8 @@ import { writeSamplePdf } from "./support/sample-pdf";
 test("Back from Place fields keeps a field placed just before it", async ({
   page,
 }, testInfo) => {
+  // The page's clock runs as usual until it is paused below.
+  await page.clock.install();
   await signInAsAdministrator(page);
 
   const pdfPath = await writeSamplePdf(testInfo.outputPath("back.pdf"));
@@ -40,17 +42,20 @@ test("Back from Place fields keeps a field placed just before it", async ({
 
   expect(box).not.toBeNull();
   expect(backBox).not.toBeNull();
+  // Stop the page's timers, so the autosave cannot run before Back is
+  // clicked: only Back's own save can keep the field.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
   await placementTarget.click({
     position: { x: box!.width * 0.3, y: box!.height * 0.6 },
   });
   await expect(
     page.getByRole("button", { name: "Bailey Back · Sign" }),
   ).toBeVisible();
-  // Straight away, before the autosave has had its moment.
   await page.mouse.click(
     backBox!.x + backBox!.width / 2,
     backBox!.y + backBox!.height / 2,
   );
+  await page.clock.resume();
   await expect(page).toHaveURL(new RegExp(`/envelopes/${envelopeId}/signers$`));
 
   await page.goto(`/envelopes/${envelopeId}/prepare`);
