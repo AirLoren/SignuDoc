@@ -8,9 +8,7 @@ import { writeSamplePdf } from "./support/sample-pdf";
 // Runs after signing-flow.spec.ts, which sets up the install and its
 // administrator.
 
-const TITLE = "Back from signers";
-
-async function countDrafts(): Promise<number> {
+async function countDrafts(title: string): Promise<number> {
   const database = new pg.Client({ connectionString: e2eDatabaseUrl });
 
   await database.connect();
@@ -18,7 +16,7 @@ async function countDrafts(): Promise<number> {
   try {
     const result = await database.query<{ total: number }>(
       `select count(*)::int as total from envelopes where title = $1`,
-      [TITLE],
+      [title],
     );
 
     return result.rows[0]?.total ?? 0;
@@ -30,6 +28,9 @@ async function countDrafts(): Promise<number> {
 test("Back from Add signers stays in the same draft", async ({
   page,
 }, testInfo) => {
+  // A retry makes its own draft, so it counts only its own.
+  const TITLE = `Back from signers ${String(testInfo.retry)}`;
+
   await signInAsAdministrator(page);
 
   const pdfPath = await writeSamplePdf(testInfo.outputPath("back.pdf"));
@@ -51,5 +52,5 @@ test("Back from Add signers stays in the same draft", async ({
   await expect(
     page.getByRole("link", { name: "Continue editing" }),
   ).toBeVisible();
-  expect(await countDrafts()).toBe(1);
+  expect(await countDrafts(TITLE)).toBe(1);
 });
