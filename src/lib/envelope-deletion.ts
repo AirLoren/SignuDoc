@@ -916,6 +916,19 @@ export async function runScheduledEnvelopeDeletions({
         })
       ) {
         summary.deleted += 1;
+
+        // A file that could not be deleted stays queued for the next
+        // cleanup, and this run is reported as failed for it, as the
+        // retention sweep does.
+        const filesLeft = await queryOne(
+          database,
+          `SELECT 1 FROM pending_file_deletions WHERE envelope_id = $1 LIMIT 1`,
+          [envelopeId],
+        );
+
+        if (filesLeft) {
+          summary.failures.push(envelopeId);
+        }
       }
     } catch (error) {
       summary.failures.push(envelopeId);
