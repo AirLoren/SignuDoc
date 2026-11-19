@@ -460,6 +460,8 @@ function PrepareLiveShellContent({
     string | null
   >(null);
   const autosaveTimeoutRef = useRef<number | null>(null);
+  // The saves already asked for; the next one waits for them.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const paperGridRef = useRef<HTMLDivElement | null>(null);
   const documentPanGestureRef = useRef<DocumentPanGesture | null>(null);
   const currentFieldsRef = useRef(fields);
@@ -577,12 +579,15 @@ function PrepareLiveShellContent({
       const unsaved = currentFieldsRef.current;
 
       if (serializeFieldRequest(unsaved) !== lastSavedSignatureRef.current) {
-        void fetch(`/api/envelopes/${envelopeId}/fields`, {
-          body: JSON.stringify(buildFieldRequest(unsaved)),
-          headers: { "content-type": "application/json" },
-          keepalive: true,
-          method: "PUT",
-        }).catch(() => undefined);
+        // After any save still on its way, so this one lands last.
+        void saveChainRef.current.then(() =>
+          fetch(`/api/envelopes/${envelopeId}/fields`, {
+            body: JSON.stringify(buildFieldRequest(unsaved)),
+            headers: { "content-type": "application/json" },
+            keepalive: true,
+            method: "PUT",
+          }).catch(() => undefined),
+        );
       }
     };
   }, [envelopeId]);
@@ -631,7 +636,25 @@ function PrepareLiveShellContent({
     documentPanGestureRef.current = null;
   }, [zoomLevel]);
 
-  async function persistFields(nextFields: readonly PrepareField[]) {
+  // Each save replaces the whole list, so saves go one at a time, in the
+  // order they were asked for. Otherwise an older autosave still on its
+  // way could land after a newer save (Back, Next) and undo it.
+  function persistFields(
+    nextFields: readonly PrepareField[],
+  ): Promise<PersistFieldsResult> {
+    const run = saveChainRef.current.then(() => sendFields(nextFields));
+
+    saveChainRef.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return run;
+  }
+
+  async function sendFields(
+    nextFields: readonly PrepareField[],
+  ): Promise<PersistFieldsResult> {
     const requestedSignature = serializeFieldRequest(nextFields);
 
     setSaveError(null);
