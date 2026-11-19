@@ -1,5 +1,6 @@
 import { buildBranding, type Branding } from "./branding.ts";
 import {
+  afterCommit,
   type DbExecutor,
   type DbPool,
   getDb,
@@ -448,7 +449,9 @@ async function saveSettingsLocked(
     ],
   );
 
-  invalidateSettingsCache();
+  // Inside a transaction, clear once it commits: a page that read the old row
+  // in between would otherwise keep it cached.
+  afterCommit(database, invalidateSettingsCache);
 
   return row ? mapSettingsRow(row) : next;
 }
