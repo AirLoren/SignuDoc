@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
@@ -8,9 +8,9 @@ import { after, before, test } from "node:test";
 import { PDFDocument } from "pdf-lib";
 import type pg from "pg";
 
-import { openTestDatabase } from "./db/test-database.ts";
+import { afterStatement, openTestDatabase } from "./db/test-database.ts";
 import { ELECTRONIC_RECORDS_DISCLOSURE_VERSION } from "./electronic-records-disclosure.ts";
-import { voidSentEnvelope } from "./envelopes.ts";
+import { sendDraftEnvelope, voidSentEnvelope } from "./envelopes.ts";
 import { issueSigningLink } from "./services/signing-links.ts";
 import {
   createStorageService,
@@ -289,4 +289,75 @@ test("a link that was never issued still reads as expired", async () => {
   });
 
   assert.equal((await unavailableState(token)).state, "expired");
+});
+
+test("an envelope voided while its invitation fails to send stays voided, link and all", async () => {
+  const envelope = await createSentEnvelope();
+  const outbox = path.join(storageDir, "outbox");
+
+  // Back to a draft with one signer waiting, ready to send.
+  await database.query(
+    `update envelopes set status = 'draft', sent_at = null, expires_at = null where id = $1`,
+    [envelope.envelopeId],
+  );
+  await database.query(
+    `
+      update signers
+      set status = 'pending', signing_token_hash = null,
+        signing_token_expires_at = null, last_notified_at = null,
+        consented_at = null
+      where envelope_id = $1
+    `,
+    [envelope.envelopeId],
+  );
+
+  let voided = false;
+
+  try {
+    // Once the send has committed, the sender voids the envelope, and then
+    // the invitation cannot be delivered: a file stands where the captured
+    // emails go.
+    const sending = afterStatement(
+      database,
+      (text) => text === "COMMIT" && !voided,
+      async () => {
+        voided = true;
+        await voidSentEnvelope(
+          envelope.userId,
+          envelope.envelopeId,
+          { senderEmail: "sam@example.test", senderName: "Sam Sender" },
+          { database },
+        );
+        await rm(outbox, { force: true, recursive: true });
+        await writeFile(outbox, "");
+      },
+    );
+
+    await assert.rejects(
+      sendDraftEnvelope(
+        envelope.userId,
+        envelope.envelopeId,
+        { senderEmail: "sam@example.test", senderName: "Sam Sender" },
+        { database: sending },
+      ),
+    );
+  } finally {
+    await rm(outbox, { force: true, recursive: true });
+  }
+
+  assert.ok(voided, "the send never committed");
+  assert.equal(await envelopeStatus(envelope.envelopeId), "voided");
+
+  const signer = await database.query<{
+    spent: string | null;
+    status: string;
+  }>(
+    `select status, spent_signing_token_hash as spent from signers where envelope_id = $1`,
+    [envelope.envelopeId],
+  );
+
+  // The failed send leaves the voided envelope's signer as the void left
+  // them, so their invitation still says it was voided.
+  assert.equal(signer.rows[0]?.status, "notified");
+  assert.ok(signer.rows[0]?.spent);
 });

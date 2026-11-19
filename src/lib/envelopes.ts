@@ -2766,7 +2766,7 @@ export async function sendDraftEnvelope(
     ).messageId;
   } catch (error) {
     await withTransaction(async (tx) => {
-      await tx.query(
+      const revertedEnvelope = await tx.query(
         `
           UPDATE envelopes
           SET
@@ -2784,6 +2784,12 @@ export async function sendDraftEnvelope(
         `,
         [envelope.updatedAt, envelopeId, userId],
       );
+
+      // Something else ended the envelope after it went out (it was voided,
+      // say). Its signers and history are that envelope's now: leave them.
+      if (revertedEnvelope.rowCount !== 1) {
+        return;
+      }
 
       await tx.query(
         `
