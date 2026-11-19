@@ -44,8 +44,11 @@ export function SignerVerificationScreen({
   );
   const [isChecking, setIsChecking] = useState(false);
   const [isSending, setIsSending] = useState(false);
-  // Seconds left before the server will send another code, counted down
-  // after it says the last one is still in its resend cooldown.
+  // When the server will send another code, after it says the last one is
+  // still in its resend cooldown, and the whole seconds left until then.
+  // The seconds come from the clock, not from counting ticks, because a
+  // hidden tab (the signer checking their email) can pause its timers.
+  const [resendAt, setResendAt] = useState<number | null>(null);
   const [resendWait, setResendWait] = useState(0);
   const base = `/api/signing/${encodeURIComponent(token)}`;
 
@@ -75,7 +78,10 @@ export function SignerVerificationScreen({
         setNotice(
           `A code was already sent to ${maskedEmail} less than a minute ago, so no new email went out. Use that code, or send a new one when the countdown on the button ends.`,
         );
-        setResendWait(Math.max(1, Math.ceil(payload.retryAfterSeconds ?? 60)));
+        const seconds = Math.max(1, Math.ceil(payload.retryAfterSeconds ?? 60));
+
+        setResendAt(Date.now() + seconds * 1000);
+        setResendWait(seconds);
         return;
       }
 
@@ -126,23 +132,36 @@ export function SignerVerificationScreen({
   }
 
   useEffect(() => {
-    if (resendWait <= 0) {
+    if (resendAt === null) {
       return;
     }
 
-    const timer = window.setTimeout(() => {
-      if (resendWait <= 1) {
-        setResendWait(0);
-        setNotice(
-          `A code was sent to ${state.maskedEmail}. If it has not arrived, you can send a new one now.`,
-        );
-      } else {
-        setResendWait(resendWait - 1);
-      }
-    }, 1000);
+    const until = resendAt;
 
-    return () => window.clearTimeout(timer);
-  }, [resendWait, state.maskedEmail]);
+    function tick() {
+      const seconds = Math.ceil((until - Date.now()) / 1000);
+
+      if (seconds > 0) {
+        setResendWait(seconds);
+        return;
+      }
+
+      setResendAt(null);
+      setResendWait(0);
+      setNotice(
+        `A code was sent to ${state.maskedEmail}. If it has not arrived, you can send a new one now.`,
+      );
+    }
+
+    const timer = window.setInterval(tick, 1000);
+
+    document.addEventListener("visibilitychange", tick);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [resendAt, state.maskedEmail]);
 
   const copy = METHOD_COPY[method];
   const step = state.required.indexOf(method) + 1;
