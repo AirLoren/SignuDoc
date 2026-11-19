@@ -568,6 +568,48 @@ export function SigningLiveShell({
     signatureValues,
     textValues,
   };
+  // Nothing the signer enters is saved until Finish, so leaving or
+  // reloading the page first would lose it. The browser asks before that
+  // happens (issue #99). Finishing or declining leaves on purpose.
+  const hasUnsubmittedEntries =
+    !hasDeclined &&
+    (Object.keys(signatureValues).length > 0 ||
+      Object.values(textValues).some((value) => value.trim().length > 0) ||
+      Object.values(checkboxValues).some(Boolean));
+  const leavingOnPurposeRef = useRef(false);
+
+  useEffect(() => {
+    if (!hasUnsubmittedEntries) {
+      return;
+    }
+
+    function warnBeforeLeaving(event: BeforeUnloadEvent) {
+      if (leavingOnPurposeRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      // Older browsers ask only when this is set.
+      event.returnValue = " ";
+    }
+
+    // Coming back to this page with the browser's Back button (after a
+    // signing provider's redirect, say) restores it as it was left, so the
+    // signer is asked again before a later reload.
+    function askAgainOnReturn(event: PageTransitionEvent) {
+      if (event.persisted) {
+        leavingOnPurposeRef.current = false;
+      }
+    }
+
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    window.addEventListener("pageshow", askAgainOnReturn);
+
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeLeaving);
+      window.removeEventListener("pageshow", askAgainOnReturn);
+    };
+  }, [hasUnsubmittedEntries]);
   // A group of radio buttons is one question: it is listed and counted once.
   const seenRadioGroups = new Set<string>();
   const actionSummaryFields = record.currentSignerFields.filter((field) => {
@@ -786,6 +828,7 @@ export function SigningLiveShell({
 
       if (!response.ok) {
         if (payload?.state) {
+          leavingOnPurposeRef.current = true;
           window.location.reload();
           return;
         }
@@ -803,12 +846,14 @@ export function SigningLiveShell({
           return;
         }
 
+        leavingOnPurposeRef.current = true;
         window.location.assign(payload.redirectUrl);
         return;
       }
 
       const fallbackRedirectPath = `${window.location.pathname.replace(/\/$/, "")}/done?title=${encodeURIComponent(record.envelopeTitle)}`;
 
+      leavingOnPurposeRef.current = true;
       window.location.assign(payload?.redirectPath ?? fallbackRedirectPath);
     } catch {
       setSubmitError(defaultSubmitErrorMessage);
@@ -871,6 +916,7 @@ export function SigningLiveShell({
 
       if (!response.ok) {
         if (payload?.state) {
+          leavingOnPurposeRef.current = true;
           window.location.reload();
           return;
         }
