@@ -11,7 +11,7 @@ release says when it does.
 ## [0.5.2] - 2026-11-19
 
 Twenty-four bug fixes. Seventeen fix reported issues (sixteen from @coygeek,
-one from @seanGSISG), and ten came as pull requests from six outside
+one from @seanGSISG), and ten came as pull requests from five outside
 contributors. This release adds one database column: see the end of this
 entry.
 
