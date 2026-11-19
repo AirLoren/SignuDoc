@@ -5,6 +5,7 @@ import { e2eDatabaseUrl, e2eSetupToken } from "../playwright.config";
 import { extractLink, extractLinks, waitForEmail } from "./support/outbox";
 import { totpCode } from "./support/totp";
 import { writeLargePdf, writeSamplePdf } from "./support/sample-pdf";
+import { startSignInWindowAfresh } from "./support/sign-in-limit";
 
 const PASSWORD = "correct horse battery staple 42";
 // The ampersand is on purpose: the name goes into HTML emails and page titles.
@@ -1701,6 +1702,9 @@ test("an administrator makes an API key, the API accepts it, and revoking it sto
           `select email from public."user" where role = 'admin' order by "createdAt" limit 1`,
         )
       ).rows[0]?.email ?? "";
+    // This test's sign-in comes between others, so the two-step test after
+    // it would be the fourth sign-in in ten seconds.
+    await startSignInWindowAfresh(database);
   } finally {
     await database.end();
   }
