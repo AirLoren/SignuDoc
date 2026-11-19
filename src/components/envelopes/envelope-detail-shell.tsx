@@ -75,6 +75,8 @@ type EnvelopeDetailSigner = {
   order: number;
   status: SignerStatus;
   statusDateLabel?: string;
+  /** Signers who share a step sign at the same time. */
+  step?: number;
   tint?: string;
 };
 
@@ -250,6 +252,10 @@ export function EnvelopeDetailShell({
     activeRecord.status === "sent"
       ? activeRecord.signers.find((signer) => signer.status === "waiting")
       : null;
+  const stepOf = (signer: EnvelopeDetailSigner) => signer.step ?? signer.order;
+  const signsAtTheSameTime =
+    new Set(activeRecord.signers.map(stepOf)).size <
+    activeRecord.signers.length;
 
   function handleDownload(fileType: DownloadFileType) {
     // This starts a file download from an API route, not a page navigation.
@@ -860,7 +866,7 @@ export function EnvelopeDetailShell({
                         color: palette.color,
                       }}
                     >
-                      {signer.order}
+                      {signsAtTheSameTime ? stepOf(signer) : signer.order}
                     </span>
 
                     <div className="min-w-0 flex-1">
