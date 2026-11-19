@@ -20,6 +20,7 @@ import {
   type Dispatch,
   type PointerEvent as ReactPointerEvent,
   type MutableRefObject,
+  type RefObject,
   type MouseEvent,
   type SetStateAction,
 } from "react";
@@ -365,9 +366,7 @@ async function parseJsonResponse<T>(
   response: Response,
 ): Promise<{ data: T | null; error: string | null }> {
   const payload = (await response.json().catch(() => null)) as
-    | { error?: string }
-    | T
-    | null;
+    { error?: string } | T | null;
 
   if (!response.ok) {
     return {
@@ -451,6 +450,7 @@ function PrepareLiveShellContent({
   const [armedTool, setArmedTool] = useState<PrepareFieldType | null>(null);
   const [fields, setFields] = useState<PrepareField[]>(initialFields);
   const [isMobileToolsOpen, setIsMobileToolsOpen] = useState(false);
+  const openMobileToolsRef = useRef<HTMLButtonElement>(null);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isContinuing, setIsContinuing] = useState(false);
@@ -831,16 +831,12 @@ function PrepareLiveShellContent({
                 <DocumentZoomControls
                   onDecrease={() =>
                     setZoomLevel((currentZoom) =>
-                      clampDocumentZoomLevel(
-                        currentZoom - DOCUMENT_ZOOM_STEP,
-                      ),
+                      clampDocumentZoomLevel(currentZoom - DOCUMENT_ZOOM_STEP),
                     )
                   }
                   onIncrease={() =>
                     setZoomLevel((currentZoom) =>
-                      clampDocumentZoomLevel(
-                        currentZoom + DOCUMENT_ZOOM_STEP,
-                      ),
+                      clampDocumentZoomLevel(currentZoom + DOCUMENT_ZOOM_STEP),
                     )
                   }
                   onReset={() => setZoomLevel(DEFAULT_DOCUMENT_ZOOM_LEVEL)}
@@ -893,7 +889,9 @@ function PrepareLiveShellContent({
 
               <div className="flex justify-center lg:justify-end">
                 <SaveStatusIndicator
-                  onRetrySave={() => void persistFields(currentFieldsRef.current)}
+                  onRetrySave={() =>
+                    void persistFields(currentFieldsRef.current)
+                  }
                   saveError={saveError}
                   saveState={saveState}
                 />
@@ -923,6 +921,7 @@ function PrepareLiveShellContent({
               <Button
                 className="min-h-12"
                 onClick={() => setIsMobileToolsOpen(true)}
+                ref={openMobileToolsRef}
                 type="button"
                 variant="secondary"
               >
@@ -1135,50 +1134,19 @@ function PrepareLiveShellContent({
       </div>
 
       {isMobileToolsOpen ? (
-        <div className="fixed inset-0 z-40 lg:hidden">
-          <button
-            aria-label="Close field tools"
-            className="absolute inset-0 bg-[rgba(28,29,43,0.32)]"
-            onClick={() => setIsMobileToolsOpen(false)}
-            type="button"
-          />
-          <div
-            aria-label="Field tools"
-            className="absolute inset-x-0 bottom-0 rounded-t-[1.75rem] bg-white px-4 py-5 shadow-[0_-24px_60px_rgba(28,29,43,0.18)]"
-            role="dialog"
-          >
-            <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-(--surface-strong)" />
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <p className="section-eyebrow">Fields</p>
-                <button
-                  className="text-sm font-bold text-(--accent-ink)"
-                  onClick={() => setIsMobileToolsOpen(false)}
-                  type="button"
-                >
-                  Done
-                </button>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {fieldTools.map((tool) => (
-                  <FieldToolButton
-                    isActive={armedTool === tool.type}
-                    key={`mobile-${tool.type}`}
-                    onSelect={() =>
-                      handleToolSelect(
-                        tool.type,
-                        setArmedTool,
-                        setSelectedFieldId,
-                        setIsMobileToolsOpen,
-                      )
-                    }
-                    tool={tool}
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
+        <MobileFieldToolsSheet
+          armedTool={armedTool}
+          onClose={() => setIsMobileToolsOpen(false)}
+          onSelectTool={(tool) =>
+            handleToolSelect(
+              tool,
+              setArmedTool,
+              setSelectedFieldId,
+              setIsMobileToolsOpen,
+            )
+          }
+          returnFocusRef={openMobileToolsRef}
+        />
       ) : null}
     </CanvasShell>
   );
@@ -1195,6 +1163,129 @@ const fieldToolIcons: Record<PrepareFieldType, LucideIcon> = {
   signature: SignatureIcon,
   text: TypeIcon,
 };
+
+type MobileFieldToolsSheetProps = {
+  armedTool: PrepareFieldType | null;
+  onClose: () => void;
+  onSelectTool: (tool: PrepareFieldType) => void;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
+};
+
+/**
+ * The phone-sized list of field tools, shown over the editor. It is a modal
+ * dialog: focus moves into it when it opens, stays inside it while it is
+ * open, and goes back to "Open field tools" when it closes. Escape closes it
+ * like Done does, leaving the chosen tool as it was. It is never taller than
+ * the screen: Done stays at the top and the tools scroll beneath it.
+ */
+function MobileFieldToolsSheet({
+  armedTool,
+  onClose,
+  onSelectTool,
+  returnFocusRef,
+}: MobileFieldToolsSheetProps) {
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const doneRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+
+  useEffect(() => {
+    const returnFocusTo = returnFocusRef.current;
+
+    doneRef.current?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+
+      if (event.key !== "Tab" || !sheetRef.current) {
+        return;
+      }
+
+      const focusable = Array.from(
+        sheetRef.current.querySelectorAll<HTMLElement>(
+          "button:not([disabled])",
+        ),
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+
+      if (!first || !last) {
+        return;
+      }
+
+      const active = document.activeElement;
+      const isInside = sheetRef.current.contains(active);
+
+      if (event.shiftKey && (active === first || !isInside)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !isInside)) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      returnFocusTo?.focus();
+    };
+  }, [returnFocusRef]);
+
+  return (
+    <div className="fixed inset-0 z-40 lg:hidden">
+      <button
+        aria-label="Close field tools"
+        className="absolute inset-0 bg-[rgba(28,29,43,0.32)]"
+        onClick={onClose}
+        tabIndex={-1}
+        type="button"
+      />
+      <div
+        aria-label="Field tools"
+        aria-modal="true"
+        className="absolute inset-x-0 bottom-0 flex max-h-[calc(100dvh-1rem)] flex-col rounded-t-[1.75rem] bg-white pt-5 shadow-[0_-24px_60px_rgba(28,29,43,0.18)]"
+        ref={sheetRef}
+        role="dialog"
+      >
+        <div className="shrink-0 px-4 pb-4">
+          <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-(--surface-strong)" />
+          <div className="flex items-center justify-between">
+            <p className="section-eyebrow">Fields</p>
+            <button
+              className="min-h-11 px-2 text-sm font-bold text-(--accent-ink)"
+              onClick={onClose}
+              ref={doneRef}
+              type="button"
+            >
+              Done
+            </button>
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {fieldTools.map((tool) => (
+              <FieldToolButton
+                isActive={armedTool === tool.type}
+                key={`mobile-${tool.type}`}
+                onSelect={() => onSelectTool(tool.type)}
+                tool={tool}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function FieldToolButton({ isActive, onSelect, tool }: FieldToolButtonProps) {
   const Icon = fieldToolIcons[tool.type];
@@ -1263,7 +1354,9 @@ function SignerCard({
             .join("")}
         </span>
         <div className="min-w-0">
-          <p className="truncate text-sm font-bold text-(--fg)">{signer.name}</p>
+          <p className="truncate text-sm font-bold text-(--fg)">
+            {signer.name}
+          </p>
           <p className="mt-0.5 text-xs text-(--secondary)">
             {fieldCount} field{fieldCount === 1 ? "" : "s"} placed
           </p>
@@ -1292,7 +1385,9 @@ function EmptyFieldInspector({
   return (
     <div className="well px-4 py-4">
       <p className="text-sm font-bold text-(--fg)">
-        {activeTool ? `${activeTool.label} ready to place` : "No field selected"}
+        {activeTool
+          ? `${activeTool.label} ready to place`
+          : "No field selected"}
       </p>
       <p className="mt-1.5 text-sm leading-6 text-(--secondary)">
         {activeTool
@@ -1808,20 +1903,18 @@ function setFieldRequired(
   required: boolean,
   setFields: Dispatch<SetStateAction<PrepareField[]>>,
 ) {
-  setFields((currentFields) =>
-    {
-      const target = currentFields.find((field) => field.id === fieldId);
+  setFields((currentFields) => {
+    const target = currentFields.find((field) => field.id === fieldId);
 
-      if (!target || !canBeOptional(target.type)) {
-        return currentFields;
-      }
+    if (!target || !canBeOptional(target.type)) {
+      return currentFields;
+    }
 
-      // A radio group is required or optional as a whole.
-      return currentFields.map((field) =>
-        isSameChoice(target, field) ? { ...field, required } : field,
-      );
-    },
-  );
+    // A radio group is required or optional as a whole.
+    return currentFields.map((field) =>
+      isSameChoice(target, field) ? { ...field, required } : field,
+    );
+  });
 }
 
 function deleteField(
