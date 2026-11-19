@@ -469,6 +469,11 @@ function PrepareLiveShellContent({
   const documentPanGestureRef = useRef<DocumentPanGesture | null>(null);
   const currentFieldsRef = useRef(fields);
   const lastSavedSignatureRef = useRef(serializeFieldRequest(initialFields));
+  // The field list's revision this editor last saw. Each save sends it, so
+  // the server refuses a save made against an older list instead of
+  // letting it overwrite a newer one (a save still on its way from a page
+  // the sender left, landing after one made when they came back).
+  const fieldsRevisionRef = useRef(record.fieldsRevision);
   const fieldCounterRef = useRef(initialFields.length);
   const persistFieldsRef = useRef<
     (nextFields: readonly PrepareField[]) => Promise<PersistFieldsResult>
@@ -589,7 +594,10 @@ function PrepareLiveShellContent({
       // After any save still on its way, so this one lands last.
       void saveChainRef.current.then(() =>
         fetch(`/api/envelopes/${envelopeId}/fields`, {
-          body: JSON.stringify(buildFieldRequest(unsaved)),
+          body: JSON.stringify({
+            ...buildFieldRequest(unsaved),
+            expectedRevision: fieldsRevisionRef.current,
+          }),
           headers: { "content-type": "application/json" },
           keepalive: true,
           method: "PUT",
@@ -677,7 +685,10 @@ function PrepareLiveShellContent({
     setSaveState("saving");
 
     const response = await fetch(`/api/envelopes/${envelopeId}/fields`, {
-      body: JSON.stringify(buildFieldRequest(nextFields)),
+      body: JSON.stringify({
+        ...buildFieldRequest(nextFields),
+        expectedRevision: fieldsRevisionRef.current,
+      }),
       headers: {
         "content-type": "application/json",
       },
@@ -692,6 +703,11 @@ function PrepareLiveShellContent({
         ok: false,
         redirectPath: null,
       };
+    }
+
+    // Saved, so the next save is made against this list.
+    if (payload.data) {
+      fieldsRevisionRef.current = payload.data.fieldsRevision;
     }
 
     if (
