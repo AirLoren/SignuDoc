@@ -21,6 +21,7 @@ import {
   scheduleAccountClosure,
 } from "./retention.ts";
 import { resolvePublicSupportAddress } from "./public-contact.ts";
+import type { RequestClient } from "./security/request.ts";
 import { createEmailService } from "./services/email.ts";
 import { recordSystemAuditEvent } from "./services/system-audit.ts";
 import { getBranding } from "./settings.ts";
@@ -38,6 +39,8 @@ type EnvelopeCountRow = {
 };
 
 type RequestAccountClosureOptions = {
+  /** Where the request came from, for the audit trail. */
+  client?: RequestClient;
   database?: DbExecutor;
   env?: EnvSource;
 };
@@ -275,7 +278,11 @@ function formatRetentionDeadline(timestamp: number): string {
 export async function requestAccountClosure(
   userId: string,
   input: unknown,
-  { database = getDb(), env = process.env }: RequestAccountClosureOptions = {},
+  {
+    client = {},
+    database = getDb(),
+    env = process.env,
+  }: RequestAccountClosureOptions = {},
 ): Promise<AccountClosureRequestResult> {
   buildClosureValidationError(input);
 
@@ -308,8 +315,10 @@ export async function requestAccountClosure(
         actorEmail: account.email,
         actorUserId: userId,
         event: "account_closure_requested",
+        ipAddress: client.ipAddress ?? null,
         metadata: { purgeAfterAt: closureSchedule.purgeAfterAt },
         targetUserId: userId,
+        userAgent: client.userAgent ?? null,
       },
       database,
     ).catch((error: unknown) => {

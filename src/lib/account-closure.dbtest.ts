@@ -11,6 +11,7 @@ import {
   requestAccountClosure,
 } from "./account.ts";
 import { openTestDatabase } from "./db/test-database.ts";
+import { listSystemAuditEvents } from "./services/system-audit.ts";
 
 // Closing an account from Settings is refused for the last administrator,
 // even when two administrators close at once. Run with `npm run test:db`.
@@ -172,4 +173,29 @@ test("two administrators closing at once cannot both go", async () => {
     Number(await isQueued(first.id)) + Number(await isQueued(second.id)),
     1,
   );
+});
+
+test("a closure request records where it was made from", async () => {
+  await resetRoles();
+
+  const person = await createUser("user");
+
+  await requestAccountClosure(person.id, confirmation, {
+    client: { ipAddress: "192.0.2.80", userAgent: "closure dbtest" },
+    database,
+    env,
+  });
+
+  const recorded = (
+    await listSystemAuditEvents({ limit: 1000 }, database)
+  ).filter(
+    (event) =>
+      event.event === "account_closure_requested" &&
+      event.targetUserId === person.id,
+  );
+
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.actorUserId, person.id);
+  assert.equal(recorded[0]?.ipAddress, "192.0.2.80");
+  assert.equal(recorded[0]?.userAgent, "closure dbtest");
 });
