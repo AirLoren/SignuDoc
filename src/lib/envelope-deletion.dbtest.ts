@@ -1002,6 +1002,44 @@ test("when a file cannot be deleted, the envelope is still deleted and recorded,
   assert.deepEqual(await pendingFileDeletions(envelope.envelopeId), []);
 });
 
+test("a scheduled deletion whose files cannot be deleted is reported as failed", async () => {
+  const admin = await createUser("admin");
+  const failing = await createEnvelope(admin.userId, { status: "completed" });
+  const working = await createEnvelope(admin.userId, { status: "completed" });
+  const now = 1_200_000_000;
+  const failingStorage = {
+    ...storageService,
+    deleteObject: async () => {
+      throw new Error("Storage is down.");
+    },
+  } as StorageService;
+
+  await scheduleAs(admin, failing.envelopeId, undefined, { now });
+  await scheduleAs(admin, working.envelopeId, undefined, { now: now + 1 });
+
+  const down = await quietly(() =>
+    runScheduledEnvelopeDeletions({
+      database,
+      emailService: createOutbox(),
+      now: now + WAIT,
+      storageService: failingStorage,
+    }),
+  );
+
+  assert.equal(await envelopeExists(failing.envelopeId), false);
+  assert.ok(down.failures.includes(failing.envelopeId));
+
+  // Storage is back: the cleanup takes the queued files, and a deletion
+  // whose files all go is not a failure.
+  await runRetentionSweep({ database, storageService });
+
+  const up = await runDaily(now + 1 + WAIT);
+
+  assert.equal(await envelopeExists(working.envelopeId), false);
+  assert.ok(!up.failures.includes(working.envelopeId));
+  assert.deepEqual(await pendingFileDeletions(failing.envelopeId), []);
+});
+
 test("a deletion that is not due touches no file", async () => {
   const admin = await createUser("admin");
   const envelope = await createEnvelope(admin.userId, { status: "completed" });
