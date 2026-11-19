@@ -258,3 +258,137 @@ test("a PNG that would inflate past the pixel limit is refused", () => {
       error instanceof BrandLogoError && /too many pixels/.test(error.message),
   );
 });
+
+test("a PNG palette must be one, early, whole and in range", () => {
+  // 10x1 at 4 bits per pixel: 5 bytes and a filter byte.
+  const raw = deflateSync(new Uint8Array(6));
+  const header = Buffer.alloc(13);
+
+  header.writeUInt32BE(10, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 4;
+  header[9] = 3;
+
+  const png = (...chunks: Buffer[]) =>
+    Uint8Array.from(
+      Buffer.concat([
+        WHOLE_PNG.subarray(0, 8),
+        pngChunk("IHDR", header),
+        ...chunks,
+        pngChunk("IEND"),
+      ]),
+    );
+  const palette = (entries: number) =>
+    pngChunk("PLTE", Buffer.alloc(entries * 3));
+
+  assert.equal(
+    checkLogoUpload(png(palette(16), pngChunk("IDAT", raw))),
+    "image/png",
+  );
+
+  for (const broken of [
+    png(pngChunk("PLTE"), pngChunk("IDAT", raw)),
+    png(pngChunk("PLTE", Buffer.alloc(4)), pngChunk("IDAT", raw)),
+    // Four bits can index 16 colors, not 17.
+    png(palette(17), pngChunk("IDAT", raw)),
+    png(palette(2), palette(2), pngChunk("IDAT", raw)),
+    png(pngChunk("IDAT", raw), palette(2)),
+  ]) {
+    assert.throws(() => checkLogoUpload(broken), BrandLogoError);
+  }
+
+  // A grey image has no palette at all.
+  header[9] = 0;
+  assert.throws(
+    () => checkLogoUpload(png(palette(2), pngChunk("IDAT", raw))),
+    BrandLogoError,
+  );
+});
+
+/** The fixture JPEG's segments, as [marker, start, end] up to the scan. */
+function jpegSegments(bytes: Uint8Array) {
+  const segments: Array<[number, number, number]> = [];
+  let offset = 2;
+
+  for (;;) {
+    const marker = bytes[offset + 1];
+    const end = offset + 2 + ((bytes[offset + 2] << 8) | bytes[offset + 3]);
+
+    segments.push([marker, offset, end]);
+
+    if (marker === 0xda) {
+      return segments;
+    }
+
+    offset = end;
+  }
+}
+
+test("a JPEG with no quantization table or no scan data is refused", () => {
+  const segments = jpegSegments(WHOLE_JPEG);
+  const withoutTables = Buffer.concat([
+    WHOLE_JPEG.subarray(0, 2),
+    ...segments
+      .filter(([marker]) => marker !== 0xdb)
+      .map(([, start, end]) => WHOLE_JPEG.subarray(start, end)),
+    WHOLE_JPEG.subarray(segments.at(-1)![2]),
+  ]);
+  const scanEnd = segments.at(-1)![2];
+  const emptyScan = Buffer.concat([
+    WHOLE_JPEG.subarray(0, scanEnd),
+    Buffer.from([0xff, 0xd9]),
+  ]);
+
+  assert.ok(segments.some(([marker]) => marker === 0xdb));
+  assert.equal(sniffLogoContentType(withoutTables), "image/jpeg");
+  assert.throws(() => checkLogoUpload(withoutTables), BrandLogoError);
+  assert.throws(() => checkLogoUpload(emptyScan), BrandLogoError);
+});
+
+/** A RIFF WebP holding these chunks. */
+function buildWebp(...chunks: Buffer[]) {
+  const body = Buffer.concat([Buffer.from("WEBP", "latin1"), ...chunks]);
+  const head = Buffer.alloc(8);
+
+  head.write("RIFF", 0, "latin1");
+  head.writeUInt32LE(body.length, 4);
+
+  return Uint8Array.from(Buffer.concat([head, body]));
+}
+
+function webpChunk(type: string, data: Uint8Array) {
+  const head = Buffer.alloc(8);
+
+  head.write(type, 0, "latin1");
+  head.writeUInt32LE(data.length, 4);
+
+  return Buffer.concat([head, data, Buffer.alloc(data.length % 2)]);
+}
+
+test("a WebP animation frame must hold an image", () => {
+  // The fixture's VP8L chunk, padding included.
+  const image = Buffer.from(WHOLE_WEBP.subarray(12));
+  const frameHeader = Buffer.alloc(16);
+
+  assert.equal(
+    checkLogoUpload(
+      buildWebp(webpChunk("ANMF", Buffer.concat([frameHeader, image]))),
+    ),
+    "image/webp",
+  );
+  assert.throws(
+    () => checkLogoUpload(buildWebp(webpChunk("ANMF", new Uint8Array()))),
+    BrandLogoError,
+  );
+  assert.throws(
+    () => checkLogoUpload(buildWebp(webpChunk("ANMF", frameHeader))),
+    BrandLogoError,
+  );
+});
+
+test("a WebP whose last chunk's padding runs past the file is refused", () => {
+  // An odd-sized chunk with its padding byte left off.
+  const bytes = buildWebp(Buffer.from(WHOLE_WEBP.subarray(12, -1)));
+
+  assert.throws(() => checkLogoUpload(bytes), BrandLogoError);
+});

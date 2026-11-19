@@ -226,6 +226,24 @@ function isCompletePng(bytes: Uint8Array): boolean {
         return false;
       }
     } else if (type === "PLTE") {
+      // One palette, before the pixel data, of whole RGB entries: no more
+      // than 256, nor more than the bit depth can index. Grey images have
+      // none.
+      const entries = length / 3;
+
+      if (
+        seenPalette ||
+        data.length > 0 ||
+        header.colorType === 0 ||
+        header.colorType === 4 ||
+        length === 0 ||
+        length % 3 !== 0 ||
+        entries > 256 ||
+        (header.colorType === 3 && entries > 2 ** header.bitDepth)
+      ) {
+        return false;
+      }
+
       seenPalette = true;
     } else if (type === "IDAT") {
       data.push(bytes.subarray(dataStart, dataEnd));
@@ -246,6 +264,7 @@ function isCompletePng(bytes: Uint8Array): boolean {
 function isCompleteJpeg(bytes: Uint8Array): boolean {
   let offset = 2;
   let seenFrame = false;
+  let seenQuantization = false;
 
   while (offset + 4 <= bytes.length) {
     if (bytes[offset] !== 0xff) {
@@ -298,13 +317,19 @@ function isCompleteJpeg(bytes: Uint8Array): boolean {
       seenFrame = true;
     }
 
+    // Every JPEG needs a quantization table to decode.
+    if (marker === 0xdb) {
+      seenQuantization = true;
+    }
+
     // Image data starts here, so all that's left is to find the end marker.
     if (marker === 0xda) {
-      if (!seenFrame) {
+      if (!seenFrame || !seenQuantization) {
         return false;
       }
 
-      for (let index = bytes.length - 2; index >= segmentEnd; index -= 1) {
+      // At least one byte of scan data before the end marker.
+      for (let index = bytes.length - 2; index > segmentEnd; index -= 1) {
         if (bytes[index] === 0xff && bytes[index + 1] === 0xd9) {
           return true;
         }
@@ -330,16 +355,32 @@ function isCompleteWebp(bytes: Uint8Array): boolean {
     return false;
   }
 
-  let offset = 12;
+  return hasWebpImage(bytes, 12, riffEnd, true);
+}
+
+/**
+ * Walks the chunks from start to end, which must fill it exactly, and says
+ * whether one holds an image. An animation frame (ANMF) is a 16-byte frame
+ * header and chunks of its own, which must hold an image too.
+ */
+function hasWebpImage(
+  bytes: Uint8Array,
+  start: number,
+  end: number,
+  allowFrames: boolean,
+): boolean {
+  let offset = start;
   let seenImage = false;
 
-  while (offset + 8 <= riffEnd) {
+  while (offset + 8 <= end) {
     const type = chunkType(bytes, offset);
     const length = readUint32LE(bytes, offset + 4);
     const dataStart = offset + 8;
     const dataEnd = dataStart + length;
+    // Odd-sized chunks get one byte of padding.
+    const paddedEnd = dataEnd + (length % 2);
 
-    if (dataEnd > riffEnd || dataEnd <= offset) {
+    if (paddedEnd > end || dataEnd <= offset) {
       return false;
     }
 
@@ -367,14 +408,21 @@ function isCompleteWebp(bytes: Uint8Array): boolean {
 
       seenImage = true;
     } else if (type === "ANMF") {
+      if (
+        !allowFrames ||
+        length <= 16 ||
+        !hasWebpImage(bytes, dataStart + 16, dataEnd, false)
+      ) {
+        return false;
+      }
+
       seenImage = true;
     }
 
-    // Odd-sized chunks get one byte of padding.
-    offset = dataEnd + (length % 2);
+    offset = paddedEnd;
   }
 
-  return seenImage && offset >= riffEnd;
+  return seenImage && offset === end;
 }
 
 const COMPLETE_CHECKS: Record<LogoContentType, (bytes: Uint8Array) => boolean> =
