@@ -1,12 +1,9 @@
-const graphemeSegmenter = new Intl.Segmenter(undefined, {
-  granularity: "grapheme",
-});
+import {
+  splitIntoWholeCharacters,
+  toWellFormedText,
+} from "./whole-characters.ts";
 
 const startsWithLetterOrDigit = /^[\p{L}\p{N}]/u;
-
-function wholeCharacters(word: string): string[] {
-  return Array.from(graphemeSegmenter.segment(word), ({ segment }) => segment);
-}
 
 type InitialsOptions = {
   // Most initials to return.
@@ -22,7 +19,7 @@ type InitialsOptions = {
 // do not start with a letter or digit (an emoji, a dash) are skipped, unless
 // the name has nothing else.
 export function getInitials(name: string, options: InitialsOptions): string {
-  const words = name.toWellFormed().trim().split(/\s+/).filter(Boolean);
+  const words = toWellFormedText(name).trim().split(/\s+/).filter(Boolean);
 
   if (words.length === 0) {
     return "";
@@ -32,7 +29,7 @@ export function getInitials(name: string, options: InitialsOptions): string {
   const sourceWords = namedWords.length > 0 ? namedWords : words.slice(0, 1);
 
   if (sourceWords.length === 1 && options.singleWordLength) {
-    return wholeCharacters(sourceWords[0]!)
+    return splitIntoWholeCharacters(sourceWords[0]!)
       .slice(0, Math.min(options.singleWordLength, options.max))
       .join("")
       .toUpperCase();
@@ -40,7 +37,7 @@ export function getInitials(name: string, options: InitialsOptions): string {
 
   return sourceWords
     .slice(0, options.max)
-    .map((word) => wholeCharacters(word)[0] ?? "")
+    .map((word) => splitIntoWholeCharacters(word)[0] ?? "")
     .join("")
     .toUpperCase();
 }
