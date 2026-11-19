@@ -91,7 +91,7 @@ Administrators see every member's sent and finished envelopes in an "Everyone's"
 ### Sign-in security, backups and audits
 
 - **Single sign-on** over OpenID Connect, with Okta, Microsoft Entra ID, Google Workspace and others, and password sign-in turned off if you want.
-- **Two-step sign-in** with an authenticator app and backup codes, which administrators can require of everyone.
+- **Two-step sign-in** with an authenticator app and backup codes, which administrators can require of everyone who signs in with a password. Single sign-on relies on your identity provider's own check instead.
 - **Session limits and lockout**: sign people out after a time without use, and stop sign-in for an address after ten wrong passwords.
 - **A site audit trail** of sign-ins, role changes, deletions and settings, also written to the function logs as JSON so a Vercel log drain can deliver it to your SIEM.
 - **Daily backups** of the database and files to a second private Blob store, with a script that restores them. See [Backup and restore](docs/backup-and-restore.md).
@@ -192,7 +192,7 @@ Each free plan has its own monthly allowance, and the smallest one sets the limi
 | **Database**, on [Neon](https://neon.com/faqs/free-plan-limits-and-quotas)         | 1 GB and 100 compute hours                  | About 400 hours a month with the database awake. It sleeps when nobody is using the site.                                                                                                                                  |
 | **Hosting**, on Vercel Hobby                                                       | More than the rows above will use           | Any number of people. Vercel [limits Hobby to personal, non-commercial use](https://vercel.com/docs/limits/fair-use-guidelines).                                                                                           |
 
-Daily backups are off unless you turn them on. On Vercel Hobby a backup store in the same account shares the same free Blob storage, so turning them on halves how many finished documents the free plan keeps.
+Daily backups are off unless you turn them on. On Vercel Hobby a backup store in the same account shares the same free Blob storage. It holds about as much as the install's own files, plus copies of the database, so turning backups on leaves room for fewer than half as many finished documents.
 
 None of these plans bills you for going over. It stops instead: files cannot be read, email is not sent, or the database pauses. The monthly allowances come back when the month turns over. The two 1 GB limits do not, because stored files and database rows stay until they are deleted: make room by deleting old documents, or by setting how long finished documents are kept under Settings, Organization. Better still, move up before you reach a limit, not after.
 
