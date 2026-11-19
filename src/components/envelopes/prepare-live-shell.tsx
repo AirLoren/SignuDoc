@@ -454,6 +454,7 @@ function PrepareLiveShellContent({
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isContinuing, setIsContinuing] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
   const [isFieldInteracting, setIsFieldInteracting] = useState(false);
   const [isDocumentPanning, setIsDocumentPanning] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(DEFAULT_DOCUMENT_ZOOM_LEVEL);
@@ -461,6 +462,8 @@ function PrepareLiveShellContent({
     string | null
   >(null);
   const autosaveTimeoutRef = useRef<number | null>(null);
+  // The saves already asked for; the next one waits for them.
+  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const paperGridRef = useRef<HTMLDivElement | null>(null);
   const documentPanGestureRef = useRef<DocumentPanGesture | null>(null);
   const currentFieldsRef = useRef(fields);
@@ -474,6 +477,8 @@ function PrepareLiveShellContent({
   }));
 
   currentFieldsRef.current = fields;
+
+  const backHref = `/envelopes/${envelopeId}/signers`;
 
   const pageCount = record.pages.length;
   const pageFields = fields.filter((field) => field.page === activePage);
@@ -565,12 +570,42 @@ function PrepareLiveShellContent({
   }, [envelopeId, record.pdfUrl]);
 
   useEffect(() => {
-    return () => {
+    // Leaving the page before the autosave ran would drop the last change.
+    // Send it on the way out; keepalive lets the request finish after the
+    // page has gone.
+    function flushUnsavedFields() {
       if (autosaveTimeoutRef.current) {
         window.clearTimeout(autosaveTimeoutRef.current);
+        autosaveTimeoutRef.current = null;
       }
+
+      const unsaved = currentFieldsRef.current;
+
+      if (serializeFieldRequest(unsaved) === lastSavedSignatureRef.current) {
+        return;
+      }
+
+      // After any save still on its way, so this one lands last.
+      void saveChainRef.current.then(() =>
+        fetch(`/api/envelopes/${envelopeId}/fields`, {
+          body: JSON.stringify(buildFieldRequest(unsaved)),
+          headers: { "content-type": "application/json" },
+          keepalive: true,
+          method: "PUT",
+        }).catch(() => undefined),
+      );
+    }
+
+    // A full page exit (closing the tab, reloading, typing an address)
+    // never unmounts the editor, so it is caught here.
+    window.addEventListener("pagehide", flushUnsavedFields);
+
+    return () => {
+      window.removeEventListener("pagehide", flushUnsavedFields);
+      // A link inside the app (the header, say) unmounts it instead.
+      flushUnsavedFields();
     };
-  }, []);
+  }, [envelopeId]);
 
   useEffect(() => {
     if (!selectedFieldId) {
@@ -616,7 +651,25 @@ function PrepareLiveShellContent({
     documentPanGestureRef.current = null;
   }, [zoomLevel]);
 
-  async function persistFields(nextFields: readonly PrepareField[]) {
+  // Each save replaces the whole list, so saves go one at a time, in the
+  // order they were asked for. Otherwise an older autosave still on its
+  // way could land after a newer save (Back, Next) and undo it.
+  function persistFields(
+    nextFields: readonly PrepareField[],
+  ): Promise<PersistFieldsResult> {
+    const run = saveChainRef.current.then(() => sendFields(nextFields));
+
+    saveChainRef.current = run.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return run;
+  }
+
+  async function sendFields(
+    nextFields: readonly PrepareField[],
+  ): Promise<PersistFieldsResult> {
     const requestedSignature = serializeFieldRequest(nextFields);
 
     setSaveError(null);
@@ -723,6 +776,56 @@ function PrepareLiveShellContent({
     }
   }
 
+  // Back saves a change the autosave has not sent yet, then goes. If the
+  // save fails, the sender stays here with the error, so nothing they can
+  // see on the page is lost.
+  async function handleBack(event: MouseEvent<HTMLAnchorElement>) {
+    // A click that opens Back in a new tab or window leaves this page open,
+    // and its autosave still runs, so the browser handles it as usual.
+    if (
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+
+    if (
+      serializeFieldRequest(currentFieldsRef.current) ===
+      lastSavedSignatureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (isLeaving) {
+      return;
+    }
+
+    setIsLeaving(true);
+
+    if (autosaveTimeoutRef.current) {
+      window.clearTimeout(autosaveTimeoutRef.current);
+      autosaveTimeoutRef.current = null;
+    }
+
+    try {
+      const saveResult = await persistFields(currentFieldsRef.current);
+
+      if (saveResult.ok) {
+        window.location.assign(backHref);
+      }
+    } catch {
+      setSaveError("Your changes could not be saved. Try again.");
+      setSaveState("error");
+    } finally {
+      setIsLeaving(false);
+    }
+  }
+
   function beginDocumentPan(event: ReactPointerEvent<HTMLDivElement>) {
     documentPanGestureRef.current = beginDocumentPanGesture({
       canStart: !armedTool,
@@ -758,11 +861,12 @@ function PrepareLiveShellContent({
 
   return (
     <CanvasShell
-      backHref={`/envelopes/${envelopeId}/signers`}
+      backHref={backHref}
       backLabel="Back"
       nextDisabled={!canContinue}
       nextLabel="Next →"
       nextLoading={isContinuing}
+      onBack={(event) => void handleBack(event)}
       onNext={handleContinue}
       stepLabel="Step 3 of 4"
       title={`"${record.title}"`}
