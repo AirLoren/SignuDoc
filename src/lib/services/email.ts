@@ -8,6 +8,7 @@ import { getSettings } from "../settings.ts";
 import { type EmailTemplateKind } from "../types/domain.ts";
 import { getEnv, isLocalDeployment, type EnvSource } from "../utils/env.ts";
 import { buildEmailAddresses, type EmailAddresses } from "./email-addresses.ts";
+import { CAPTURED_MESSAGE_ID_PREFIX } from "./captured-email.ts";
 import {
   assertServiceConfig,
   ServiceConfigurationError,
@@ -228,7 +229,7 @@ function createCaptureEmailService(
     message: TransactionalEmailMessage,
   ): Promise<EmailDeliveryResult> {
     const config = await resolveAddresses();
-    const messageId = `capture-${randomUUID()}`;
+    const messageId = `${CAPTURED_MESSAGE_ID_PREFIX}${randomUUID()}`;
     const filePath = path.join(
       /*turbopackIgnore: true*/ captureDir,
       `${String(Date.now())}-${messageId}.json`,
