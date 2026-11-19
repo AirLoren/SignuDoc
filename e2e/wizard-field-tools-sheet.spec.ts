@@ -99,4 +99,18 @@ test("on a short phone the Field tools sheet keeps Done in view, and Escape clos
   ).toHaveAttribute("aria-pressed", "false");
   await done.click();
   await expect(openTools).toBeFocused();
+
+  // Growing the window to the desktop layout, which hides the sheet, closes
+  // it, so it no longer holds Tab or Escape.
+  await openTools.click();
+  await expect(sheet).toBeVisible();
+  await page.setViewportSize({ height: 900, width: 1440 });
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  await page.setViewportSize({ height: 844, width: 390 });
+  await expect(sheet).toBeHidden();
 });

@@ -1232,10 +1232,23 @@ function MobileFieldToolsSheet({
       }
     }
 
+    // The sheet is hidden (lg:hidden) on the desktop layout but would stay
+    // mounted, its listener still catching Tab and Escape. So it closes when
+    // the window grows to that layout.
+    const desktopLayout = window.matchMedia("(min-width: 64rem)");
+
+    function handleLayoutChange(event: MediaQueryListEvent) {
+      if (event.matches) {
+        onCloseRef.current();
+      }
+    }
+
     document.addEventListener("keydown", handleKeyDown);
+    desktopLayout.addEventListener("change", handleLayoutChange);
 
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
+      desktopLayout.removeEventListener("change", handleLayoutChange);
       returnFocusTo?.focus();
     };
   }, [returnFocusRef]);
