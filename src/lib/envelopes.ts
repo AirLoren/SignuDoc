@@ -377,6 +377,8 @@ export type DraftSignerStepData = {
 export type PrepareEnvelopeData = {
   envelopeId: string;
   fields: readonly FieldRecord[];
+  /** Sent back with each save, so a save from an older page is refused. */
+  fieldsRevision: number;
   pageCount: number;
   pages: readonly EnvelopePageRecord[];
   pdfUrl: string;
@@ -2306,6 +2308,11 @@ export async function getPrepareEnvelopeDataForUser(
     return null;
   }
 
+  // Read before the fields, so a save landing in between pairs the newer
+  // fields with the older revision: the editor's first save is then
+  // refused and it asks for a reload, rather than an older list being
+  // taken as the latest.
+  const fieldsRevision = await readFieldsRevision(envelopeId, database);
   const [fieldsByEnvelope, pages, signers] = await Promise.all([
     listFieldsForEnvelopeIds([envelopeId], database),
     listEnvelopePagesForEnvelopeId(envelopeId, database),
@@ -2315,6 +2322,7 @@ export async function getPrepareEnvelopeDataForUser(
   return {
     envelopeId,
     fields: fieldsByEnvelope.get(envelopeId) ?? [],
+    fieldsRevision,
     pageCount: envelope.pageCount,
     pages,
     pdfUrl: `/api/envelopes/${encodeURIComponent(envelopeId)}/document`,
@@ -2415,6 +2423,22 @@ async function readDraftParties(envelopeId: string, database: DbExecutor) {
  * The lock an UPDATE takes, not FOR UPDATE: the signer rows written next
  * need a share of this row for their foreign key.
  */
+/** What a sender is told when their field save was made on an older page. */
+export const FIELDS_CHANGED_MESSAGE =
+  "These fields were changed somewhere else, so this change was not saved. Reload the page to see the latest fields.";
+
+async function readFieldsRevision(
+  envelopeId: string,
+  database: DbExecutor,
+): Promise<number> {
+  const result = await database.query<{ fields_revision: number }>(
+    `SELECT fields_revision FROM envelopes WHERE id = $1`,
+    [envelopeId],
+  );
+
+  return result.rows[0]?.fields_revision ?? 0;
+}
+
 async function lockDraftEnvelope(
   userId: string,
   envelopeId: string,
@@ -3697,8 +3721,20 @@ export async function replaceDraftEnvelopeFields(
     };
   });
 
-  await withTransaction(async (tx) => {
+  const fieldsRevision = await withTransaction(async (tx) => {
     await lockDraftEnvelope(userId, envelopeId, tx);
+
+    // Under the draft's lock, so two saves cannot both pass this check: a
+    // save made against an older list (from a page the sender has since
+    // left, say) does not overwrite a newer one.
+    if (
+      parsedInput.expectedRevision !== undefined &&
+      parsedInput.expectedRevision !==
+        (await readFieldsRevision(envelopeId, tx))
+    ) {
+      throw new EnvelopeMutationError(FIELDS_CHANGED_MESSAGE, 409);
+    }
+
     await tx.query(
       `
         DELETE FROM fields
@@ -3757,14 +3793,17 @@ export async function replaceDraftEnvelopeFields(
       );
     }
 
-    await tx.query(
+    const updated = await tx.query<{ fields_revision: number }>(
       `
         UPDATE envelopes
-        SET updated_at = $1
+        SET updated_at = $1, fields_revision = fields_revision + 1
         WHERE id = $2 AND user_id = $3
+        RETURNING fields_revision
       `,
       [updatedAt, envelopeId, userId],
     );
+
+    return updated.rows[0]?.fields_revision ?? 0;
   }, database);
 
   return replaceFieldsResponseSchema.parse({
@@ -3773,6 +3812,7 @@ export async function replaceDraftEnvelopeFields(
       (await listFieldsForEnvelopeIds([envelopeId], database)).get(
         envelopeId,
       ) ?? [],
+    fieldsRevision,
     redirectPath: `/envelopes/${envelopeId}/review`,
     updatedAt,
   }) as ReplaceDraftFieldsResult;
