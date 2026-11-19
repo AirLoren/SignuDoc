@@ -2,6 +2,7 @@ import { expect, type Page } from "@playwright/test";
 import pg from "pg";
 
 import { e2eDatabaseUrl } from "../../playwright.config";
+import { startSignInWindowAfresh } from "./sign-in-limit";
 
 // The password every account in signing-flow.spec.ts is made with.
 export const E2E_PASSWORD = "correct horse battery staple 42";
@@ -35,6 +36,9 @@ export async function signInAsAdministrator(page: Page): Promise<string> {
     await database.query(
       `update public.app_settings set require_two_factor = false`,
     );
+    // These tests each sign in, one after another, and quick ones can fit
+    // four sign-ins into Better Auth's ten-second window.
+    await startSignInWindowAfresh(database);
   } finally {
     await database.end();
   }
