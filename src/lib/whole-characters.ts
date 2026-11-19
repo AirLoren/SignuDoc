@@ -56,7 +56,18 @@ export function splitIntoWholeCharacters(value: string): string[] {
 // variation selectors, emoji skin tones and tag characters.
 const extendsCharacter =
   /^[\p{M}\u{0E33}\u{0EB3}\u{200C}\u{200D}\u{FF9E}\u{FF9F}\u{FE00}-\u{FE0F}\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]$/u;
+// Spacing vowel signs Unicode leaves out of grapheme extension (mostly
+// Myanmar), so they start a character of their own.
+const markThatStandsAlone =
+  /^[\u{102B}\u{102C}\u{1038}\u{1062}-\u{1064}\u{1067}-\u{106D}\u{1083}\u{1087}-\u{108C}\u{108F}\u{109A}-\u{109C}\u{1A61}\u{1A63}\u{1A64}\u{AA7B}\u{AA7D}\u{11720}\u{11721}]$/u;
+const zeroWidthNonJoiner = "\u{200C}";
 const zeroWidthJoiner = "\u{200D}";
+
+function extendsPrevious(codePoint: string): boolean {
+  return (
+    extendsCharacter.test(codePoint) && !markThatStandsAlone.test(codePoint)
+  );
+}
 const spacingMark = /^[\p{Mc}\u{0E33}\u{0EB3}]$/u;
 const extendedPictographic = /^\p{Extended_Pictographic}$/u;
 
@@ -119,7 +130,7 @@ function isControl(codePoint: string): boolean {
 
   return (
     formatCharacter.test(codePoint) &&
-    !extendsCharacter.test(codePoint) &&
+    !extendsPrevious(codePoint) &&
     !prepend.test(codePoint)
   );
 }
@@ -195,7 +206,7 @@ export function splitWithoutSegmenter(text: string): string[] {
         (!previousControl &&
           !control &&
           (previousPrepend ||
-            extendsCharacter.test(codePoint) ||
+            extendsPrevious(codePoint) ||
             (pictographic && pictographicBeforeJoiner) ||
             (regional && regionalIndicatorRun % 2 === 1) ||
             (indicConsonant && conjunct === "linked") ||
@@ -212,7 +223,7 @@ export function splitWithoutSegmenter(text: string): string[] {
     // Spacing marks join the character but, unlike other marks, end an
     // emoji ZWJ sequence or an Indic conjunct.
     const nonSpacingExtend =
-      extendsCharacter.test(codePoint) && !spacingMark.test(codePoint);
+      extendsPrevious(codePoint) && !spacingMark.test(codePoint);
 
     pictographicBeforeJoiner =
       codePoint === zeroWidthJoiner && inPictographicSequence;
@@ -226,7 +237,10 @@ export function splitWithoutSegmenter(text: string): string[] {
       conjunct = "consonant";
     } else if (conjunct !== null && indicLinkers.has(code)) {
       conjunct = "linked";
-    } else if (conjunct !== null && !nonSpacingExtend) {
+    } else if (
+      conjunct !== null &&
+      (codePoint === zeroWidthNonJoiner || !nonSpacingExtend)
+    ) {
       conjunct = null;
     }
 
