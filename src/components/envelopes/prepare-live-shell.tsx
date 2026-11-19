@@ -617,6 +617,14 @@ function PrepareLiveShellContent({
 
           fieldsRevisionRef.current = saved.fieldsRevision;
           lastSavedSignatureRef.current = signature;
+
+          // A page shown again from the browser's cache may have been
+          // changed while this save was on its way, even back to the list
+          // saved before it, which autosave would have skipped. Save what
+          // is on screen so the server does not keep this older list.
+          if (serializeFieldRequest(currentFieldsRef.current) !== signature) {
+            void persistFieldsRef.current(currentFieldsRef.current);
+          }
         } catch {
           // The page has gone, or the save did not arrive: nothing to do.
         }
