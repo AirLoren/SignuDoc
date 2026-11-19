@@ -315,6 +315,22 @@ export function isEmailNotConnectedError(error: unknown): boolean {
 }
 
 /**
+ * Whether this install has an email provider to send with. Without one,
+ * a flow that would tell someone to check their inbox says that email is
+ * not set up instead (issue #95).
+ */
+export function canSendEmail(env: EnvSource = process.env): boolean {
+  try {
+    createEmailService({ env });
+    return true;
+  } catch {
+    // No provider key, or a driver this deployment cannot use: either way
+    // nothing would be sent.
+    return false;
+  }
+}
+
+/**
  * An email service that is only built when a message is first sent. A flow
  * that sends email as a side effect after saving its own work (a signer
  * finishing or declining) uses it, so a missing provider key fails the
