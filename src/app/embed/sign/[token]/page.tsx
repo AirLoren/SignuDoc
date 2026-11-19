@@ -56,7 +56,13 @@ export default async function EmbedSignPage({
   }
 
   let initialState:
-    "already-signed" | "declined" | "error" | "expired" | "voided" | undefined;
+    | "already-signed"
+    | "completed"
+    | "declined"
+    | "error"
+    | "expired"
+    | "voided"
+    | undefined;
   let record: Awaited<ReturnType<typeof getSigningPayloadForToken>> | null =
     null;
 

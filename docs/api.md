@@ -487,7 +487,7 @@ window.addEventListener("message", (event) => {
   switch (event.data.type) {
     case "signudoc:signed": // { envelopeId, signerId }
     case "signudoc:declined": // { envelopeId, signerId }
-    case "signudoc:error": // { state }: "expired", "already-signed", "voided", …
+    case "signudoc:error": // { state }: "expired", "already-signed", "completed", "voided", …
   }
 });
 ```
