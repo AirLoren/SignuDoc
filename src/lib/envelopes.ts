@@ -2631,6 +2631,7 @@ export async function sendDraftEnvelope(
           SET
             status = 'pending',
             signing_token_hash = NULL,
+            spent_signing_token_hash = NULL,
             signing_token_expires_at = NULL,
             turn_started_at = NULL,
             last_notified_at = NULL,
@@ -2765,7 +2766,7 @@ export async function sendDraftEnvelope(
     ).messageId;
   } catch (error) {
     await withTransaction(async (tx) => {
-      await tx.query(
+      const revertedEnvelope = await tx.query(
         `
           UPDATE envelopes
           SET
@@ -2784,12 +2785,19 @@ export async function sendDraftEnvelope(
         [envelope.updatedAt, envelopeId, userId],
       );
 
+      // Something else ended the envelope after it went out (it was voided,
+      // say). Its signers and history are that envelope's now: leave them.
+      if (revertedEnvelope.rowCount !== 1) {
+        return;
+      }
+
       await tx.query(
         `
           UPDATE signers
           SET
             status = 'pending',
             signing_token_hash = NULL,
+            spent_signing_token_hash = NULL,
             signing_token_expires_at = NULL,
             turn_started_at = NULL,
             last_notified_at = NULL,
@@ -3532,6 +3540,7 @@ export async function voidSentEnvelope(
       `
         UPDATE signers
         SET
+          spent_signing_token_hash = signing_token_hash,
           signing_token_hash = NULL,
           signing_token_expires_at = NULL,
           updated_at = $1
