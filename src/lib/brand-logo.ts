@@ -248,7 +248,12 @@ function isCompletePng(bytes: Uint8Array): boolean {
     } else if (type === "IDAT") {
       data.push(bytes.subarray(dataStart, dataEnd));
     } else if (type === "IEND") {
-      if (data.length === 0 || (header.colorType === 3 && !seenPalette)) {
+      // The end marker carries nothing.
+      if (
+        length !== 0 ||
+        data.length === 0 ||
+        (header.colorType === 3 && !seenPalette)
+      ) {
         return false;
       }
 

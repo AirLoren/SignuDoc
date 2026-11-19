@@ -405,3 +405,14 @@ test("a lossy WebP whose first partition runs past its data is refused", () => {
     BrandLogoError,
   );
 });
+
+test("a PNG whose end marker carries data is refused", () => {
+  const png = buildPng({ height: 2, raw: new Uint8Array(18), width: 2 });
+  // Swap the empty IEND for one holding a byte.
+  const bytes = Buffer.concat([
+    png.subarray(0, png.length - 12),
+    pngChunk("IEND", Buffer.from([0])),
+  ]);
+
+  assert.throws(() => checkLogoUpload(bytes), BrandLogoError);
+});
