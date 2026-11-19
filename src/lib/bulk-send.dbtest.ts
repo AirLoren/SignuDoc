@@ -1125,6 +1125,55 @@ test("erasing a signer clears a saved failure reason that names them", async () 
   assert.equal(stored.rows[0]?.reason, null);
 });
 
+test("deleting a failed row's draft clears its reason and keeps its status", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const email = `ann-${randomUUID()}@example.test`;
+  const body = confirmBody(`name,email\nAnn Example,${email}\n`);
+  const envelopeId = await leaveProcessingDraft(userId, template.id, body);
+
+  await database.query(
+    `
+      update bulk_send_batch_rows
+      set status = 'failed', reason = $2
+      where envelope_id = $1
+    `,
+    [envelopeId, `Ann Example (${email}) needs an account on this site.`],
+  );
+
+  const batch = await database.query<{ id: string }>(
+    `select batch_id as id from bulk_send_batch_rows where envelope_id = $1`,
+    [envelopeId],
+  );
+  const batchId = batch.rows[0]!.id;
+
+  // The stale draft cleanup deletes the draft row the same way.
+  const deleted = await database.query(
+    `delete from envelopes where id = $1 and status = 'draft'`,
+    [envelopeId],
+  );
+
+  assert.equal(deleted.rowCount, 1);
+
+  const stored = await database.query<{
+    envelopeId: string | null;
+    reason: string | null;
+    status: string;
+  }>(
+    `
+      select envelope_id as "envelopeId", reason, status
+      from bulk_send_batch_rows
+      where batch_id = $1
+    `,
+    [batchId],
+  );
+
+  assert.equal(stored.rowCount, 1);
+  assert.equal(stored.rows[0]?.status, "failed");
+  assert.equal(stored.rows[0]?.envelopeId, null);
+  assert.equal(stored.rows[0]?.reason, null);
+});
+
 async function takeOverBatch(userId: string, batchKey: unknown) {
   await database.query(
     `

@@ -8,9 +8,11 @@ release says when it does.
 
 ## [Unreleased]
 
-Send the same template to many people at once from a CSV. This needs a
-migration step (`20261118090000_bulk_send_batches.sql`): a confirmed batch
-stores its results so a retry does not send the same envelopes again.
+Send the same template to many people at once from a CSV. This needs two
+migration steps (`20261118090000_bulk_send_batches.sql`,
+`20261118120000_bulk_send_row_reason_cleared_with_envelope.sql`): a confirmed
+batch stores its results so a retry does not send the same envelopes again,
+and a stored failure reason is cleared when its envelope is deleted.
 
 ### Templates
 
