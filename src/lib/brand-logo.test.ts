@@ -392,3 +392,16 @@ test("a WebP whose last chunk's padding runs past the file is refused", () => {
 
   assert.throws(() => checkLogoUpload(bytes), BrandLogoError);
 });
+
+test("a lossy WebP whose first partition runs past its data is refused", () => {
+  // A key frame tag declaring a 64-byte first partition, a 1x1 frame, and
+  // only 2 bytes of data after the 10-byte header.
+  const frame = Buffer.from([
+    0x10, 0x08, 0x00, 0x9d, 0x01, 0x2a, 1, 0, 1, 0, 0, 0,
+  ]);
+
+  assert.throws(
+    () => checkLogoUpload(buildWebp(webpChunk("VP8 ", frame))),
+    BrandLogoError,
+  );
+});

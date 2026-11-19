@@ -385,9 +385,20 @@ function hasWebpImage(
     }
 
     if (type === "VP8 ") {
-      // A key frame header with its size, and some data after it.
+      // A key frame header with its size, and a first partition that fits
+      // in the data after it. The frame tag's top 19 bits give that size.
+      const firstPartitionSize =
+        length > 10
+          ? (bytes[dataStart] |
+              (bytes[dataStart + 1] << 8) |
+              (bytes[dataStart + 2] << 16)) >>>
+            5
+          : 0;
+
       if (
         length <= 10 ||
+        firstPartitionSize === 0 ||
+        firstPartitionSize > length - 10 ||
         !startsWith(bytes, [0x9d, 0x01, 0x2a], dataStart + 3) ||
         (readUint16LE(bytes, dataStart + 6) & 0x3fff) === 0 ||
         (readUint16LE(bytes, dataStart + 8) & 0x3fff) === 0
