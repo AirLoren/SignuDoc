@@ -16,7 +16,7 @@ import { recordSystemAuditEvent } from "./services/system-audit.ts";
 // account is not on its way to being closed.
 
 /** Serializes role changes, so two removals cannot both leave "one more". */
-const ROLE_CHANGE_LOCK_ID = 746108324;
+export const ROLE_CHANGE_LOCK_ID = 746108324;
 const MAX_LISTED_PEOPLE = 500;
 const MAX_SEARCH_LENGTH = 100;
 

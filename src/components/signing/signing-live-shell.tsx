@@ -2335,10 +2335,29 @@ function DialogFrame({
   onClose: () => void;
   title: string;
 }) {
+  // These dialogs open from state, not from a Radix trigger, so on close
+  // Radix has nowhere to send focus and it falls to the top of the page.
+  // Remember what had focus when the dialog first rendered (before Radix
+  // moves focus into it) and send focus back there, as a keyboard user
+  // expects.
+  const [returnFocusTarget] = useState(() =>
+    typeof document === "undefined" ? null : document.activeElement,
+  );
+
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         className="max-h-[calc(100dvh-2rem)] max-w-[600px] overflow-y-auto p-0"
+        onCloseAutoFocus={(event) => {
+          if (
+            returnFocusTarget instanceof HTMLElement &&
+            returnFocusTarget !== document.body &&
+            returnFocusTarget.isConnected
+          ) {
+            event.preventDefault();
+            returnFocusTarget.focus();
+          }
+        }}
         showCloseButton={false}
       >
         <div>

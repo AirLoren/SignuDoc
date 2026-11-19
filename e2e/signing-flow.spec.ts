@@ -1388,6 +1388,14 @@ test("a signer who declines is told the decline was recorded, not that the link 
     await search.press("Enter");
     await expect(page).toHaveURL(/\/dashboard\?view=all&q=/);
     await expect(card).toBeVisible();
+
+    // Switching views drops the search, in the box too.
+    await page.getByRole("link", { name: "Mine" }).click();
+    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(search).toHaveValue("");
+    await page.getByRole("link", { name: "Everyone's" }).click();
+    await expect(page).toHaveURL(/\/dashboard\?view=all$/);
+    await expect(search).toHaveValue("");
     await card.click();
     await expect(page).toHaveURL(new RegExp(`/envelopes/${envelopeId}$`));
     await expect(page.getByText(`Sent by ${senderLabel}`)).toBeVisible();
