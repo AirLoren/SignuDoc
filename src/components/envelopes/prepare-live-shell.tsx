@@ -365,9 +365,7 @@ async function parseJsonResponse<T>(
   response: Response,
 ): Promise<{ data: T | null; error: string | null }> {
   const payload = (await response.json().catch(() => null)) as
-    | { error?: string }
-    | T
-    | null;
+    { error?: string } | T | null;
 
   if (!response.ok) {
     return {
@@ -454,6 +452,7 @@ function PrepareLiveShellContent({
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isContinuing, setIsContinuing] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
   const [isFieldInteracting, setIsFieldInteracting] = useState(false);
   const [isDocumentPanning, setIsDocumentPanning] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(DEFAULT_DOCUMENT_ZOOM_LEVEL);
@@ -474,6 +473,8 @@ function PrepareLiveShellContent({
   }));
 
   currentFieldsRef.current = fields;
+
+  const backHref = `/envelopes/${envelopeId}/signers`;
 
   const pageCount = record.pages.length;
   const pageFields = fields.filter((field) => field.page === activePage);
@@ -569,8 +570,22 @@ function PrepareLiveShellContent({
       if (autosaveTimeoutRef.current) {
         window.clearTimeout(autosaveTimeoutRef.current);
       }
+
+      // Leaving the page (a link in the header, say) before the autosave
+      // ran would drop the last change. Send it on the way out; keepalive
+      // lets the request finish after the page has gone.
+      const unsaved = currentFieldsRef.current;
+
+      if (serializeFieldRequest(unsaved) !== lastSavedSignatureRef.current) {
+        void fetch(`/api/envelopes/${envelopeId}/fields`, {
+          body: JSON.stringify(buildFieldRequest(unsaved)),
+          headers: { "content-type": "application/json" },
+          keepalive: true,
+          method: "PUT",
+        }).catch(() => undefined);
+      }
     };
-  }, []);
+  }, [envelopeId]);
 
   useEffect(() => {
     if (!selectedFieldId) {
@@ -723,6 +738,44 @@ function PrepareLiveShellContent({
     }
   }
 
+  // Back saves a change the autosave has not sent yet, then goes. If the
+  // save fails, the sender stays here with the error, so nothing they can
+  // see on the page is lost.
+  async function handleBack(event: MouseEvent<HTMLAnchorElement>) {
+    if (
+      serializeFieldRequest(currentFieldsRef.current) ===
+      lastSavedSignatureRef.current
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+
+    if (isLeaving) {
+      return;
+    }
+
+    setIsLeaving(true);
+
+    if (autosaveTimeoutRef.current) {
+      window.clearTimeout(autosaveTimeoutRef.current);
+      autosaveTimeoutRef.current = null;
+    }
+
+    try {
+      const saveResult = await persistFields(currentFieldsRef.current);
+
+      if (saveResult.ok) {
+        window.location.assign(backHref);
+      }
+    } catch {
+      setSaveError("Your changes could not be saved. Try again.");
+      setSaveState("error");
+    } finally {
+      setIsLeaving(false);
+    }
+  }
+
   function beginDocumentPan(event: ReactPointerEvent<HTMLDivElement>) {
     documentPanGestureRef.current = beginDocumentPanGesture({
       canStart: !armedTool,
@@ -758,11 +811,12 @@ function PrepareLiveShellContent({
 
   return (
     <CanvasShell
-      backHref={`/envelopes/${envelopeId}/signers`}
+      backHref={backHref}
       backLabel="Back"
       nextDisabled={!canContinue}
       nextLabel="Next →"
       nextLoading={isContinuing}
+      onBack={(event) => void handleBack(event)}
       onNext={handleContinue}
       stepLabel="Step 3 of 4"
       title={`"${record.title}"`}
@@ -831,16 +885,12 @@ function PrepareLiveShellContent({
                 <DocumentZoomControls
                   onDecrease={() =>
                     setZoomLevel((currentZoom) =>
-                      clampDocumentZoomLevel(
-                        currentZoom - DOCUMENT_ZOOM_STEP,
-                      ),
+                      clampDocumentZoomLevel(currentZoom - DOCUMENT_ZOOM_STEP),
                     )
                   }
                   onIncrease={() =>
                     setZoomLevel((currentZoom) =>
-                      clampDocumentZoomLevel(
-                        currentZoom + DOCUMENT_ZOOM_STEP,
-                      ),
+                      clampDocumentZoomLevel(currentZoom + DOCUMENT_ZOOM_STEP),
                     )
                   }
                   onReset={() => setZoomLevel(DEFAULT_DOCUMENT_ZOOM_LEVEL)}
@@ -893,7 +943,9 @@ function PrepareLiveShellContent({
 
               <div className="flex justify-center lg:justify-end">
                 <SaveStatusIndicator
-                  onRetrySave={() => void persistFields(currentFieldsRef.current)}
+                  onRetrySave={() =>
+                    void persistFields(currentFieldsRef.current)
+                  }
                   saveError={saveError}
                   saveState={saveState}
                 />
@@ -1263,7 +1315,9 @@ function SignerCard({
             .join("")}
         </span>
         <div className="min-w-0">
-          <p className="truncate text-sm font-bold text-(--fg)">{signer.name}</p>
+          <p className="truncate text-sm font-bold text-(--fg)">
+            {signer.name}
+          </p>
           <p className="mt-0.5 text-xs text-(--secondary)">
             {fieldCount} field{fieldCount === 1 ? "" : "s"} placed
           </p>
@@ -1292,7 +1346,9 @@ function EmptyFieldInspector({
   return (
     <div className="well px-4 py-4">
       <p className="text-sm font-bold text-(--fg)">
-        {activeTool ? `${activeTool.label} ready to place` : "No field selected"}
+        {activeTool
+          ? `${activeTool.label} ready to place`
+          : "No field selected"}
       </p>
       <p className="mt-1.5 text-sm leading-6 text-(--secondary)">
         {activeTool
@@ -1808,20 +1864,18 @@ function setFieldRequired(
   required: boolean,
   setFields: Dispatch<SetStateAction<PrepareField[]>>,
 ) {
-  setFields((currentFields) =>
-    {
-      const target = currentFields.find((field) => field.id === fieldId);
+  setFields((currentFields) => {
+    const target = currentFields.find((field) => field.id === fieldId);
 
-      if (!target || !canBeOptional(target.type)) {
-        return currentFields;
-      }
+    if (!target || !canBeOptional(target.type)) {
+      return currentFields;
+    }
 
-      // A radio group is required or optional as a whole.
-      return currentFields.map((field) =>
-        isSameChoice(target, field) ? { ...field, required } : field,
-      );
-    },
-  );
+    // A radio group is required or optional as a whole.
+    return currentFields.map((field) =>
+      isSameChoice(target, field) ? { ...field, required } : field,
+    );
+  });
 }
 
 function deleteField(
