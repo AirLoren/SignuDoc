@@ -91,17 +91,18 @@ test("a signer is asked before a reload throws away what they entered", async ({
 
     await expect(finish).toBeEnabled();
 
-    // The browser asks before leaving; the signer chooses to stay.
-    const warning = signerPage.waitForEvent("dialog", { timeout: 5_000 });
+    // The browser asks before leaving; the signer chooses to stay. The
+    // question blocks the page, so it is answered as soon as it comes.
+    const dialogTypes: string[] = [];
 
+    signerPage.once("dialog", (dialog) => {
+      dialogTypes.push(dialog.type());
+      void dialog.dismiss();
+    });
     await signerPage.evaluate(() => {
       window.location.reload();
     });
-
-    const dialog = await warning;
-
-    expect(dialog.type()).toBe("beforeunload");
-    await dialog.dismiss();
+    await expect.poll(() => dialogTypes).toEqual(["beforeunload"]);
 
     await expect(signerPage.getByLabel("Enter text")).toHaveValue(ANSWER);
     await expect(finish).toBeEnabled();
