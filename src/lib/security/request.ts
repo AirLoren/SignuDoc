@@ -36,7 +36,29 @@ export function getClientIpAddress(
 }
 
 export function getRequestUserAgent(headers: Headers): string | null {
-  return headers.get("user-agent")?.trim() ?? null;
+  // A header sent with no value reads as "", which the audit schema
+  // rejects; it counts as no user agent at all.
+  return headers.get("user-agent")?.trim() || null;
+}
+
+/** Who made a request, as the audit trail records it. */
+export type RequestClient = {
+  ipAddress?: string | null;
+  userAgent?: string | null;
+};
+
+export function getRequestClient(
+  headers: Headers | null | undefined,
+  env: IpEnv = process.env,
+): { ipAddress: string | null; userAgent: string | null } {
+  if (!headers) {
+    return { ipAddress: null, userAgent: null };
+  }
+
+  return {
+    ipAddress: getClientIpAddress(headers, env),
+    userAgent: getRequestUserAgent(headers),
+  };
 }
 
 export function getRequestPathname(request: Request): string {

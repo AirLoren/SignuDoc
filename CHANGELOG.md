@@ -20,6 +20,188 @@ release says when it does.
 This changes the database: the new `api_keys` table is added by the
 migration that runs on deploy.
 
+## [0.5.2] - 2026-11-19
+
+Twenty-four bug fixes. Seventeen fix reported issues (sixteen from @coygeek,
+one from @seanGSISG), and ten came as pull requests from five outside
+contributors. This release adds one database column: see the end of this
+entry.
+
+### Signing
+
+- Opening an old invitation after the envelope was signed, completed,
+  declined or voided says what happened to it, instead of asking the signer
+  to request a new link the sender cannot send (#110, PR #178).
+- Reloading the signing page before Finish asks first, instead of throwing
+  away the signature and answers without warning (#99, PR #169).
+- A long Text answer no longer widens the signing page past the window
+  (#103, PR #177).
+- Closing the signature dialog, including with Escape, returns focus to the
+  field instead of the top of the page (#105, PR #181).
+- "Resend code" says when the code was not sent, instead of confirming an
+  email during the wait between codes (#113, PR #172).
+- A signer name that is a lone emoji, or uses scripts with combining marks,
+  gives whole-character avatar initials instead of a broken one that could
+  stop the page from loading (#115, PR #173).
+
+### Sending
+
+- Going Back from Add signers returns to the same draft, instead of a blank
+  upload where a second upload made a second draft (#94, PR #166).
+- A field placed just before pressing Back on Place fields is saved
+  (#102, PR #165).
+- On a phone, the Field tools sheet stays on screen with Done visible, and
+  Escape closes it (#111, PR #180).
+- A long unbroken title in the review and send dialogs wraps, so "Send now"
+  stays on screen (#104, PR #168).
+- On wide screens the envelope page's action buttons wrap instead of covering
+  a long title (#131, PR #132 by @seanGSISG, carried in PR #170).
+- A new sender on an install without email is told so at sign-up, instead of
+  being told to check their inbox (#95, PR #167).
+- Uploading a cut-off or damaged logo is refused, instead of replacing the
+  working logo with a broken one (#91, PR #124 by @HimanshuMahto, carried in
+  PR #171).
+
+### Audit trail and certificates
+
+- Password resets, role changes and account closure requests record the IP
+  address and user agent in the site audit trail (#98, PR #164).
+- The daily job's scheduled account deletion is logged as the system's, not as
+  a user action (#109, PR #176).
+- The certificate says a locally captured email was captured, not accepted by
+  a mail provider (#106, PR #175).
+
+### Administrators and settings
+
+- The last administrator cannot close their own account (PR #153 by
+  @MattJackson).
+- Saving settings can no longer be undone by an older cached copy
+  (PR #152 by @MattJackson).
+- A cancelled deletion's email always arrives before the notice of a deletion
+  scheduled again (PR #160 by @RayFernando1337).
+- A scheduled deletion whose files could not be removed is reported as a
+  failure (PR #162 by @RayFernando1337).
+- Switching between Mine and Everyone's on the dashboard clears the old search
+  (PR #161 by @RayFernando1337).
+
+### Hosting
+
+- The functions that draw PDFs ship only the files they need instead of a
+  copy of the whole project, and CI checks this after each build (#108,
+  PR #119 by @UsamaKhan, carried in PR #174).
+- An empty `STORAGE_LOCAL_DIR` uses the default `.data/storage` folder instead
+  of the working directory (PR #151 by @MattJackson).
+- A backup or restore whose copy fails lets go of its download
+  (PR #150 by @MattJackson).
+
+The seven outside PRs #150-#153 and #160-#162 were merged through PR #179.
+
+Thank you to everyone who helped with this release. @coygeek filed sixteen of
+these reports, each with the cause and a clear way to reproduce it, which is a
+huge gift to the project. @MattJackson sent four careful fixes for the edges of
+backups, storage, settings and account closure. @RayFernando1337 sent three
+fixes for scheduled deletion and the dashboard. @UsamaKhan made the PDF
+functions much smaller, @HimanshuMahto made logo uploads safe against damaged
+files, and @seanGSISG both reported the covered title and sent the fix.
+
+This release changes the database (`20261119090000_spent_signing_links.sql`,
+one new column on signers that lets an old link say what happened). On Vercel
+the production build applies it. On other hosts, run `npm run db:migrate` as on
+every deploy.
+
+## [0.5.1] - 2026-11-19
+
+Six bug fixes, all reported by @coygeek. There are no database changes and no
+new settings.
+
+### Fixes
+
+- A completed envelope whose title has an emoji near the 120th character can
+  be downloaded again. Its signed PDF and certificate returned a server error,
+  because the file name was cut in the middle of the emoji (#89, PR #142).
+  The email sender's name and the seal certificate's names are now cut at
+  whole characters too, so an emoji in an organization name cannot break the
+  seal or the From line (PR #148).
+- A long answer in a Text, Number or Dropdown field wraps onto as many lines
+  as it needs inside its box on the signed PDF, at the largest size that fits,
+  instead of running past the box and off the page. While typing, the signer
+  sees a "box is full" warning with how many characters fit, and Finish stays
+  off until the answer is shortened. Answers accepted before this release are
+  still drawn whole (#90, PR #146).
+- With local disk storage, PDFs between 10 and 20 MB upload instead of failing
+  with a misleading title error. An upload over the limit gets the usual size
+  message (#92, PR #147).
+- The certificate lists audit events in the order they were recorded, so
+  events from the same second no longer swap places, for example "completed"
+  above the last "signed". Existing certificates still verify (#97, PR #143).
+- The last signer can finish, and a signer can decline, when the install's
+  email setup has been removed. The envelope used to stay incomplete with a
+  server error (#96, PR #145).
+- Voiding an envelope emails the signers who already signed, telling them the
+  document will not be completed. Signers still waiting for their turn were
+  never invited and still get nothing. The void dialog says who will be told
+  (#93, PR #144).
+
+Thanks to @coygeek for six clear, careful reports, each with the cause and a
+way to reproduce it, which made every one of these fixes straightforward.
+
+## [0.5.0] - 2026-11-18
+
+Administrators can now see every member's envelopes and delete finished ones
+after a 14-day notice, plus six outside bug fixes and a security update. This
+release changes the database: see the end of this entry.
+
+### Administrators
+
+- An "Everyone's" view on the dashboard lists every member's sent and
+  finished envelopes, with the sender on each card. Administrators can open
+  them and download their files, and a download of another member's file is
+  recorded in the site audit trail. Drafts stay private to their sender.
+- The dashboard is split into pages of 48, and its search box searches the
+  whole list on the server, including the sender's name and email in
+  "Everyone's".
+- "Delete envelope" on a completed, declined or voided envelope schedules it
+  for deletion 14 days later. The sender gets an email naming who asked, and
+  any administrator can cancel within the 14 days, in which case the sender
+  is told it will not be deleted. Nothing is deleted before the sender has
+  been emailed. In Part 11 mode a reason is required. The request, a
+  cancellation and the deletion itself are all in the site audit trail, with
+  the record's hashes kept after the files are gone.
+- A deleted envelope's files are queued and retried by the daily job until
+  they are gone, so a storage hiccup cannot leave orphaned files behind.
+- The retention sweep does not delete an envelope with a deletion scheduled,
+  so the retention period cannot cut the 14-day notice short.
+
+### Fixes
+
+- Fields placed on rotated pages (typical of landscape scans), and on pages
+  whose crop box differs from the page size, are stamped where they were
+  placed in the signed PDF instead of shifted or sideways. This includes
+  envelopes uploaded before this release (#69, PR #116).
+- A void or decline that races another void, decline or the last signature
+  no longer deletes the winner's certificate (#68).
+- After switching signature tabs, the Draw tab shows the drawing that will
+  be applied, instead of an empty canvas (#70).
+- A client that sends an empty User-Agent header can sign, verify, consent
+  and decline, instead of getting an error (#71).
+- Exporting the audit trail of an envelope whose title has a dash, curly
+  quote or non-Latin characters works, instead of failing with a server
+  error (#72).
+- An envelope's timeline lists events in the order they were recorded, so
+  "completed" no longer shows before "signed" (#73).
+
+### Security
+
+- node-forge updated to 1.4.3, which fixes four moderate advisories (#80).
+
+Thanks to @njarrar for the six fixes, and to @jasonhaggart for the node-forge
+update.
+
+This release changes the database (`20261118100000_pending_file_deletions.sql`,
+`20261118110000_scheduled_envelope_deletions.sql`). On Vercel the production
+build applies them. On other hosts, run `npm run db:migrate` as on every
+deploy.
+
 ## [0.4.0] - 2026-11-17
 
 A name field, and fixes for nine reported bugs. This release changes the
@@ -259,6 +441,9 @@ checked against the real services:
 
 SignuDoc is software, not legal advice. See the README's legal disclaimer.
 
+[0.5.2]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.2
+[0.5.1]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.1
+[0.5.0]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.0
 [0.4.0]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.4.0
 [0.3.0]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.3.0
 [0.2.1]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.2.1

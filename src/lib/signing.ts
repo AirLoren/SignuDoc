@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
 import { type Branding } from "./branding.ts";
+import { removeUnclaimedEnvelopeCertificates } from "./certificate-cleanup.ts";
 import {
   type DbExecutor,
   type DbPool,
@@ -29,6 +30,7 @@ import {
 import {
   signerCheckRequestSchema,
   signerConsentRequestSchema,
+  signingFieldFitRequestSchema,
   signingPayloadSchema,
   signingDeclineResponseSchema,
   type SigningVerificationState,
@@ -57,6 +59,7 @@ import {
 } from "./services/audit.ts";
 import {
   createEmailService,
+  createLazyEmailService,
   fitsAsAttachments,
   type EmailAttachment,
   type EmailService,
@@ -65,6 +68,7 @@ import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import { hashOpaqueToken } from "./services/opaque-tokens.ts";
 import {
   finalizeEnvelope,
+  findTypedValueTooLongForField,
   loadInstallSealer,
   storeEnvelopeCertificatePdf,
   storeRecipientEnvelopeCertificatePdf,
@@ -270,6 +274,7 @@ const signingUnavailableStatusCodeMap: Record<
   number
 > = {
   "already-signed": 409,
+  completed: 409,
   declined: 409,
   expired: 410,
   voided: 409,
@@ -296,6 +301,8 @@ function getSigningUnavailableMessage(
   switch (state) {
     case "already-signed":
       return "You've already signed.";
+    case "completed":
+      return "This envelope has been completed.";
     case "declined":
       return "This envelope has been declined.";
     case "voided":
@@ -316,6 +323,10 @@ function getSigningSubmitUrl(token: string): string {
 
 function getSigningConsentUrl(token: string): string {
   return `/api/signing/${encodeURIComponent(token)}/consent`;
+}
+
+function getSigningFieldFitUrl(token: string): string {
+  return `/api/signing/${encodeURIComponent(token)}/fit`;
 }
 
 function getSigningDeclineUrl(token: string): string {
@@ -1320,6 +1331,34 @@ function signerAuditMetadata(context: ResolvedSigningContext) {
   };
 }
 
+export type SignerEmailCodeResult = {
+  emailCodeSentAt: number;
+  maskedEmail: string;
+  /** Seconds until a new code can be sent; 0 when this call sent one. */
+  retryAfterSeconds: number;
+  /**
+   * Whether this call emailed a new code. False during the resend cooldown,
+   * when the code sent a moment ago is still the one to use.
+   */
+  sent: boolean;
+};
+
+function cooldownResult(
+  emailCodeSentAt: number,
+  now: number,
+  maskedEmail: string,
+): SignerEmailCodeResult {
+  return {
+    emailCodeSentAt,
+    maskedEmail,
+    retryAfterSeconds: Math.max(
+      1,
+      emailCodeSentAt + EMAIL_CODE_RESEND_SECONDS - now,
+    ),
+    sent: false,
+  };
+}
+
 /** Emails the signer a one-time code, when the sender asked for one. */
 export async function sendSignerEmailCode(
   token: string,
@@ -1327,7 +1366,7 @@ export async function sendSignerEmailCode(
     database = getDb(),
     emailService = createEmailService(),
   }: { database?: DbPool; emailService?: EmailService } = {},
-): Promise<{ emailCodeSentAt: number; maskedEmail: string }> {
+): Promise<SignerEmailCodeResult> {
   const context = await resolveSigningContext(token, { database });
   const state = await getSignerCheckState(context.signer.id!, database);
   const now = Math.floor(Date.now() / 1000);
@@ -1341,10 +1380,11 @@ export async function sendSignerEmailCode(
     now - state.emailCodeSentAt < EMAIL_CODE_RESEND_SECONDS &&
     state.emailCodeHash
   ) {
-    return {
-      emailCodeSentAt: state.emailCodeSentAt,
-      maskedEmail: maskEmailAddress(context.signer.email),
-    };
+    return cooldownResult(
+      state.emailCodeSentAt,
+      now,
+      maskEmailAddress(context.signer.email),
+    );
   }
 
   const issued = issueEmailCode();
@@ -1396,12 +1436,22 @@ export async function sendSignerEmailCode(
       );
     }
 
+    // Another request claimed the window first. Its code is the one to use,
+    // unless that send failed and cleared it again in the meantime.
     const current = await getSignerCheckState(context.signer.id!, database);
 
-    return {
-      emailCodeSentAt: current.emailCodeSentAt ?? now,
-      maskedEmail: maskEmailAddress(context.signer.email),
-    };
+    if (current.emailCodeHash === null || current.emailCodeSentAt === null) {
+      throw new SigningMutationError(
+        "The code could not be sent right now. Try again.",
+        503,
+      );
+    }
+
+    return cooldownResult(
+      current.emailCodeSentAt,
+      now,
+      maskEmailAddress(context.signer.email),
+    );
   }
 
   const minutes = Math.round(EMAIL_CODE_TTL_SECONDS / 60);
@@ -1462,6 +1512,8 @@ export async function sendSignerEmailCode(
   return {
     emailCodeSentAt: now,
     maskedEmail: maskEmailAddress(context.signer.email),
+    retryAfterSeconds: 0,
+    sent: true,
   };
 }
 
@@ -1615,6 +1667,47 @@ export async function verifySignerCheck(
 }
 
 /** Records that the signer agreed to use electronic records and signatures. */
+/**
+ * Whether what the signer has typed so far fits the field's box on the
+ * finished document, checked as they type, so they learn before they finish.
+ * The same check signing makes, with the same fonts.
+ */
+export async function checkSigningFieldFit(
+  token: string,
+  input: unknown,
+  {
+    database = getDb(),
+    verifiedMethods = [],
+  }: Pick<SubmitSigningOptions, "database" | "verifiedMethods"> = {},
+): Promise<{ fits: true } | { fits: false; maxCharacters: number }> {
+  const parsed = signingFieldFitRequestSchema.parse(input);
+  const context = await resolveSigningContext(token, { database });
+
+  await assertSignerChecksPassed(context, verifiedMethods, database);
+
+  const field = context.fields.find(
+    (entry) =>
+      entry.id === parsed.fieldId &&
+      entry.signerId === context.signer.id &&
+      (entry.type === "text" ||
+        entry.type === "number" ||
+        entry.type === "dropdown"),
+  );
+
+  if (!field) {
+    throw new SigningMutationError("That field is not yours to fill in.", 404);
+  }
+
+  const tooLong = await findTypedValueTooLongForField(
+    [{ field, value: parsed.value }],
+    context.pages,
+  );
+
+  return tooLong
+    ? { fits: false, maxCharacters: tooLong.maxCharacters }
+    : { fits: true };
+}
+
 export async function recordSignerConsent(
   token: string,
   input: unknown,
@@ -1707,6 +1800,47 @@ export async function recordSignerConsent(
   return { consentedAt };
 }
 
+/**
+ * What a link that signing, declining or voiding took away should say. It
+ * opens nothing: it only tells the signer what became of the envelope, so
+ * they are not sent to ask for a new link the sender cannot send. Any other
+ * link that opens nothing has expired.
+ */
+async function getSpentSigningLinkState(
+  tokenHash: string,
+  database: DbExecutor,
+): Promise<SigningUnavailableResponse["state"]> {
+  const spent = await queryOne<{
+    envelopeStatus: SigningEnvelopeRow["status"];
+    signerStatus: SigningSignerRow["status"];
+  }>(
+    database,
+    `
+      SELECT
+        envelopes.status AS "envelopeStatus",
+        signers.status AS "signerStatus"
+      FROM signers
+      JOIN envelopes ON envelopes.id = signers.envelope_id
+      WHERE signers.spent_signing_token_hash = $1
+      LIMIT 1
+    `,
+    [tokenHash],
+  );
+
+  switch (spent?.envelopeStatus) {
+    case "completed":
+      return "completed";
+    case "declined":
+      return "declined";
+    case "voided":
+      return "voided";
+    case "sent":
+      return spent.signerStatus === "signed" ? "already-signed" : "expired";
+    default:
+      return "expired";
+  }
+}
+
 async function resolveSigningContext(
   token: string,
   {
@@ -1721,7 +1855,9 @@ async function resolveSigningContext(
   );
 
   if (!signerRow) {
-    throw new SigningAccessError("expired");
+    throw new SigningAccessError(
+      await getSpentSigningLinkState(hashOpaqueToken(token), database),
+    );
   }
 
   const envelopeRow = await getEnvelopeRow(signerRow.envelopeId, database);
@@ -1870,6 +2006,7 @@ export async function getSigningPayloadForToken(
 
   return signingPayloadSchema.parse({
     consentUrl: getSigningConsentUrl(token),
+    fieldFitUrl: getSigningFieldFitUrl(token),
     consentedAt: checkState.consentedAt,
     currentSignerFields,
     disclosure: {
@@ -2102,6 +2239,35 @@ async function assertStillSignersTurn(
 }
 
 type SigningContext = Awaited<ReturnType<typeof resolveSigningContext>>;
+
+/**
+ * Refuses an answer too long to be read in its box on the finished document,
+ * before anything is saved, so the signer can shorten it. Without this the
+ * value would be drawn so small that no one could read it.
+ */
+async function assertTypedValuesFitTheirFields(
+  context: SigningContext,
+  fieldUpdates: ReadonlyMap<string, FieldPersistenceUpdate>,
+) {
+  const entries = context.fields.flatMap((field) => {
+    const value = field.id ? fieldUpdates.get(field.id)?.value : null;
+
+    return (field.type === "text" ||
+      field.type === "number" ||
+      field.type === "dropdown") &&
+      value
+      ? [{ field, value }]
+      : [];
+  });
+  const tooLong = await findTypedValueTooLongForField(entries, context.pages);
+
+  if (tooLong) {
+    throw new SigningMutationError(
+      `An answer on page ${tooLong.page} is too long to fit in its box on the document. Shorten it to ${tooLong.maxCharacters} characters or fewer, or ask the sender for a bigger box.`,
+      400,
+    );
+  }
+}
 
 /**
  * What the signer's submission changes: each of their fields' new value,
@@ -2360,7 +2526,7 @@ export async function submitSigningForToken(
     );
   }
 
-  const emailService = givenEmailService ?? createEmailService();
+  const emailService = givenEmailService ?? createLazyEmailService();
   const part11Signature = await reauthenticatePart11Signer(
     context,
     signerChecks.state,
@@ -2381,6 +2547,8 @@ export async function submitSigningForToken(
     drawnSignatureUploads,
     fieldUpdates,
   } = buildSignerSubmission(context, parsedInput, submittedAt);
+
+  await assertTypedValuesFitTheirFields(context, fieldUpdates);
   const presentedTokenHash = hashOpaqueToken(token);
 
   let signingStatePersisted = false;
@@ -2547,6 +2715,7 @@ export async function submitSigningForToken(
             UPDATE signers
             SET
               status = 'signed',
+              spent_signing_token_hash = signing_token_hash,
               signing_token_hash = NULL,
               signing_token_expires_at = NULL,
               signed_at = $1,
@@ -2749,6 +2918,7 @@ export async function submitSigningForToken(
             copyRecipients,
             envelope: context.envelope,
             fields: completedFields,
+            pages: context.pages,
             signers: completedSigners,
             sourcePdf: {
               bucketName: sourcePdfHead.bucketName,
@@ -2812,6 +2982,7 @@ export async function submitSigningForToken(
             UPDATE signers
             SET
               status = 'signed',
+              spent_signing_token_hash = signing_token_hash,
               signing_token_hash = NULL,
               signing_token_expires_at = NULL,
               signed_at = $1,
@@ -3008,6 +3179,8 @@ export async function prepareSignerSubmission(
   const { currentSignerId, drawnSignatureUploads, fieldUpdates } =
     buildSignerSubmission(context, parsedInput, submittedAt);
 
+  await assertTypedValuesFitTheirFields(context, fieldUpdates);
+
   return {
     context,
     images: new Map(
@@ -3038,7 +3211,7 @@ export async function declineSigningForToken(
   const context = await resolveSigningContext(token, { database });
 
   await assertSignerChecksPassed(context, verifiedMethods, database);
-  const emailService = createEmailService();
+  const emailService = createLazyEmailService();
   const storageService = createStorageService();
   const currentSignerId = context.signer.id;
   const presentedTokenHash = hashOpaqueToken(token);
@@ -3099,11 +3272,54 @@ export async function declineSigningForToken(
     declinedAuditEvent,
   ];
   const storedCertificateKeys: string[] = [];
-  let certificate: { key: string; sha256: string };
-  let recipientCertificateSha256: string;
+  // The seal's key and the install's name, read before the transaction:
+  // sealing inside it then needs no second connection from the pool.
+  const seal = await loadInstallSealer();
 
-  try {
-    certificate = await storeEnvelopeCertificatePdf(
+  await withTransaction(async (tx) => {
+    await lockSentEnvelope(context.envelope.id, tx);
+    await assertStillSignersTurn(context.envelope.id, currentSignerId, tx);
+    await lockSignerForPresentedToken(tx, {
+      envelopeId: context.envelope.id,
+      signerId: currentSignerId,
+      tokenHash: presentedTokenHash,
+    });
+
+    // The certificates below are made from the recipients read when the link
+    // was opened. If the sender corrected one of them since, they would name
+    // the old person and leave the correction out, so nothing is stored. A
+    // correction cannot commit while this lock is held, so comparing here
+    // covers the whole window.
+    const recipientsNow = await tx.query<{
+      email: string;
+      id: string;
+      name: string;
+    }>(
+      `
+        SELECT id, name, email FROM signers
+        WHERE envelope_id = $1 AND id = ANY($2::text[])
+      `,
+      [context.envelope.id, context.signers.map((signer) => signer.id)],
+    );
+    const recipientsChanged =
+      recipientsNow.rows.length !== context.signers.length ||
+      recipientsNow.rows.some((row) => {
+        const seen = context.signers.find((signer) => signer.id === row.id);
+
+        return !seen || seen.name !== row.name || seen.email !== row.email;
+      });
+
+    if (recipientsChanged) {
+      throw new SigningMutationError(
+        "This envelope changed while you were declining. Open your signing link again.",
+        409,
+      );
+    }
+
+    // Made while the envelope is locked: the certificates have fixed keys,
+    // and a void, the last signature or a second decline at the same time
+    // waits, then stops above without touching the files this one saved.
+    const certificate = await storeEnvelopeCertificatePdf(
       {
         auditEvents,
         certificate: canonicalCertificate,
@@ -3111,6 +3327,7 @@ export async function declineSigningForToken(
         signers: declinedSigners,
       },
       {
+        seal,
         storageService,
       },
     );
@@ -3130,145 +3347,106 @@ export async function declineSigningForToken(
         signers: declinedSigners,
       },
       {
+        seal,
         storageService,
       },
     );
     storedCertificateKeys.push(recipientCertificate.key);
-    recipientCertificateSha256 = recipientCertificate.sha256;
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
+
+    const declinedSignerResult = await tx.query(
+      `
+        UPDATE signers
+        SET
+          status = 'declined',
+          spent_signing_token_hash = signing_token_hash,
+          signing_token_hash = NULL,
+          signing_token_expires_at = NULL,
+          declined_at = $1,
+          decline_reason = $2,
+          updated_at = $3
+        WHERE id = $4
+          AND envelope_id = $5
+          AND status = 'notified'
+          AND signing_token_hash = $6
+      `,
+      [
+        declinedAt,
+        declineReason ?? null,
+        declinedAt,
+        currentSignerId,
+        context.envelope.id,
+        presentedTokenHash,
+      ],
     );
-    throw error;
-  }
 
-  try {
-    await withTransaction(async (tx) => {
-      await lockSentEnvelope(context.envelope.id, tx);
-      await lockSignerForPresentedToken(tx, {
-        envelopeId: context.envelope.id,
-        signerId: currentSignerId,
-        tokenHash: presentedTokenHash,
-      });
-
-      // The certificates above were made before the envelope lock, from the
-      // recipients read when the link was opened. If the sender corrected one
-      // of them since, they name the old person and leave the correction
-      // out, so they must not be kept. A correction cannot commit while this
-      // lock is held, so comparing here covers the whole window.
-      const recipientsNow = await tx.query<{
-        email: string;
-        id: string;
-        name: string;
-      }>(
-        `
-          SELECT id, name, email FROM signers
-          WHERE envelope_id = $1 AND id = ANY($2::text[])
-        `,
-        [context.envelope.id, context.signers.map((signer) => signer.id)],
+    if (declinedSignerResult.rowCount !== 1) {
+      throw new SigningMutationError(
+        "This signing link is no longer active.",
+        409,
       );
-      const recipientsChanged =
-        recipientsNow.rows.length !== context.signers.length ||
-        recipientsNow.rows.some((row) => {
-          const seen = context.signers.find((signer) => signer.id === row.id);
+    }
 
-          return !seen || seen.name !== row.name || seen.email !== row.email;
-        });
+    const declinedEnvelopeResult = await tx.query(
+      `
+        UPDATE envelopes
+        SET
+          status = 'declined',
+          evidence_key = $1,
+          declined_at = $2,
+          updated_at = $3,
+          evidence_sha256 = $5,
+          recipient_evidence_sha256 = $6
+        WHERE id = $4
+          AND status = 'sent'
+      `,
+      [
+        certificate.key,
+        declinedAt,
+        declinedAt,
+        context.envelope.id,
+        certificate.sha256,
+        recipientCertificate.sha256,
+      ],
+    );
 
-      if (recipientsChanged) {
-        throw new SigningMutationError(
-          "This envelope changed while you were declining. Open your signing link again.",
-          409,
-        );
-      }
-
-      const declinedSignerResult = await tx.query(
-        `
-          UPDATE signers
-          SET
-            status = 'declined',
-            signing_token_hash = NULL,
-            signing_token_expires_at = NULL,
-            declined_at = $1,
-            decline_reason = $2,
-            updated_at = $3
-          WHERE id = $4
-            AND envelope_id = $5
-            AND status = 'notified'
-            AND signing_token_hash = $6
-        `,
-        [
-          declinedAt,
-          declineReason ?? null,
-          declinedAt,
-          currentSignerId,
-          context.envelope.id,
-          presentedTokenHash,
-        ],
+    if (declinedEnvelopeResult.rowCount !== 1) {
+      throw new SigningMutationError(
+        "This signing link is no longer active.",
+        409,
       );
+    }
 
-      if (declinedSignerResult.rowCount !== 1) {
-        throw new SigningMutationError(
-          "This signing link is no longer active.",
-          409,
-        );
-      }
-
-      const declinedEnvelopeResult = await tx.query(
-        `
-          UPDATE envelopes
-          SET
-            status = 'declined',
-            evidence_key = $1,
-            declined_at = $2,
-            updated_at = $3,
-            evidence_sha256 = $5,
-            recipient_evidence_sha256 = $6
-          WHERE id = $4
-            AND status = 'sent'
-        `,
-        [
-          certificate.key,
-          declinedAt,
-          declinedAt,
-          context.envelope.id,
-          certificate.sha256,
-          recipientCertificateSha256,
-        ],
-      );
-
-      if (declinedEnvelopeResult.rowCount !== 1) {
-        throw new SigningMutationError(
-          "This signing link is no longer active.",
-          409,
-        );
-      }
-
-      await recordAuditEvent(
+    await recordAuditEvent(
+      {
+        actorEmail: declinedAuditEvent.actorEmail,
+        actorType: declinedAuditEvent.actorType,
+        id: declinedAuditEvent.id,
+        createdAt: declinedAuditEvent.createdAt,
+        envelopeId: declinedAuditEvent.envelopeId,
+        event: declinedAuditEvent.event,
+        ipAddress: declinedAuditEvent.ipAddress,
+        metadata: declinedAuditEvent.metadata,
+        userAgent: declinedAuditEvent.userAgent,
+      },
+      tx,
+    );
+  }, database).catch(async (error: unknown) => {
+    // Only files this call stored, so only once the envelope was its to end.
+    // That includes a failed COMMIT: the cleanup keeps the files if the
+    // envelope did end after all.
+    if (storedCertificateKeys.length > 0) {
+      await removeUnclaimedEnvelopeCertificates(
         {
-          actorEmail: declinedAuditEvent.actorEmail,
-          actorType: declinedAuditEvent.actorType,
-          id: declinedAuditEvent.id,
-          createdAt: declinedAuditEvent.createdAt,
-          envelopeId: declinedAuditEvent.envelopeId,
-          event: declinedAuditEvent.event,
-          ipAddress: declinedAuditEvent.ipAddress,
-          metadata: declinedAuditEvent.metadata,
-          userAgent: declinedAuditEvent.userAgent,
+          envelopeId: context.envelope.id,
+          keys: storedCertificateKeys,
+          storageService,
         },
-        tx,
+        database,
       );
-    }, database);
-  } catch (error) {
-    await Promise.all(
-      storedCertificateKeys.map((key) =>
-        storageService.deleteObject(key).catch(() => undefined),
-      ),
-    );
+    }
+
     throw error;
-  }
+  });
 
   try {
     const delivery = await emailService.send(
