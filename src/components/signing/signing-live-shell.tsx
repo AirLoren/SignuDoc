@@ -594,7 +594,7 @@ export function SigningLiveShell({
 
       event.preventDefault();
       // Older browsers ask only when this is set.
-      event.returnValue = "";
+      event.returnValue = " ";
     }
 
     window.addEventListener("beforeunload", warnBeforeLeaving);
