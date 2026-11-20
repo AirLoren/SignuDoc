@@ -38,6 +38,9 @@ function keyState(key: ApiKeySummary, now: number) {
 export function ApiKeysPanel() {
   const [keys, setKeys] = useState<ApiKeySummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Why the list did not load, kept apart from the errors of a change so
+  // that making or revoking a key does not hide it, with a way to retry.
+  const [listError, setListError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [scope, setScope] = useState<"read" | "write">("write");
   const [expiry, setExpiry] = useState("365");
@@ -70,15 +73,16 @@ export function ApiKeysPanel() {
         }
 
         if (!response.ok || !payload?.keys) {
-          setError(payload?.error ?? GENERIC_ERROR_MESSAGE);
+          setListError(payload?.error ?? GENERIC_ERROR_MESSAGE);
           return;
         }
 
         setNow(Math.floor(Date.now() / 1000));
         setKeys(payload.keys);
+        setListError(null);
       } catch {
         if (!cancelled) {
-          setError(GENERIC_ERROR_MESSAGE);
+          setListError(GENERIC_ERROR_MESSAGE);
         }
       }
     })();
@@ -311,6 +315,26 @@ export function ApiKeysPanel() {
         <p className="notice notice-danger max-w-2xl" role="alert">
           {error}
         </p>
+      ) : null}
+
+      {listError ? (
+        <div
+          className="notice notice-danger flex max-w-2xl flex-wrap items-center justify-between gap-2"
+          role="alert"
+        >
+          <span>
+            {keys === null
+              ? `The keys could not be loaded. ${listError}`
+              : `The list may be out of date. ${listError}`}
+          </span>
+          <button
+            className="btn-quiet"
+            onClick={() => setRevision((value) => value + 1)}
+            type="button"
+          >
+            Try again
+          </button>
+        </div>
       ) : null}
 
       {keys === null ? null : keys.length === 0 ? (
