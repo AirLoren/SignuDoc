@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { MAX_SIGNERS_CEILING } from "../types/domain.ts";
+import { MAX_SIGNERS_CEILING, signatureMeanings } from "../types/domain.ts";
 import {
   emailSchema,
   envelopeTitleSchema,
@@ -77,7 +77,16 @@ export const saveTemplateSchema = z.object({
 /** Starting an envelope from a template: who fills each role, in order. */
 export const useTemplateSchema = z.object({
   signers: z
-    .array(z.object({ email: emailSchema, name: nameSchema }))
+    .array(
+      z.object({
+        email: emailSchema,
+        name: nameSchema,
+        // What the signature means, for Part 11 envelopes. The web app
+        // asks for it later; the API can give it here, so the draft can be
+        // sent at once.
+        signatureMeaning: z.enum(signatureMeanings).optional(),
+      }),
+    )
     .min(1)
     .max(MAX_SIGNERS_CEILING)
     .superRefine((signers, ctx) => {
