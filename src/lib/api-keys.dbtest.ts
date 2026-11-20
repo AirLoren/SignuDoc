@@ -202,12 +202,14 @@ test("an administrator who loses the role loses their keys for good", async () =
 
 test("a key stops working while its owner's account is being closed", async () => {
   const admin = await createUser();
-  const { key } = await createApiKey(
+  const { key, summary } = await createApiKey(
     admin,
     { expiresInDays: null, name: "Closing", scope: "write" },
     database,
   );
   const now = Math.floor(Date.now() / 1000);
+
+  assert.equal(summary.ownerClosing, false);
 
   await database.query(
     `
@@ -219,6 +221,13 @@ test("a key stops working while its owner's account is being closed", async () =
   );
 
   assert.equal(await authenticateApiKey(key, database), null);
+  // Settings shows the key as stopped rather than active, so nobody is
+  // told a key works while every request with it is turned away.
+  const listed = (await listApiKeys(database)).find(
+    (row) => row.id === summary.id,
+  );
+  assert.equal(listed?.ownerClosing, true);
+  assert.equal(listed?.revokedAt, null);
 });
 
 test("only an administrator can create or revoke keys", async () => {
