@@ -15,6 +15,7 @@ import {
   bulkSendBatchMismatchMessage,
   bulkSendFromTemplate,
   bulkSendInvitationUnconfirmedMessage,
+  bulkSendSkippedRowMessage,
   BulkSendError,
   missingBulkSendBatchKeyMessage,
 } from "./bulk-send.ts";
@@ -625,6 +626,123 @@ test("Part 11 mode skips a row whose signer has no verified account", async () =
     assert.equal(result.summary.skipped, 1);
     assert.match(result.rows[0]?.reason ?? "", /needs an account/);
     assert.equal(await countEnvelopes(userId), before);
+  } finally {
+    if (previous.rowCount) {
+      await database.query(
+        `update app_settings set part11_mode = $1 where id`,
+        [previous.rows[0]!.part11_mode],
+      );
+    } else {
+      await database.query(`delete from app_settings where id`);
+    }
+  }
+});
+
+test("retrying a confirmed Part 11 batch keeps a skipped row skipped after the signer's account is fixed", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const readyEmail = `ann-${randomUUID()}@example.test`;
+  const skippedEmail = `ada-${randomUUID()}@example.test`;
+  const readyUserId = randomUUID();
+
+  createdUsers.push(readyUserId);
+  await database.query(
+    `
+      insert into public."user" (
+        id, name, email, role, "emailVerified", identity_verified_at, signing_locked_at
+      ) values ($1, 'Ann Ready', $2, 'user', true, 1, null)
+    `,
+    [readyUserId, readyEmail],
+  );
+
+  const before = await countEnvelopes(userId);
+  const previous = await database.query<{ part11_mode: boolean }>(
+    `select part11_mode from app_settings where id`,
+  );
+
+  await database.query(
+    `
+      insert into app_settings (id, signup_mode, created_at, updated_at, part11_mode)
+      values (true, 'open', 1, 1, true)
+      on conflict (id) do update set part11_mode = true
+    `,
+  );
+
+  try {
+    const body = confirmBody(
+      `name,email\nAnn Ready,${readyEmail}\nAda Later,${skippedEmail}\n`,
+      { signatureMeaning: "approval" },
+    );
+    const first = await bulkSendFromTemplate(userId, template.id, body, {
+      ...options(),
+      sender: senderFor(userId),
+    });
+    const afterFirst = await countEnvelopes(userId);
+
+    assert.equal(first.summary.sent, 1);
+    assert.equal(first.summary.skipped, 1);
+    assert.equal(first.summary.failed, 0);
+    assert.equal(first.rows[0]?.status, "sent");
+    assert.ok(first.rows[0]?.envelopeId);
+    assert.equal(first.rows[1]?.status, "skipped");
+    assert.equal(first.rows[1]?.envelopeId, null);
+    assert.match(first.rows[1]?.reason ?? "", /needs an account/);
+    assert.equal(afterFirst, before + 1);
+
+    const storedSkipped = await database.query<{
+      envelopeId: string | null;
+      reason: string | null;
+      status: string;
+    }>(
+      `
+        select r.envelope_id as "envelopeId", r.reason, r.status
+        from bulk_send_batches b
+        join bulk_send_batch_rows r on r.batch_id = b.id
+        where b.user_id = $1 and b.batch_key = $2 and r.row_number = 2
+      `,
+      [userId, body.batchKey],
+    );
+
+    assert.deepEqual(storedSkipped.rows, [
+      { envelopeId: null, reason: null, status: "skipped" },
+    ]);
+
+    const skippedUserId = randomUUID();
+
+    createdUsers.push(skippedUserId);
+    await database.query(
+      `
+        insert into public."user" (
+          id, name, email, role, "emailVerified", identity_verified_at, signing_locked_at
+        ) values ($1, 'Ada Later', $2, 'user', true, 1, null)
+      `,
+      [skippedUserId, skippedEmail],
+    );
+
+    const retry = await bulkSendFromTemplate(userId, template.id, body, {
+      ...options(),
+      sender: senderFor(userId),
+    });
+
+    assert.equal(retry.summary.sent, 1);
+    assert.equal(retry.summary.skipped, 1);
+    assert.equal(retry.summary.failed, 0);
+    assert.equal(retry.rows[0]?.status, "sent");
+    assert.equal(retry.rows[0]?.envelopeId, first.rows[0]?.envelopeId);
+    assert.equal(retry.rows[1]?.status, "skipped");
+    assert.equal(retry.rows[1]?.reason, bulkSendSkippedRowMessage);
+    assert.equal(retry.rows[1]?.envelopeId, null);
+    assert.equal(retry.rows[1]?.envelopePath, null);
+    assert.equal(await countEnvelopes(userId), afterFirst);
+    assert.equal(
+      (
+        await database.query(
+          `select 1 from signers where lower(email) = lower($1)`,
+          [skippedEmail],
+        )
+      ).rowCount,
+      0,
+    );
   } finally {
     if (previous.rowCount) {
       await database.query(

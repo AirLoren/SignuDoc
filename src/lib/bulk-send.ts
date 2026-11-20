@@ -64,6 +64,9 @@ export const bulkSendBatchBusyMessage =
 export const bulkSendInvitationUnconfirmedMessage =
   "This envelope was marked sent but the invitation was not recorded. Check your documents before sending this row again.";
 
+export const bulkSendSkippedRowMessage =
+  "This row was skipped when this batch was first confirmed. Preview the list again and send it as a new batch to include it.";
+
 export class BulkSendError extends Error {
   readonly statusCode: number;
 
@@ -109,7 +112,7 @@ type StoredBatch = {
 type StoredBatchRow = {
   envelopeId: string | null;
   reason: string | null;
-  status: "failed" | "processing" | "sent";
+  status: "failed" | "processing" | "sent" | "skipped";
 };
 
 type SendRowContext = {
@@ -127,7 +130,11 @@ type SendRowContext = {
   userId: string;
 };
 
-const TERMINAL_ROW_STATUSES = new Set(["failed", "sent"]);
+const TERMINAL_ROW_STATUSES = new Set<StoredBatchRow["status"]>([
+  "failed",
+  "sent",
+  "skipped",
+]);
 
 /**
  * How long a claim on a batch lasts without being refreshed. The request
@@ -452,6 +459,61 @@ async function saveBatchRow(
   }
 }
 
+/**
+ * Saves every row skipped by Part 11 checks that has not been recorded yet,
+ * guarded by the batch claim like saveBatchRow. Neither envelope_id nor
+ * reason is stored, so no personal details are kept on the batch.
+ */
+async function saveSkippedBatchRows(
+  batch: StoredBatch,
+  rowNumbers: readonly number[],
+  database: DbExecutor,
+): Promise<void> {
+  if (rowNumbers.length === 0) {
+    return;
+  }
+
+  const saved = await database.query(
+    `
+      WITH claim AS (
+        UPDATE bulk_send_batches
+        SET claimed_at = extract(epoch from now())::bigint
+        WHERE id = $1 AND claim_token = $3
+        RETURNING id
+      ),
+      inserted AS (
+        INSERT INTO bulk_send_batch_rows (
+          batch_id,
+          row_number,
+          status,
+          envelope_id,
+          reason
+        )
+        SELECT claim.id, skipped.row_number, 'skipped', NULL, NULL
+        FROM claim
+        CROSS JOIN unnest($2::int[]) AS skipped(row_number)
+        ON CONFLICT (batch_id, row_number) DO NOTHING
+      )
+      SELECT id FROM claim
+    `,
+    [batch.id, rowNumbers, batch.claimToken],
+  );
+
+  if (saved.rowCount === 0) {
+    throw new BulkSendClaimLostError();
+  }
+
+  for (const rowNumber of rowNumbers) {
+    if (!batch.rows.has(rowNumber)) {
+      batch.rows.set(rowNumber, {
+        envelopeId: null,
+        reason: null,
+        status: "skipped",
+      });
+    }
+  }
+}
+
 async function invitationWasRecorded(
   envelopeId: string,
   database: DbExecutor,
@@ -478,6 +540,15 @@ function restoreStoredRow(
 ): BulkSendRowResult {
   if (stored.status === "sent" && stored.envelopeId) {
     return sentRow(row, stored.envelopeId);
+  }
+
+  if (stored.status === "skipped") {
+    return withReason(
+      row,
+      row.status === "skipped" && row.reason
+        ? row.reason
+        : bulkSendSkippedRowMessage,
+    );
   }
 
   return {
@@ -724,16 +795,18 @@ export async function bulkSendFromTemplate(
   const copyRecipientEmails = (parsedInput.copyRecipients ?? []).map(
     (recipient) => recipient.email,
   );
-  let rows = validateBulkSendRows(parsedCsv.rows, copyRecipientEmails);
+  const validatedRows = validateBulkSendRows(
+    parsedCsv.rows,
+    copyRecipientEmails,
+  );
   const part11 = (await readStoredSettings(database))?.part11Mode ?? false;
-
-  if (part11) {
-    rows = await applyPart11Problems(
-      rows,
-      parsedInput.signatureMeaning,
-      database,
-    );
-  }
+  const rows = part11
+    ? await applyPart11Problems(
+        validatedRows,
+        parsedInput.signatureMeaning,
+        database,
+      )
+    : validatedRows;
 
   const resultFor = (nextRows: BulkSendRowResult[]): BulkSendResult => ({
     error: null,
@@ -763,6 +836,19 @@ export async function bulkSendFromTemplate(
   );
 
   try {
+    const part11SkippedRowNumbers = part11
+      ? rows
+          .filter(
+            (row, index) =>
+              validatedRows[index]?.status === "ok" &&
+              row.status === "skipped" &&
+              !batch.rows.has(row.rowNumber),
+          )
+          .map((row) => row.rowNumber)
+      : [];
+
+    await saveSkippedBatchRows(batch, part11SkippedRowNumbers, database);
+
     const sent: BulkSendRowResult[] = [];
 
     for (const row of rows) {
@@ -773,10 +859,13 @@ export async function bulkSendFromTemplate(
         continue;
       }
 
-      // A skipped row is worked out again from the same list on a retry,
-      // so it is not saved. That keeps a long list past the cap from
-      // costing a write per row, and keeps the reasons, which can name the
-      // person, out of the batch table.
+      // Rows skipped by Part 11 checks are saved above without their reason
+      // and restored by restoreStoredRow so a retry never sends them if an
+      // account changes in between. Rows that reach here were skipped by CSV
+      // validation (past the cap, bad email, duplicates), which the
+      // fingerprinted CSV works out the same way on every retry, so they are
+      // not saved: a long list past the cap does not cost a write per row,
+      // and reasons that can name the person stay out of the batch table.
       if (row.status !== "ok") {
         sent.push(row);
         continue;
