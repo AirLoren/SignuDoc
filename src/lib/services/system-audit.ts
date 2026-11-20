@@ -42,6 +42,13 @@ export const systemAuditEventTypes = [
   "two_factor_requirement_changed",
   "logo_changed",
   "email_domain_changed",
+  "api_key_created",
+  "api_key_revoked",
+  "webhook_endpoint_created",
+  "webhook_endpoint_changed",
+  "webhook_endpoint_deleted",
+  "embed_origin_added",
+  "embed_origin_removed",
   "envelope_deleted",
   "envelope_file_downloaded",
   "envelope_deletion_scheduled",
@@ -84,7 +91,7 @@ export type RecordSystemAuditEventInput = {
 };
 
 /** One key for the whole chain: writers take turns. */
-const SYSTEM_AUDIT_LOCK_ID = 746108325;
+export const SYSTEM_AUDIT_LOCK_ID = 746108325;
 
 type ChainedFields = Omit<SystemAuditEvent, never>;
 

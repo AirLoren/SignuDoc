@@ -8,6 +8,37 @@ release says when it does.
 
 ## [Unreleased]
 
+### API
+
+- API keys: an administrator can make keys under Settings, Organization, API
+  keys, for another app to use the SignuDoc API. A key is shown once, only
+  its hash is stored, and it acts as the administrator who made it. Keys can
+  be read-only, can expire, and stop working when revoked or when their
+  administrator stops being one. `GET /api/v1/me` checks a key works. See
+  [docs/api.md](docs/api.md).
+- API endpoints under `/api/v1`: create an envelope from a PDF with its
+  signers, copy recipients and fields, and send it, in one call (all or
+  nothing, safe to retry with an `Idempotency-Key`); send, void, remind and
+  delete; list and read envelopes and their audit trail; download the signed
+  PDF and the certificate; start an envelope from a template; upload PDFs
+  over 4 MB straight to Blob. `GET /api/v1/openapi.json` describes it all.
+- Webhooks: an administrator can add endpoints under Settings,
+  Organization, Webhooks, to be told when an envelope is sent, viewed,
+  signed, completed, declined, voided or expires. Deliveries are signed the
+  Standard Webhooks way, written in the same transaction as the change they
+  report, and retried for about two and a half days. Settings shows a
+  delivery log with "Send again", a test button and secret rotation;
+  `GET /api/v1/webhook-deliveries` lets an app catch up. A new daily cron
+  job, `/api/internal/webhooks`, sends retries that are due.
+- Embedded signing: an app can send an envelope with
+  `"delivery": "embedded"` and show the signing page in a frame on its own
+  site, from a link it asks for at
+  `POST /api/v1/envelopes/{id}/signers/{signerId}/embed-link`. No invitations
+  are emailed. Only sites an administrator lists under Settings,
+  Organization, Embedded signing can frame the page, and the frame tells
+  the app with `postMessage` when the signer signs or declines. The
+  certificate of completion says the signer was identified by the app.
+
 ### Settings
 
 - An administrator can write the disclosure signers read and agree to before
@@ -18,9 +49,12 @@ release says when it does.
   with each signer's agreement follows the text, and the audit trail keeps the
   words the signer saw. The hosted service keeps the built-in text.
 
-This release adds one database column, `app_settings.consent_disclosure`.
-The migration runs with the production build. Until it has, the setting reads
-as empty and signers see the built-in text.
+This changes the database: the new `api_keys`, `api_idempotency`,
+`webhook_endpoints`, `webhook_deliveries` and `embed_allowed_origins`
+tables and six new columns, plus the `app_settings.consent_disclosure`
+column, are added by the migrations that run on deploy. Until the last one
+has run, the consent setting reads as empty and signers see the built-in
+text.
 
 ## [0.5.2] - 2026-11-19
 
