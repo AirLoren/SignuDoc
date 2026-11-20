@@ -1662,7 +1662,7 @@ export async function verifySignerCheck(
     passed = checkAccessCode(parsed.code, state.accessCodeHash!);
 
     if (passed) {
-      await refundRateLimit(failuresKey, { database });
+      await refundRateLimit(failuresKey, attempt, { database });
     }
   } else {
     // Count the attempt and read the code in one statement, so parallel
