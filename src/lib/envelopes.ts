@@ -90,6 +90,7 @@ import {
 import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import { buildSigningInvitationEmail } from "./services/signing-invitation-email.ts";
 import {
+  findTypedValueTooLongForField,
   loadInstallSealer,
   storeEnvelopeCertificatePdf,
   storeRecipientEnvelopeCertificatePdf,
@@ -1582,6 +1583,40 @@ function describeChoiceProblem(
   );
 }
 
+/**
+ * A dropdown whose box is too small to show one of its choices at a
+ * readable size, in words for the sender, or null. A signer cannot shorten
+ * a choice, so a choice that does not fit is drawn as small as it takes,
+ * and on the signed document that can be too small to read. The sender
+ * fixes it before sending instead.
+ */
+async function findUnreadableDropdown(
+  signers: readonly PersistedSignerRecord[],
+  fields: readonly FieldRecord[],
+  pages: Parameters<typeof findTypedValueTooLongForField>[1],
+): Promise<string | null> {
+  for (const field of fields) {
+    if (field.type !== "dropdown" || !field.options?.length) {
+      continue;
+    }
+
+    const tooLong = await findTypedValueTooLongForField(
+      field.options.map((option) => ({ field, value: option })),
+      pages,
+    );
+
+    if (tooLong) {
+      const signerName =
+        signers.find((signer) => signer.id === field.signerId)?.name ??
+        "a signer";
+
+      return `A dropdown for ${signerName} on page ${String(tooLong.page)} is too small to show its choices at a readable size. Make the box bigger or the choices shorter.`;
+    }
+  }
+
+  return null;
+}
+
 /** The fields with each group of radio buttons counted once. */
 function withRadioGroupsOnce(fields: readonly FieldRecord[]): FieldRecord[] {
   const seenGroups = new Set<string>();
@@ -2666,6 +2701,16 @@ export async function sendDraftEnvelope(
 
   if (choiceProblem) {
     throw new EnvelopeMutationError(choiceProblem, 400);
+  }
+
+  const unreadableDropdown = await findUnreadableDropdown(
+    signers,
+    fields,
+    await listEnvelopePagesForEnvelopeId(envelopeId, database),
+  );
+
+  if (unreadableDropdown) {
+    throw new EnvelopeMutationError(unreadableDropdown, 400);
   }
 
   // In Part 11 mode each signer signs with their own verified account, and

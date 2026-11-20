@@ -40,7 +40,10 @@ async function createEnvelopeWithAccessCode(code: string) {
   const envelopeId = randomUUID();
   const signerId = randomUUID();
   const now = Math.floor(Date.now() / 1000);
-  const link = await issueSigningLink({ expiresInSeconds: 3600, issuedAt: now });
+  const link = await issueSigningLink({
+    expiresInSeconds: 3600,
+    issuedAt: now,
+  });
 
   createdUsers.push(userId);
   await database.query(
