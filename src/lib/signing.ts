@@ -805,22 +805,29 @@ async function lockSignerForPresentedToken(
     tokenHash: string;
   },
 ): Promise<void> {
-  const locked = await queryOne<{ id: string }>(
+  const locked = await queryOne<{ expiresAt: number | null }>(
     tx,
     `
-      SELECT id
+      SELECT signing_token_expires_at AS "expiresAt"
       FROM signers
       WHERE id = $1
         AND envelope_id = $2
         AND status = 'notified'
         AND signing_token_hash = $3
-        AND (signing_token_expires_at IS NULL OR signing_token_expires_at >= $4)
       FOR NO KEY UPDATE
     `,
-    [signerId, envelopeId, tokenHash, Math.floor(Date.now() / 1000)],
+    [signerId, envelopeId, tokenHash],
   );
 
-  if (!locked) {
+  // The expiry is checked once the lock is held, on the row as it is then
+  // and against the time then. A time taken before the query would be as
+  // old as the wait for the lock, and could let through a link that
+  // expired during it, such as one whose site was removed meanwhile.
+  if (
+    !locked ||
+    (locked.expiresAt !== null &&
+      locked.expiresAt < Math.floor(Date.now() / 1000))
+  ) {
     throw new SigningMutationError(
       "This signing link is no longer active.",
       409,
