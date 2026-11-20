@@ -9,7 +9,6 @@ import {
   toOrganizationSettingsView,
   updateOrganizationSettings,
 } from "@/lib/organization-settings";
-import { getDisclosureVersion } from "@/lib/electronic-records-disclosure";
 import { logRouteError } from "@/lib/security/logging";
 import {
   applyRateLimit,
@@ -79,9 +78,6 @@ export async function PUT(request: Request) {
                 ? {
                     consentDisclosureNotice: {
                       agreed: true,
-                      disclosureVersion: getDisclosureVersion(
-                        after.consentDisclosure,
-                      ),
                       noticeVersion: CUSTOM_DISCLOSURE_NOTICE_VERSION,
                     },
                   }

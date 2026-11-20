@@ -1759,16 +1759,25 @@ async function readSignerDisclosure(
     resolveSettings(await readStoredSettings(database)).consentDisclosure,
   );
 
+  const sections = buildDisclosureSections(
+    {
+      contactAddress: branding.supportAddress ?? context.sender.email,
+      senderName: normalizeSenderName(context.sender),
+    },
+    customDisclosure,
+  );
+
   return {
     customDisclosure,
-    sections: buildDisclosureSections(
-      {
-        contactAddress: branding.supportAddress ?? context.sender.email,
-        senderName: normalizeSenderName(context.sender),
-      },
-      customDisclosure,
-    ),
-    version: getDisclosureVersion(customDisclosure),
+    sections,
+    // A custom disclosure is named by the words as this signer reads them,
+    // filled in, so a change to the support address or the sender's name
+    // after the page loaded is refused too, and the record holds the words
+    // that were shown.
+    version:
+      customDisclosure === null
+        ? getDisclosureVersion(null)
+        : getDisclosureVersion(disclosureSectionsAsText(sections)),
   };
 }
 

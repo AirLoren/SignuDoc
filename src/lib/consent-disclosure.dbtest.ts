@@ -128,7 +128,9 @@ test("an administrator's own disclosure is shown, agreed to and kept, filled in"
   const { envelopeId, token } = await sentEnvelope();
   const payload = await getSigningPayloadForToken(token, { database });
 
-  assert.equal(payload.disclosure.version, getDisclosureVersion(custom));
+  const shown = "Signing with Dollar $$ Consulting\nWe send this online.";
+
+  assert.equal(payload.disclosure.version, getDisclosureVersion(shown));
   assert.deepEqual(payload.disclosure.sections, [
     {
       heading: "Signing with Dollar $$ Consulting",
@@ -152,7 +154,7 @@ test("an administrator's own disclosure is shown, agreed to and kept, filled in"
   assert.equal(consented.rows.length, 1);
   assert.equal(
     consented.rows[0]?.metadata.disclosureVersion,
-    getDisclosureVersion(custom),
+    getDisclosureVersion(shown),
   );
   assert.equal(
     consented.rows[0]?.metadata.disclosureText,
@@ -203,6 +205,41 @@ test("a change to the disclosure shows at once, and the older version is refused
   );
 
   assert.equal(consented.rows.length, 1);
+});
+
+test("a change to the support address after the page loaded is refused too", async () => {
+  await setDisclosure("Write to {contact}.");
+
+  const { token } = await sentEnvelope();
+  const before = await getSigningPayloadForToken(token, { database });
+  const supportBefore = await database.query<{
+    support_address: string | null;
+  }>("select support_address from public.app_settings where id");
+
+  try {
+    await database.query(
+      "update public.app_settings set support_address = 'new-help@example.test' where id",
+    );
+    invalidateSettingsCache();
+
+    const afterChange = await getSigningPayloadForToken(token, { database });
+
+    assert.notEqual(afterChange.disclosure.version, before.disclosure.version);
+    await assert.rejects(
+      recordSignerConsent(
+        token,
+        { disclosureVersion: before.disclosure.version },
+        { database },
+      ),
+      SigningMutationError,
+    );
+  } finally {
+    await database.query(
+      "update public.app_settings set support_address = $1 where id",
+      [supportBefore.rows[0]?.support_address ?? null],
+    );
+    invalidateSettingsCache();
+  }
 });
 
 test("with no disclosure of its own the built-in one is used and no text is kept", async () => {
