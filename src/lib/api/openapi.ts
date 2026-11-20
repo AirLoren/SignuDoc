@@ -252,6 +252,9 @@ export function buildOpenApiDocument(
           properties: {
             groupId: {
               description: "Radio buttons in one group.",
+              maxLength: 64,
+              minLength: 1,
+              pattern: "\\S",
               type: "string",
             },
             height: { exclusiveMinimum: 0, maximum: 1, type: "number" },
@@ -438,7 +441,11 @@ export function buildOpenApiDocument(
                 type: "integer",
               },
             },
-            { in: "query", name: "cursor", schema: { type: "string" } },
+            {
+              in: "query",
+              name: "cursor",
+              schema: { maxLength: 200, type: "string" },
+            },
           ],
           responses: {
             "200": {

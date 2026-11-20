@@ -158,36 +158,50 @@ test(
       letRecoveryFinish = resolve;
     });
     let retry: Promise<Response> | undefined;
+    let first: Response;
 
-    const first = await route.runIdempotently(
-      context,
-      "POST /api/v1/envelopes",
-      body,
-      async (remember) => {
-        await remember("envelope-1");
+    try {
+      first = await route.runIdempotently(
+        context,
+        "POST /api/v1/envelopes",
+        body,
+        async (remember) => {
+          await remember("envelope-1");
 
-        // A retry comes in now. The envelope is noted and no response is
-        // kept yet, so it answers from the envelope, and finishes only after
-        // this request has kept its own response.
-        retry = route.runIdempotently(
-          context,
-          "POST /api/v1/envelopes",
-          body,
-          () => Promise.reject(new Error("A retry must not make an envelope.")),
-          async () => {
-            recoveryStarted();
-            await recoveryMayFinish;
+          // A retry comes in now. The envelope is noted and no response is
+          // kept yet, so it answers from the envelope, and finishes only
+          // after this request has kept its own response.
+          retry = route.runIdempotently(
+            context,
+            "POST /api/v1/envelopes",
+            body,
+            () =>
+              Promise.reject(new Error("A retry must not make an envelope.")),
+            async () => {
+              recoveryStarted();
+              await recoveryMayFinish;
 
-            return { body: { from: "retry" }, status: 201 };
-          },
-        );
-        await recovering;
+              return { body: { from: "retry" }, status: 201 };
+            },
+          );
 
-        return { body: { from: "first" }, status: 201 };
-      },
-    );
+          // A retry that settles without answering from the envelope fails
+          // the test now, with its own error, instead of at the timeout.
+          const settledFirst = retry.then(() => {
+            throw new Error(
+              "The retry finished without answering from the envelope.",
+            );
+          });
 
-    letRecoveryFinish();
+          settledFirst.catch(() => undefined);
+          await Promise.race([recovering, settledFirst]);
+
+          return { body: { from: "first" }, status: 201 };
+        },
+      );
+    } finally {
+      letRecoveryFinish();
+    }
 
     const second = await retry!;
 
@@ -239,6 +253,48 @@ test("a first request that finishes after a retry answered for it gives the answ
   assert.equal(first.status, 201);
   assert.equal(first.headers.get("idempotent-replayed"), null);
   assert.deepEqual(await first.json(), { from: "retry" });
+});
+
+test("a retry that finds the envelope gone does not replace what the first request answers", async () => {
+  const key = `order-${randomUUID()}`;
+  const context = await createContext(key);
+  const body = '{"title":"Lease"}';
+
+  const first = await route.runIdempotently(
+    context,
+    "POST /api/v1/envelopes",
+    body,
+    async (remember) => {
+      await remember("envelope-3");
+
+      // Someone deleted the envelope just now, so the retry finds nothing.
+      const retried = await route.runIdempotently(
+        context,
+        "POST /api/v1/envelopes",
+        body,
+        () => Promise.reject(new Error("A retry must not make an envelope.")),
+        async () => ({ body: { error: "gone" }, status: 404 }),
+      );
+
+      assert.equal(retried.status, 404);
+
+      return { body: { from: "first" }, status: 201 };
+    },
+  );
+
+  assert.equal(first.status, 201);
+  assert.deepEqual(await first.json(), { from: "first" });
+  assert.deepEqual(
+    await claimIdempotencyKey(
+      {
+        apiKeyId: context.actor.apiKeyId,
+        key,
+        requestHash: hashRequest("POST /api/v1/envelopes", body),
+      },
+      db(),
+    ),
+    { kind: "replay", response: { from: "first" }, statusCode: 201 },
+  );
 });
 
 test("a request that fails before making anything lets its key go", async () => {
