@@ -44,6 +44,8 @@ export async function handleWebhookAdmin(
     const sessionResult = await requireAdminSession(request);
 
     if (sessionResult instanceof Response) {
+      // A refusal is not cached either.
+      sessionResult.headers.set("cache-control", noStore["cache-control"]);
       return sessionResult;
     }
 

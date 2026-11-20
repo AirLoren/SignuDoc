@@ -27,11 +27,17 @@ registerHooks({
   },
 });
 
-let database: pg.Pool;
+let database: pg.Pool | undefined;
 let replaced: pg.Pool | null = null;
 let route: typeof RouteModule;
 const createdUsers: string[] = [];
 const createdKeys: string[] = [];
+
+/** The test database, once `before` has opened it. */
+function db(): pg.Pool {
+  assert.ok(database, "The test database did not open.");
+  return database;
+}
 
 before(async () => {
   database = await openTestDatabase();
@@ -40,16 +46,27 @@ before(async () => {
 });
 
 after(async () => {
-  // api_idempotency has no foreign key to the key, so its rows go first.
-  await database.query(
-    `delete from public.api_idempotency where api_key_id = any($1)`,
-    [createdKeys],
-  );
-  await database.query(`delete from public."user" where id = any($1)`, [
-    createdUsers,
-  ]);
-  replaceDbPoolForTests(replaced ?? database);
-  await database.end();
+  // Nothing to clean up if the database never opened, and its own error
+  // is the one that matters.
+  if (!database) {
+    return;
+  }
+
+  const pool = database;
+
+  try {
+    // api_idempotency has no foreign key to the key, so its rows go first.
+    await pool.query(
+      `delete from public.api_idempotency where api_key_id = any($1)`,
+      [createdKeys],
+    );
+    await pool.query(`delete from public."user" where id = any($1)`, [
+      createdUsers,
+    ]);
+  } finally {
+    replaceDbPoolForTests(replaced ?? pool);
+    await pool.end();
+  }
 });
 
 async function createContext(idempotencyKey: string) {
@@ -57,7 +74,7 @@ async function createContext(idempotencyKey: string) {
   const email = `${id}@example.test`;
 
   createdUsers.push(id);
-  await database.query(
+  await db().query(
     `
       insert into public."user" (id, name, email, role, "emailVerified")
       values ($1, $2, $3, 'admin', true)
@@ -68,7 +85,7 @@ async function createContext(idempotencyKey: string) {
   const { summary } = await createApiKey(
     { email, userId: id },
     { expiresInDays: null, name: "Route test", scope: "write" },
-    database,
+    db(),
   );
 
   createdKeys.push(summary.id);
@@ -117,10 +134,111 @@ test("a request whose envelope could not be noted keeps its key, so a retry cann
         key,
         requestHash: hashRequest("POST /api/v1/envelopes", body),
       },
-      database,
+      db(),
     ),
     { kind: "in_progress" },
   );
+});
+
+test(
+  "a retry answering from the envelope does not replace the response the first request kept",
+  {
+    timeout: 10_000,
+  },
+  async () => {
+    const key = `order-${randomUUID()}`;
+    const context = await createContext(key);
+    const body = '{"title":"Lease"}';
+    let recoveryStarted!: () => void;
+    const recovering = new Promise<void>((resolve) => {
+      recoveryStarted = resolve;
+    });
+    let letRecoveryFinish!: () => void;
+    const recoveryMayFinish = new Promise<void>((resolve) => {
+      letRecoveryFinish = resolve;
+    });
+    let retry: Promise<Response> | undefined;
+
+    const first = await route.runIdempotently(
+      context,
+      "POST /api/v1/envelopes",
+      body,
+      async (remember) => {
+        await remember("envelope-1");
+
+        // A retry comes in now. The envelope is noted and no response is
+        // kept yet, so it answers from the envelope, and finishes only after
+        // this request has kept its own response.
+        retry = route.runIdempotently(
+          context,
+          "POST /api/v1/envelopes",
+          body,
+          () => Promise.reject(new Error("A retry must not make an envelope.")),
+          async () => {
+            recoveryStarted();
+            await recoveryMayFinish;
+
+            return { body: { from: "retry" }, status: 201 };
+          },
+        );
+        await recovering;
+
+        return { body: { from: "first" }, status: 201 };
+      },
+    );
+
+    letRecoveryFinish();
+
+    const second = await retry!;
+
+    assert.equal(first.status, 201);
+    assert.deepEqual(await first.json(), { from: "first" });
+    assert.equal(second.status, 201);
+    assert.equal(second.headers.get("idempotent-replayed"), "true");
+    assert.deepEqual(await second.json(), { from: "first" });
+    assert.deepEqual(
+      await claimIdempotencyKey(
+        {
+          apiKeyId: context.actor.apiKeyId,
+          key,
+          requestHash: hashRequest("POST /api/v1/envelopes", body),
+        },
+        db(),
+      ),
+      { kind: "replay", response: { from: "first" }, statusCode: 201 },
+    );
+  },
+);
+
+test("a first request that finishes after a retry answered for it gives the answer the retry kept", async () => {
+  const key = `order-${randomUUID()}`;
+  const context = await createContext(key);
+  const body = '{"title":"Lease"}';
+
+  const first = await route.runIdempotently(
+    context,
+    "POST /api/v1/envelopes",
+    body,
+    async (remember) => {
+      await remember("envelope-2");
+
+      const retried = await route.runIdempotently(
+        context,
+        "POST /api/v1/envelopes",
+        body,
+        () => Promise.reject(new Error("A retry must not make an envelope.")),
+        async () => ({ body: { from: "retry" }, status: 201 }),
+      );
+
+      assert.deepEqual(await retried.json(), { from: "retry" });
+
+      return { body: { from: "first" }, status: 201 };
+    },
+  );
+
+  assert.equal(first.status, 201);
+  assert.equal(first.headers.get("idempotent-replayed"), null);
+  assert.deepEqual(await first.json(), { from: "retry" });
 });
 
 test("a request that fails before making anything lets its key go", async () => {
@@ -140,7 +258,7 @@ test("a request that fails before making anything lets its key go", async () => 
       key,
       requestHash: hashRequest("POST /api/v1/envelopes", body),
     },
-    database,
+    db(),
   );
 
   assert.equal(claim.kind, "new");

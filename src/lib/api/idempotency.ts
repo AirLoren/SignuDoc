@@ -126,16 +126,27 @@ export type IdempotencyReservation = {
   reservedAt: number;
 };
 
-/** Keeps the response for retries. */
+/** A response kept for a key, which retries get again. */
+export type KeptResponse = { response: unknown; statusCode: number };
+
+/**
+ * Keeps the response for retries, unless one is kept already. A retry can
+ * answer from the envelope while the first request is still finishing, so
+ * two requests may finish one reservation: the first to do so is kept, and
+ * the other gets that response back here to answer with instead, so every
+ * answer under the key is the same. Null when this response was kept, or
+ * the reservation is gone.
+ */
 export async function completeIdempotencyKey(
-  input: IdempotencyReservation & { response: unknown; statusCode: number },
+  input: IdempotencyReservation & KeptResponse,
   database: DbExecutor = getDb(),
-) {
-  await database.query(
+): Promise<KeptResponse | null> {
+  const completed = await database.query(
     `
       UPDATE api_idempotency
       SET status_code = $4, response = $5
       WHERE api_key_id = $1 AND idempotency_key = $2 AND created_at = $3
+        AND status_code IS NULL
     `,
     [
       input.apiKeyId,
@@ -144,6 +155,23 @@ export async function completeIdempotencyKey(
       input.statusCode,
       JSON.stringify(input.response),
     ],
+  );
+
+  if ((completed.rowCount ?? 0) === 1) {
+    return null;
+  }
+
+  // Under READ COMMITTED a completion that waited on the other one sees it
+  // committed, so it is there to read.
+  return queryOne<KeptResponse>(
+    database,
+    `
+      SELECT status_code AS "statusCode", response
+      FROM api_idempotency
+      WHERE api_key_id = $1 AND idempotency_key = $2 AND created_at = $3
+        AND status_code IS NOT NULL
+    `,
+    [input.apiKeyId, input.key, input.reservedAt],
   );
 }
 

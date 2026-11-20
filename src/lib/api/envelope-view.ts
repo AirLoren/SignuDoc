@@ -462,7 +462,9 @@ export async function listApiEnvelopeEvents(
         created_at AS "createdAt"
       FROM audit_events
       WHERE envelope_id = $1
-      ORDER BY sequence ASC
+      -- Events from before the audit chain have no sequence and come
+      -- first, in the same order as the envelope's audit trail.
+      ORDER BY sequence ASC NULLS FIRST, created_at ASC, id ASC
     `,
     [envelopeId],
   );
