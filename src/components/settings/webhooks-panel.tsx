@@ -80,19 +80,25 @@ function deliveryTone(status: WebhookDeliverySummary["status"]) {
 /**
  * One endpoint's recent deliveries. `refreshKey` changes when the panel
  * changes an endpoint: the log reads itself again but stays mounted, so a
- * "Send again" under way and its error are not lost.
+ * "Send again" under way and its error are not lost. While the endpoint is
+ * off (`paused`) nothing is sent, so Send again waits for it to be on.
  */
 function DeliveryLog({
   endpointId,
+  paused,
   refreshKey,
 }: {
   endpointId: string;
+  paused: boolean;
   refreshKey: number;
 }) {
   const [deliveries, setDeliveries] = useState<WebhookDeliverySummary[] | null>(
     null,
   );
-  const [error, setError] = useState<string | null>(null);
+  // A failed read of the log goes once the log is read; a failed "Send
+  // again" stays until the next one or Refresh.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [pendingId, setPendingId] = useState<string | null>(null);
 
@@ -108,13 +114,14 @@ function DeliveryLog({
         if (!cancelled) {
           if (ok && payload?.deliveries) {
             setDeliveries(payload.deliveries);
+            setLoadError(null);
           } else {
-            setError(payload?.error ?? GENERIC_ERROR_MESSAGE);
+            setLoadError(payload?.error ?? GENERIC_ERROR_MESSAGE);
           }
         }
       } catch {
         if (!cancelled) {
-          setError(GENERIC_ERROR_MESSAGE);
+          setLoadError(GENERIC_ERROR_MESSAGE);
         }
       }
     })();
@@ -125,13 +132,13 @@ function DeliveryLog({
   }, [endpointId, refreshKey, revision]);
 
   function refresh() {
-    setError(null);
+    setActionError(null);
     setRevision((value) => value + 1);
   }
 
   async function resend(id: string) {
     setPendingId(id);
-    setError(null);
+    setActionError(null);
 
     try {
       const { ok, payload } = await call(
@@ -140,7 +147,7 @@ function DeliveryLog({
       );
 
       if (!ok) {
-        setError(payload?.error ?? GENERIC_ERROR_MESSAGE);
+        setActionError(payload?.error ?? GENERIC_ERROR_MESSAGE);
         return;
       }
 
@@ -148,13 +155,13 @@ function DeliveryLog({
       await new Promise((resolve) => setTimeout(resolve, 1500));
       setRevision((value) => value + 1);
     } catch {
-      setError(GENERIC_ERROR_MESSAGE);
+      setActionError(GENERIC_ERROR_MESSAGE);
     } finally {
       setPendingId(null);
     }
   }
 
-  // An error shows above the log rather than in its place, and Refresh is
+  // Errors show above the log rather than in its place, and Refresh is
   // always there, so a failed refresh or "Send again" never hides what was
   // already listed, and an empty or failed log can be read again.
   return (
@@ -164,19 +171,31 @@ function DeliveryLog({
           Refresh
         </button>
       </div>
-      {error ? (
+      {paused ? (
+        <p className="text-sm text-(--secondary)">
+          This endpoint is off, so nothing is sent to it. Deliveries that are
+          waiting go out once it is turned on.
+        </p>
+      ) : null}
+      {actionError ? (
         <p className="notice notice-danger" role="alert">
-          {error}
+          {actionError}
+        </p>
+      ) : null}
+      {loadError ? (
+        <p className="notice notice-danger" role="alert">
+          {loadError}
         </p>
       ) : null}
       {deliveries === null ? (
-        error ? null : (
+        loadError ? null : (
           <p className="text-sm text-(--secondary)">Loading...</p>
         )
       ) : deliveries.length === 0 ? (
         <p className="text-sm text-(--secondary)">Nothing sent yet.</p>
       ) : (
         <DeliveryList
+          canResend={!paused}
           deliveries={deliveries}
           onResend={(id) => void resend(id)}
           pendingId={pendingId}
@@ -187,10 +206,12 @@ function DeliveryLog({
 }
 
 function DeliveryList({
+  canResend,
   deliveries,
   onResend,
   pendingId,
 }: {
+  canResend: boolean;
   deliveries: WebhookDeliverySummary[];
   onResend: (id: string) => void;
   pendingId: string | null;
@@ -236,7 +257,7 @@ function DeliveryList({
             <div>
               <button
                 className="btn-quiet"
-                disabled={pendingId !== null}
+                disabled={!canResend || pendingId !== null}
                 onClick={() => onResend(delivery.id)}
                 type="button"
               >
@@ -252,6 +273,9 @@ function DeliveryList({
 
 export function WebhooksPanel() {
   const [endpoints, setEndpoints] = useState<WebhookEndpoint[] | null>(null);
+  // A failed read of the list, with its own Try again, kept apart from the
+  // error of an action so neither hides the other.
+  const [listError, setListError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [url, setUrl] = useState("");
@@ -285,15 +309,16 @@ export function WebhooksPanel() {
         }
 
         if (!ok || !payload?.endpoints) {
-          setError(payload?.error ?? GENERIC_ERROR_MESSAGE);
+          setListError(payload?.error ?? GENERIC_ERROR_MESSAGE);
           return;
         }
 
         setNow(Math.floor(Date.now() / 1000));
         setEndpoints(payload.endpoints);
+        setListError(null);
       } catch {
         if (!cancelled) {
-          setError(GENERIC_ERROR_MESSAGE);
+          setListError(GENERIC_ERROR_MESSAGE);
         }
       }
     })();
@@ -329,6 +354,30 @@ export function WebhooksPanel() {
     setCopied(false);
   }
 
+  // A change shows at once from its own answer, then the list is read
+  // again. So if that read fails, a removed endpoint is not left on screen
+  // with buttons for a row that is gone.
+  function putEndpoint(changed: WebhookEndpoint) {
+    setEndpoints((current) =>
+      current === null
+        ? current
+        : current.some((endpoint) => endpoint.id === changed.id)
+          ? current.map((endpoint) =>
+              endpoint.id === changed.id ? changed : endpoint,
+            )
+          : [...current, changed],
+    );
+  }
+
+  function dropEndpoint(id: string) {
+    setEndpoints((current) =>
+      current === null
+        ? current
+        : current.filter((endpoint) => endpoint.id !== id),
+    );
+    setOpenLogId((current) => (current === id ? null : current));
+  }
+
   async function createEndpoint() {
     // A secret on screen stays until Done, so it is never lost to a second
     // endpoint, made or not. Nor while a new secret is on its way: both
@@ -353,6 +402,7 @@ export function WebhooksPanel() {
       }
 
       showSecret(payload.secret, payload.endpoint.url);
+      putEndpoint(payload.endpoint);
       setUrl("");
       setDescription("");
       setRevision((value) => value + 1);
@@ -399,6 +449,12 @@ export function WebhooksPanel() {
 
       if (action === "rotate" && payload?.secret) {
         showSecret(payload.secret, endpoint.url);
+      }
+
+      if (action === "delete") {
+        dropEndpoint(endpoint.id);
+      } else if (payload?.endpoint) {
+        putEndpoint(payload.endpoint);
       }
 
       if (action === "test" && payload?.delivery) {
@@ -583,6 +639,24 @@ export function WebhooksPanel() {
         </p>
       ) : null}
 
+      {listError ? (
+        <div className="notice notice-danger grid max-w-2xl gap-2" role="alert">
+          <p>{listError}</p>
+          <div>
+            <button
+              className="btn-quiet"
+              onClick={() => {
+                setListError(null);
+                setRevision((value) => value + 1);
+              }}
+              type="button"
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {endpoints === null ? null : endpoints.length === 0 ? (
         <p className="text-sm text-(--secondary)">No endpoints yet.</p>
       ) : (
@@ -698,7 +772,11 @@ export function WebhooksPanel() {
                 )}
               </div>
               {openLogId === endpoint.id ? (
-                <DeliveryLog endpointId={endpoint.id} refreshKey={revision} />
+                <DeliveryLog
+                  endpointId={endpoint.id}
+                  paused={!endpoint.enabled}
+                  refreshKey={revision}
+                />
               ) : null}
             </li>
           ))}
