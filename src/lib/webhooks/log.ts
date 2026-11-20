@@ -62,6 +62,7 @@ export async function listEndpointDeliveries(
 
 /**
  * Puts a delivery back in line to be sent now, with a full set of tries.
+ * What its last try got is cleared, so it no longer reads as delivered.
  * False when there is no such delivery or it is being sent this moment.
  */
 export async function resendWebhookDelivery(
@@ -73,7 +74,8 @@ export async function resendWebhookDelivery(
     `
       UPDATE webhook_deliveries
       SET status = 'pending', attempts = 0, next_attempt_at = $2,
-          locked_until = NULL, updated_at = $2
+          locked_until = NULL, delivered_at = NULL, last_status_code = NULL,
+          last_error = NULL, updated_at = $2
       WHERE id = $1 AND (locked_until IS NULL OR locked_until <= $2)
     `,
     [id, now],
@@ -188,7 +190,11 @@ export async function listApiWebhookDeliveries(
   };
 }
 
-/** For the daily cleanup. */
+/**
+ * For the daily cleanup. A delivered one goes 30 days after it was
+ * delivered, any other 90 days after it last changed, so one put back in
+ * line with "Send again" keeps its retries however old its event is.
+ */
 export async function deleteOldWebhookDeliveries(
   database: DbExecutor = getDb(),
   now: number = Math.floor(Date.now() / 1000),
@@ -196,8 +202,9 @@ export async function deleteOldWebhookDeliveries(
   const result = await database.query(
     `
       DELETE FROM webhook_deliveries
-      WHERE (status = 'delivered' AND created_at <= $1)
-         OR (status <> 'delivered' AND created_at <= $2)
+      WHERE (status = 'delivered'
+             AND COALESCE(delivered_at, created_at) <= $1)
+         OR (status <> 'delivered' AND updated_at <= $2)
     `,
     [now - DELIVERED_RETENTION_SECONDS, now - FAILED_RETENTION_SECONDS],
   );

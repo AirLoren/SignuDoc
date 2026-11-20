@@ -113,6 +113,11 @@ function DeliveryLog({ endpointId }: { endpointId: string }) {
     };
   }, [endpointId, revision]);
 
+  function refresh() {
+    setError(null);
+    setRevision((value) => value + 1);
+  }
+
   async function resend(id: string) {
     setPendingId(id);
     setError(null);
@@ -138,87 +143,99 @@ function DeliveryLog({ endpointId }: { endpointId: string }) {
     }
   }
 
-  if (error) {
-    return (
-      <p className="notice notice-danger" role="alert">
-        {error}
-      </p>
-    );
-  }
-
-  if (deliveries === null) {
-    return <p className="text-sm text-(--secondary)">Loading...</p>;
-  }
-
-  if (deliveries.length === 0) {
-    return <p className="text-sm text-(--secondary)">Nothing sent yet.</p>;
-  }
-
+  // An error shows above the log rather than in its place, and Refresh is
+  // always there, so a failed refresh or "Send again" never hides what was
+  // already listed, and an empty or failed log can be read again.
   return (
     <div className="grid gap-2">
       <div className="flex justify-end">
-        <button
-          className="btn-quiet"
-          onClick={() => setRevision((value) => value + 1)}
-          type="button"
-        >
+        <button className="btn-quiet" onClick={refresh} type="button">
           Refresh
         </button>
       </div>
-      <ul aria-label="Recent deliveries" className="grid gap-2">
-        {deliveries.map((delivery) => (
-          <li
-            className="grid gap-1 rounded-lg border border-(--border) px-3 py-2 text-sm"
-            key={delivery.id}
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-(--fg)">
-                {delivery.eventType}
-              </span>
-              <span className={`pill ${deliveryTone(delivery.status)}`}>
-                {delivery.status === "pending" && delivery.attempts > 0
-                  ? "Retrying"
-                  : delivery.status === "pending"
-                    ? "Waiting"
-                    : delivery.status === "delivered"
-                      ? "Delivered"
-                      : "Failed"}
-              </span>
-              <span className="text-(--secondary)">
-                {formatTime(delivery.createdAt)}
-                {delivery.attempts > 1
-                  ? `, ${String(delivery.attempts)} tries`
-                  : ""}
-                {delivery.lastStatusCode !== null
-                  ? `, answered ${String(delivery.lastStatusCode)}`
-                  : ""}
-              </span>
-            </div>
-            {delivery.status !== "delivered" && delivery.lastError ? (
-              <p className="break-all text-(--secondary)">
-                {delivery.lastError}
-                {delivery.status === "pending" && delivery.nextAttemptAt
-                  ? ` Next try around ${formatTime(delivery.nextAttemptAt) ?? ""}.`
-                  : ""}
-              </p>
-            ) : null}
-            {delivery.status !== "pending" &&
-            delivery.eventType !== "webhook.test" ? (
-              <div>
-                <button
-                  className="btn-quiet"
-                  disabled={pendingId !== null}
-                  onClick={() => void resend(delivery.id)}
-                  type="button"
-                >
-                  {pendingId === delivery.id ? "Sending..." : "Send again"}
-                </button>
-              </div>
-            ) : null}
-          </li>
-        ))}
-      </ul>
+      {error ? (
+        <p className="notice notice-danger" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {deliveries === null ? (
+        error ? null : (
+          <p className="text-sm text-(--secondary)">Loading...</p>
+        )
+      ) : deliveries.length === 0 ? (
+        <p className="text-sm text-(--secondary)">Nothing sent yet.</p>
+      ) : (
+        <DeliveryList
+          deliveries={deliveries}
+          onResend={(id) => void resend(id)}
+          pendingId={pendingId}
+        />
+      )}
     </div>
+  );
+}
+
+function DeliveryList({
+  deliveries,
+  onResend,
+  pendingId,
+}: {
+  deliveries: WebhookDeliverySummary[];
+  onResend: (id: string) => void;
+  pendingId: string | null;
+}) {
+  return (
+    <ul aria-label="Recent deliveries" className="grid gap-2">
+      {deliveries.map((delivery) => (
+        <li
+          className="grid gap-1 rounded-lg border border-(--border) px-3 py-2 text-sm"
+          key={delivery.id}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-(--fg)">{delivery.eventType}</span>
+            <span className={`pill ${deliveryTone(delivery.status)}`}>
+              {delivery.status === "pending" && delivery.attempts > 0
+                ? "Retrying"
+                : delivery.status === "pending"
+                  ? "Waiting"
+                  : delivery.status === "delivered"
+                    ? "Delivered"
+                    : "Failed"}
+            </span>
+            <span className="text-(--secondary)">
+              {formatTime(delivery.createdAt)}
+              {delivery.attempts > 1
+                ? `, ${String(delivery.attempts)} tries`
+                : ""}
+              {delivery.lastStatusCode !== null
+                ? `, answered ${String(delivery.lastStatusCode)}`
+                : ""}
+            </span>
+          </div>
+          {delivery.status !== "delivered" && delivery.lastError ? (
+            <p className="break-all text-(--secondary)">
+              {delivery.lastError}
+              {delivery.status === "pending" && delivery.nextAttemptAt
+                ? ` Next try around ${formatTime(delivery.nextAttemptAt) ?? ""}.`
+                : ""}
+            </p>
+          ) : null}
+          {delivery.status !== "pending" &&
+          delivery.eventType !== "webhook.test" ? (
+            <div>
+              <button
+                className="btn-quiet"
+                disabled={pendingId !== null}
+                onClick={() => onResend(delivery.id)}
+                type="button"
+              >
+                {pendingId === delivery.id ? "Sending..." : "Send again"}
+              </button>
+            </div>
+          ) : null}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -241,6 +258,9 @@ export function WebhooksPanel() {
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [openLogId, setOpenLogId] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
+  // When the list was last read, for telling which endpoints are still in
+  // a secret switch-over.
+  const [now, setNow] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -258,6 +278,7 @@ export function WebhooksPanel() {
           return;
         }
 
+        setNow(Math.floor(Date.now() / 1000));
         setEndpoints(payload.endpoints);
       } catch {
         if (!cancelled) {
@@ -277,10 +298,15 @@ export function WebhooksPanel() {
   }
 
   async function createEndpoint() {
+    // A secret on screen stays until Done, so it is never lost to a second
+    // endpoint, made or not.
+    if (newSecret) {
+      return;
+    }
+
     setIsCreating(true);
     setError(null);
     setNotice(null);
-    setNewSecret(null);
 
     try {
       const { ok, payload } = await call("/api/admin/webhooks", {
@@ -308,6 +334,11 @@ export function WebhooksPanel() {
     endpoint: WebhookEndpoint,
     action: "delete" | "disable" | "enable" | "rotate" | "test",
   ) {
+    // The same for a new secret: it would take the place of one on screen.
+    if (action === "rotate" && newSecret) {
+      return;
+    }
+
     setPendingId(endpoint.id);
     setError(null);
     setNotice(null);
@@ -459,7 +490,10 @@ export function WebhooksPanel() {
           <button
             className="btn-quiet min-h-12 px-5 text-sm"
             disabled={
-              isCreating || url.trim().length === 0 || events.length === 0
+              isCreating ||
+              newSecret !== null ||
+              url.trim().length === 0 ||
+              events.length === 0
             }
             onClick={() => void createEndpoint()}
             type="button"
@@ -477,7 +511,8 @@ export function WebhooksPanel() {
         >
           <p className="text-sm font-semibold text-(--fg)">
             Copy the signing secret for {newSecret.url} now. It is not shown
-            again.
+            again. Press Done once it is copied, before adding another endpoint
+            or making another secret.
           </p>
           <code className="block overflow-x-auto rounded-lg border border-(--border) bg-(--paper) px-3 py-2 font-mono text-sm break-all text-(--fg)">
             {newSecret.secret}
@@ -538,8 +573,9 @@ export function WebhooksPanel() {
                 {endpoint.events.length === webhookEventTypes.length
                   ? "All events."
                   : `${endpoint.events.map((type) => EVENT_LABELS[type]).join(", ")}.`}
-                {endpoint.previousSecretExpiresAt
-                  ? ` The old secret also signs until ${formatTime(endpoint.previousSecretExpiresAt) ?? ""}.`
+                {endpoint.previousSecretExpiresAt &&
+                endpoint.previousSecretExpiresAt > now
+                  ? ` The old secret also signs until ${formatTime(endpoint.previousSecretExpiresAt) ?? ""}, and another new secret can be made after that.`
                   : ""}
               </p>
               <div className="flex flex-wrap items-center gap-2">
@@ -590,7 +626,12 @@ export function WebhooksPanel() {
                     </button>
                     <button
                       className="btn-quiet"
-                      disabled={pendingId !== null}
+                      disabled={
+                        pendingId !== null ||
+                        newSecret !== null ||
+                        (endpoint.previousSecretExpiresAt !== null &&
+                          endpoint.previousSecretExpiresAt > now)
+                      }
                       onClick={() => void act(endpoint, "rotate")}
                       type="button"
                     >

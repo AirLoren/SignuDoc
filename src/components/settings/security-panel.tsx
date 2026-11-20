@@ -119,6 +119,9 @@ function describeEvent(event: SystemAuditEvent): string {
     case "webhook_endpoint_deleted":
       return [
         typeof metadata.url === "string" ? metadata.url : null,
+        Array.isArray(metadata.events)
+          ? `events: ${metadata.events.filter((type) => typeof type === "string").join(", ")}`
+          : null,
         metadata.secretRotated === true ? "new signing secret" : null,
         metadata.enabled === false
           ? "turned off"

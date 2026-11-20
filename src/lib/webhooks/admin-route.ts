@@ -65,13 +65,25 @@ export async function handleWebhookAdmin(
   }
 }
 
-/** The JSON object in a request body, or an empty one. */
+/**
+ * The JSON object in a request body, or null when the body is not one
+ * (missing, cut off, or a list), so a route can refuse it instead of
+ * treating it as a request to change nothing.
+ */
 export async function readJsonObject(
   request: Request,
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, unknown> | null> {
   const parsed: unknown = await request.json().catch(() => null);
 
   return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
     ? (parsed as Record<string, unknown>)
-    : {};
+    : null;
+}
+
+/** The answer to a body readJsonObject could not read. */
+export function notAJsonObject(): Response {
+  return NextResponse.json(
+    { error: "Send the request as a JSON object." },
+    { headers: noStore, status: 400 },
+  );
 }

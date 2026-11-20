@@ -9,6 +9,7 @@ import { parseWebhookEventTypes } from "@/lib/webhooks/events";
 import {
   handleWebhookAdmin,
   noStore,
+  notAJsonObject,
   readJsonObject,
 } from "@/lib/webhooks/admin-route";
 
@@ -23,6 +24,11 @@ export function PATCH(request: Request, context: RouteContext) {
     async (actor) => {
       const { id } = await context.params;
       const body = await readJsonObject(request);
+
+      if (!body) {
+        return notAJsonObject();
+      }
+
       const events =
         body.events === undefined
           ? undefined

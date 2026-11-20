@@ -137,6 +137,42 @@ export async function buildWebhookPayload(
   };
 }
 
+/** What sendOne needs of a delivery `c` and its endpoint `e`. */
+const CLAIMED_COLUMNS = `
+  c.id,
+  c.event_type AS "eventType",
+  c.envelope_id AS "envelopeId",
+  c.audit_event_id AS "auditEventId",
+  c.signer_id AS "signerId",
+  c.payload,
+  c.attempts,
+  c.locked_until AS "lockedUntil",
+  c.created_at AS "createdAt",
+  a.created_at AS "auditCreatedAt",
+  a.metadata AS "auditMetadata",
+  e.url,
+  e.secret_encrypted AS "secretEncrypted",
+  e.previous_secret_encrypted AS "previousSecretEncrypted",
+  e.previous_secret_expires_at AS "previousSecretExpiresAt"
+`;
+
+/**
+ * Marks failed a delivery whose last try was claimed but never finished
+ * (its function stopped mid-send), instead of sending it a ninth time.
+ */
+async function failAbandonedLastTries(database: DbExecutor, now: number) {
+  await database.query(
+    `
+      UPDATE webhook_deliveries
+      SET status = 'failed', next_attempt_at = NULL, locked_until = NULL,
+          last_error = 'The last try did not finish.', updated_at = $1
+      WHERE status = 'pending' AND attempts >= $2
+        AND (locked_until IS NULL OR locked_until <= $1)
+    `,
+    [now, MAX_ATTEMPTS],
+  );
+}
+
 /** Takes up to `limit` due deliveries for this drain alone. */
 async function claimDueDeliveries(
   database: DbExecutor,
@@ -154,6 +190,7 @@ async function claimDueDeliveries(
         WHERE d.status = 'pending'
           AND d.next_attempt_at <= $1
           AND (d.locked_until IS NULL OR d.locked_until <= $1)
+          AND d.attempts < $5
           AND e.enabled
           AND ($4::text IS NULL OR d.id = $4)
         ORDER BY d.next_attempt_at, d.id
@@ -167,28 +204,13 @@ async function claimDueDeliveries(
         WHERE d.id = due.id
         RETURNING d.*
       )
-      SELECT
-        c.id,
-        c.event_type AS "eventType",
-        c.envelope_id AS "envelopeId",
-        c.audit_event_id AS "auditEventId",
-        c.signer_id AS "signerId",
-        c.payload,
-        c.attempts,
-        c.locked_until AS "lockedUntil",
-        c.created_at AS "createdAt",
-        a.created_at AS "auditCreatedAt",
-        a.metadata AS "auditMetadata",
-        e.url,
-        e.secret_encrypted AS "secretEncrypted",
-        e.previous_secret_encrypted AS "previousSecretEncrypted",
-        e.previous_secret_expires_at AS "previousSecretExpiresAt"
+      SELECT ${CLAIMED_COLUMNS}
       FROM claimed c
       JOIN webhook_endpoints e ON e.id = c.endpoint_id
       LEFT JOIN audit_events a ON a.id = c.audit_event_id
       ORDER BY c.next_attempt_at, c.id
     `,
-    [now, limit, LEASE_SECONDS, onlyId ?? null],
+    [now, limit, LEASE_SECONDS, onlyId ?? null, MAX_ATTEMPTS],
   );
 }
 
@@ -413,6 +435,8 @@ export async function drainWebhookDeliveries(
     skipped: 0,
   };
 
+  await failAbandonedLastTries(database, nowInSeconds());
+
   for (let batch = 0; batch < (options.maxBatches ?? 4); batch += 1) {
     const claimed = await claimDueDeliveries(
       database,
@@ -451,7 +475,11 @@ export async function drainWebhookDeliveries(
   return summary;
 }
 
-/** Whether anything is waiting, so callers can skip a drain cheaply. */
+/**
+ * Whether anything is waiting that a drain would send, so callers can skip
+ * one cheaply. The same tests as the claim: an endpoint that is off has
+ * nothing due.
+ */
 export async function hasDueWebhookDeliveries(
   database: DbExecutor = getDb(),
   now: number = nowInSeconds(),
@@ -461,12 +489,16 @@ export async function hasDueWebhookDeliveries(
       database,
       `
         SELECT EXISTS (
-          SELECT 1 FROM webhook_deliveries
-          WHERE status = 'pending' AND next_attempt_at <= $1
-            AND (locked_until IS NULL OR locked_until <= $1)
+          SELECT 1
+          FROM webhook_deliveries d
+          JOIN webhook_endpoints e ON e.id = d.endpoint_id
+          WHERE d.status = 'pending' AND d.next_attempt_at <= $1
+            AND (d.locked_until IS NULL OR d.locked_until <= $1)
+            AND d.attempts < $2
+            AND e.enabled
         ) AS due
       `,
-      [now],
+      [now, MAX_ATTEMPTS],
     );
 
     return row?.due ?? false;
@@ -529,29 +561,46 @@ export async function sendTestWebhook(
     type: WEBHOOK_TEST_EVENT,
   };
 
-  await database.query(
+  // Made already held by this request, so no other drain can take it
+  // and the answer read below is this try's. A test is tried once: it is
+  // made as its own last try.
+  const reserved = await queryOne<ClaimedDelivery>(
+    database,
     `
-      INSERT INTO webhook_deliveries (
-        id, endpoint_id, event_type, payload, status, attempts,
-        next_attempt_at, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, 'pending', $5, $6, $6, $6)
+      WITH inserted AS (
+        INSERT INTO webhook_deliveries (
+          id, endpoint_id, event_type, payload, status, attempts,
+          next_attempt_at, locked_until, created_at, updated_at
+        )
+        SELECT $1::text, id, $3::text, $4::text, 'pending', $5::integer,
+          $6::bigint, $6::bigint + $7::bigint, $6::bigint, $6::bigint
+        FROM webhook_endpoints
+        WHERE id = $2::text AND enabled
+        RETURNING *
+      )
+      SELECT ${CLAIMED_COLUMNS}
+      FROM inserted c
+      JOIN webhook_endpoints e ON e.id = c.endpoint_id
+      LEFT JOIN audit_events a ON a.id = c.audit_event_id
     `,
-    // A test is tried once: it starts as if it were on its last try.
     [
       id,
       endpointId,
       WEBHOOK_TEST_EVENT,
       JSON.stringify(payload),
-      MAX_ATTEMPTS - 1,
+      MAX_ATTEMPTS,
       now,
+      LEASE_SECONDS,
     ],
   );
-  await drainWebhookDeliveries({
-    database,
-    env: options.env,
-    maxBatches: 1,
-    onlyId: id,
-  });
+
+  if (reserved) {
+    await sendOne(database, reserved, options.env ?? process.env).catch(
+      (error: unknown) => {
+        console.error(`[webhooks] Sending test delivery ${id} failed:`, error);
+      },
+    );
+  }
 
   const row = await queryOne<{
     id: string;
