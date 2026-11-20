@@ -103,6 +103,7 @@ import {
   nextSignerLinkExpiresAt,
 } from "./envelope-deadline.ts";
 import { describeEntryProblem, judgeRadioGroups } from "./field-choices.ts";
+import { consumeRateLimit, peekRateLimit } from "./security/rate-limit.ts";
 import {
   buildDisclosureSections,
   CONSENT_STATEMENT,
@@ -1312,6 +1313,10 @@ async function sendCompletionEmails(input: {
   }
 }
 
+/** Wrong access codes a signer may give for one code in a week. */
+export const ACCESS_CODE_MAX_FAILURES = 10;
+const ACCESS_CODE_FAILURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 export class SigningMutationError extends Error {
   readonly statusCode: number;
 
@@ -1631,7 +1636,30 @@ export async function verifySignerCheck(
       throw new SigningMutationError(describeCredentialFailure(result), 400);
     }
   } else if (parsed.method === "access_code") {
+    // An access code can be short, so wrong ones are counted per signer and
+    // code, over every link and address: a guesser gets a few tries a week,
+    // not a few every quarter of an hour. A new code from the sender starts
+    // a new count.
+    const failures = {
+      key: `signing-access-code-failures:${context.signer.id!}:${state.accessCodeHash!}`,
+      limit: ACCESS_CODE_MAX_FAILURES,
+    };
+
+    if (!(await peekRateLimit(failures, { database })).allowed) {
+      throw new SigningMutationError(
+        "Too many wrong access codes. Ask the sender for the code, or for a new one.",
+        429,
+      );
+    }
+
     passed = checkAccessCode(parsed.code, state.accessCodeHash!);
+
+    if (!passed) {
+      await consumeRateLimit(
+        { ...failures, windowMs: ACCESS_CODE_FAILURE_WINDOW_MS },
+        { database },
+      );
+    }
   } else {
     // Count the attempt and read the code in one statement, so parallel
     // guesses cannot share an attempt.
