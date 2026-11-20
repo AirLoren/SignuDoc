@@ -16,6 +16,7 @@ import {
   createEnvelopeForApi,
   type ApiActor,
 } from "../api/envelopes.ts";
+import { getApiEnvelopeWithOwner } from "../api/envelope-view.ts";
 import { withTransaction } from "../db/connection.ts";
 import { openTestDatabase, waitUntilBlockedBy } from "../db/test-database.ts";
 import { recordAuditEvent } from "../services/audit.ts";
@@ -317,9 +318,19 @@ test("a delivery is written with its audit event, and not when that rolls back",
         },
         tx,
       );
+      // Queued inside the transaction...
+      const inside = await tx.query(
+        `select 1 from webhook_deliveries where endpoint_id = $1`,
+        [endpoint.id],
+      );
+
+      assert.equal(inside.rowCount, 1);
       throw new Error("roll back");
     }, database),
+    // ...and only this deliberate failure undoes it, not another one.
+    (error: unknown) => error instanceof Error && error.message === "roll back",
   );
+  // ...and gone with it.
   assert.equal((await deliveriesFor(endpoint.id)).length, 0);
 
   await recordAuditEvent(
@@ -402,6 +413,65 @@ test("an endpoint removed while an event is recorded is skipped, and the change 
   );
 
   assert.equal(voided.rowCount, 1);
+});
+
+test("a payload reads the envelope and its signers on one snapshot", async () => {
+  const admin = await createAdmin();
+  const envelope = await createEnvelope(admin);
+  let signedBetween = false;
+
+  // Right after the envelope row is read, the signer signs and that
+  // commits on another connection, before the signers are read.
+  const signAfterEnvelopeRead = <T extends object>(executor: T): T =>
+    new Proxy(executor, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+
+        if (property === "query" && typeof value === "function") {
+          return async (...args: unknown[]) => {
+            const result: unknown = await (
+              value as (...queryArgs: unknown[]) => Promise<unknown>
+            ).apply(target, args);
+            const text = typeof args[0] === "string" ? args[0] : "";
+
+            if (
+              !signedBetween &&
+              text.includes('JOIN "user" u ON u.id = e.user_id')
+            ) {
+              signedBetween = true;
+              await database.query(
+                `update signers set status = 'signed', signed_at = $2 where envelope_id = $1`,
+                [envelope.id, Math.floor(Date.now() / 1000)],
+              );
+            }
+
+            return result;
+          };
+        }
+
+        if (property === "connect" && typeof value === "function") {
+          return async () =>
+            signAfterEnvelopeRead(
+              await (value as () => Promise<pg.PoolClient>).apply(target),
+            );
+        }
+
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+  const found = await getApiEnvelopeWithOwner(
+    envelope.id,
+    signAfterEnvelopeRead(database),
+  );
+
+  assert.equal(signedBetween, true);
+  assert.equal(found?.envelope.status, "sent");
+  // The signing committed after the snapshot, so it is not half in it.
+  assert.deepEqual(
+    found?.envelope.signers.map((signer) => signer.status),
+    ["notified"],
+  );
 });
 
 test("a delivery is signed, carries the envelope, and is marked delivered", async () => {
@@ -770,31 +840,48 @@ test("a test event is sent at once, tried once, and left out of the API list", a
 
 test("the API list pages with a cursor", async () => {
   const admin = await createAdmin();
-
-  await addEndpoint(admin);
+  const { endpoint } = await addEndpoint(admin);
 
   for (let index = 0; index < 3; index += 1) {
     await createEnvelope(admin);
   }
 
-  const first = await listApiWebhookDeliveries(
-    { limit: 2, type: "envelope.sent" },
-    database,
-  );
+  const ours = (await deliveriesFor(endpoint.id)).map((row) => row.id);
 
-  assert.ok(first?.nextCursor);
+  assert.equal(ours.length, 3);
 
-  const second = await listApiWebhookDeliveries(
-    { cursor: first.nextCursor, limit: 2, type: "envelope.sent" },
-    database,
-  );
+  // The list is install-wide, so other tests' deliveries are in it too:
+  // page through all of it. Every page has something, a page that points
+  // to another is full, and the last points nowhere.
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
 
-  assert.ok(second);
+  do {
+    const page = await listApiWebhookDeliveries(
+      { cursor, limit: 2, type: "envelope.sent" },
+      database,
+    );
 
-  const ids = [...first.data, ...second.data].map((delivery) => delivery.id);
+    assert.ok(page);
+    assert.ok(page.data.length > 0, "a page came back empty");
 
-  assert.equal(new Set(ids).size, ids.length);
-  assert.ok(ids.length >= 3);
+    if (page.nextCursor) {
+      assert.equal(page.data.length, 2);
+    }
+
+    seen.push(...page.data.map((delivery) => delivery.id));
+    cursor = page.nextCursor ?? undefined;
+    pages += 1;
+  } while (cursor !== undefined && pages < 10_000);
+
+  assert.equal(cursor, undefined);
+  assert.ok(pages >= 2);
+  assert.equal(new Set(seen).size, seen.length);
+
+  for (const id of ours) {
+    assert.ok(seen.includes(id), `delivery ${id} was not listed`);
+  }
 });
 
 test("old deliveries are cleared, failed ones kept longer, and endpoints removed with their log", async () => {

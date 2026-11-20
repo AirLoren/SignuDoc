@@ -4,7 +4,11 @@
 // allowed values come from the app's own, so they cannot drift either.
 
 import { getMaxSignersPerEnvelope } from "../signer-limit.ts";
-import { fieldTypes, signatureMeanings } from "../types/domain.ts";
+import {
+  fieldTypes,
+  MAX_SIGNERS_CEILING,
+  signatureMeanings,
+} from "../types/domain.ts";
 
 import { webhookEventTypes } from "../webhooks/events.ts";
 
@@ -41,11 +45,19 @@ const idParameter = {
 
 const idempotencyKey = {
   description:
-    "Any unique string of 1 to 255 characters, not only spaces (spaces at either end are ignored). A retry with the same key and body within 24 hours gets the first response again.",
+    "Any unique string of 1 to 255 characters, not only spaces (spaces at either end are ignored). A retry with the same key and body within 24 hours gets the first response again. While the first request is still running, a retry gets 409 with Retry-After. If the first request made its envelope but failed before answering, a retry gets that envelope as it is now.",
   in: "header",
   name: "Idempotency-Key",
   required: false,
   schema: { maxLength: 255, minLength: 1, pattern: "\\S", type: "string" },
+};
+
+/** A person's name: not blank, and spaces at either end are dropped. */
+const personNameSchema = {
+  maxLength: 120,
+  minLength: 1,
+  pattern: "\\S",
+  type: "string",
 };
 
 /** Titles: not blank, and spaces at either end are dropped. */
@@ -85,7 +97,7 @@ export function buildOpenApiDocument(
               items: {
                 properties: {
                   email: { format: "email", type: "string" },
-                  name: { type: "string" },
+                  name: personNameSchema,
                 },
                 required: ["name", "email"],
                 type: "object",
@@ -114,7 +126,7 @@ export function buildOpenApiDocument(
                 properties: {
                   accessCode: { maxLength: 64, minLength: 4, type: "string" },
                   email: { format: "email", type: "string" },
-                  name: { maxLength: 120, type: "string" },
+                  name: personNameSchema,
                   ref: {
                     description: "Your name for this signer, used by fields.",
                     pattern: "^[A-Za-z0-9._:-]{1,64}$",
@@ -129,6 +141,7 @@ export function buildOpenApiDocument(
                   step: {
                     description:
                       "The step of the signing order. Signers who share a step sign at the same time, and the next step starts once they all have. Give it for every signer or for none; left out, they sign one after the other.",
+                    maximum: MAX_SIGNERS_CEILING,
                     minimum: 1,
                     type: "integer",
                   },
@@ -352,7 +365,7 @@ export function buildOpenApiDocument(
             object: { const: "webhook_delivery", type: "string" },
             payload: {
               description:
-                "The JSON body it was sent with, or null before its first try.",
+                "The JSON body it carries: made at its first try and sent unchanged on every later one. Null before its first try. A delivery that failed because its signing secret could not be read has one but was never sent.",
               type: ["object", "null"],
             },
             status: {
@@ -752,7 +765,7 @@ export function buildOpenApiDocument(
                       items: {
                         properties: {
                           email: { format: "email", type: "string" },
-                          name: { maxLength: 120, type: "string" },
+                          name: personNameSchema,
                           signatureMeaning: {
                             description: "Part 11 installs only.",
                             enum: [...signatureMeanings],
@@ -789,7 +802,7 @@ export function buildOpenApiDocument(
           parameters: [
             {
               description:
-                "Only deliveries made at or after this time. Times are kept to the second, so a time with a fraction counts from the start of its second.",
+                "Only deliveries queued at or after this time, which is when their event happened, not when they were sent. Times are kept to the second, so a time with a fraction counts from the start of its second.",
               in: "query",
               name: "since",
               schema: { format: "date-time", type: "string" },

@@ -195,7 +195,8 @@ curl https://sign.example.com/api/v1/envelopes \
 
 The upload URL works for 10 minutes, and an upload that is never used is
 deleted after a day. Installs that keep files on their own disk (not on
-Vercel) do not need this and answer 404: send any size in the form.
+Vercel) do not need this and answer 404: send PDFs of up to 20 MB in the
+form.
 
 ## The envelope
 
@@ -264,7 +265,7 @@ To know when something happens without asking again and again, use
 | `GET /api/v1/envelopes/{id}`                                | read   | One envelope.                                                                                                                                                                                           |
 | `POST /api/v1/envelopes/{id}/send`                          | write  | Sends a draft. Body: the `send` options above.                                                                                                                                                          |
 | `POST /api/v1/envelopes/{id}/void`                          | write  | Voids a sent envelope. Body: `{"reason": "…"}`, required on Part 11 installs.                                                                                                                           |
-| `POST /api/v1/envelopes/{id}/remind`                        | write  | Emails a reminder to each signer whose turn it is, at most once a day as in the web app.                                                                                                                |
+| `POST /api/v1/envelopes/{id}/remind`                        | write  | Emails a reminder to each signer whose turn it is, at most once a day as in the web app. Too soon gets 429 with `Retry-After`.                                                                          |
 | `POST /api/v1/envelopes/{id}/signers/{signerId}/embed-link` | write  | A signing link for an embedded envelope, to show in a frame. Body: `{"origin": "https://…"}`. See [Embedded signing](#embedded-signing).                                                                |
 | `DELETE /api/v1/envelopes/{id}`                             | write  | Deletes a draft.                                                                                                                                                                                        |
 | `GET /api/v1/envelopes/{id}/events`                         | read   | The audit trail, oldest first.                                                                                                                                                                          |
@@ -381,8 +382,10 @@ again.
 
 ### Answers and retries
 
-Answer with any `2xx` within 10 seconds, and do the slow work after. Any
-other answer, a redirect, or no answer counts as a failure, and the delivery
+Store or queue the event first, then answer with any `2xx` within 10
+seconds and do the slow work after. A `2xx` counts as delivered, so an
+event your app answered but did not keep is not sent again. Any other
+answer, a redirect, or no answer counts as a failure, and the delivery
 is tried again 1 minute, 5 minutes, 30 minutes, 2 hours, 8 hours, 24 hours
 and 24 hours later, about two and a half days in all. After the eighth try
 it is marked failed. A delivery whose envelope has since been deleted is
@@ -397,8 +400,10 @@ day. On Pro you can run it more often by changing the schedule of
 `/api/internal/webhooks` in `vercel.json`, for example to `*/5 * * * *`.
 
 If your app was down, `GET /api/v1/webhook-deliveries?since=…` lists what
-it missed, with the same payloads. Times are kept to the second, so a
-`since` with a fraction counts from the start of its second, and you may
+it missed, with the same payloads. `since` counts from when each delivery
+was queued, which is when its event happened, not when it was sent: give
+the time of the last event your app has. Times are kept to the second, so
+a `since` with a fraction counts from the start of its second, and you may
 get a delivery you already have: skip it by its `webhook-id`. Deliveries
 are kept 30 days after they are delivered, and otherwise 90 days after
 their last try or "Send again".

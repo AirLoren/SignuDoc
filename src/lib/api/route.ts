@@ -70,6 +70,23 @@ export function apiErrorFor(error: unknown): Response | null {
   }
 
   if (
+    error instanceof ReminderMutationError &&
+    error.statusCode === 429 &&
+    error.nextAvailableAt !== null
+  ) {
+    // Too soon after the last reminder: Retry-After says when the next one
+    // can go, as for every other 429 of the API.
+    const waitSeconds = Math.max(
+      1,
+      error.nextAvailableAt - Math.floor(Date.now() / 1000),
+    );
+
+    return apiError(429, codeForStatus(429), error.message, {
+      "retry-after": String(waitSeconds),
+    });
+  }
+
+  if (
     error instanceof EnvelopeMutationError ||
     error instanceof EnvelopeDocumentAccessError ||
     error instanceof DownloadAccessError ||
@@ -164,8 +181,12 @@ type ApiResult = { body: unknown; status: number };
 
 type AccountLimit = { key: string; limit: number; windowMs: number };
 
-/** Whether a response is kept for retries: not a 5xx, and not a 429. */
-function isKept(status: number) {
+/**
+ * Whether a response is kept for retries: not a 5xx, and not a 429. A
+ * route that cleans up after a refusal does so only for these, since after
+ * any other failure the retry runs again and needs what it was given.
+ */
+export function isKept(status: number) {
   return status < 500 && status !== 429;
 }
 
@@ -177,7 +198,10 @@ function isKept(status: number) {
  * Except once `run` has done what cannot be undone: it calls `remember`
  * with the envelope's id as soon as the envelope is made (and sent, if
  * asked). From then on a failure keeps the key, and a retry gets
- * `recover(id)`, the envelope as it is, instead of a second envelope.
+ * `recover(id)`, the envelope as it is, instead of a second envelope. If
+ * even noting the id fails (the database went away just then), the key is
+ * still kept: a retry is told to wait (409) until the key's 24 hours run
+ * out, and never makes a second envelope.
  *
  * `limits` count only a request that does the work now. A replay or a
  * recovery costs nothing, so a retry of a request that worked is never
@@ -275,10 +299,14 @@ export async function runIdempotently(
     key,
     reservedAt: previous.reservedAt,
   };
-  let remembered = false;
+  // Set as soon as `remember` is called, before its write: by then the
+  // envelope is made (and sent, if asked), so even if noting it fails the
+  // key is kept. A retry is told the request is still being worked on
+  // rather than being let make and send a second envelope.
+  let made = false;
   const remember = async (resourceId: string) => {
+    made = true;
     await rememberIdempotentResource({ ...reservation, resourceId });
-    remembered = true;
   };
   let result: ApiResult;
 
@@ -293,7 +321,7 @@ export async function runIdempotently(
     result = await runCatching(() => run(remember));
   } catch (error) {
     // Once the envelope exists, the key stays with it (see above).
-    if (!remembered) {
+    if (!made) {
       await releaseIdempotencyKey(reservation).catch(() => undefined);
     }
 
@@ -306,7 +334,7 @@ export async function runIdempotently(
       response: result.body,
       statusCode: result.status,
     });
-  } else if (!remembered) {
+  } else if (!made) {
     await releaseIdempotencyKey(reservation).catch(() => undefined);
   }
 

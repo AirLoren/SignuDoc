@@ -5,6 +5,7 @@ import {
   queryMany,
   queryOne,
   type DbExecutor,
+  type DbPool,
 } from "../db/connection.ts";
 import { signingStepOf } from "../signing-steps.ts";
 import type { EnvelopeStatus, SignerStatus } from "../types/domain.ts";
@@ -242,13 +243,60 @@ export async function getApiEnvelope(
   return toApiEnvelope(row, signers.get(row.id) ?? []);
 }
 
+function isPool(database: DbExecutor): database is DbPool {
+  return "connect" in database && "totalCount" in database;
+}
+
+/**
+ * Runs `read` on one snapshot of the database, so reads that belong
+ * together cannot straddle a change that commits between them. Given a
+ * client, the caller's own transaction decides.
+ */
+async function readOnOneSnapshot<T>(
+  database: DbExecutor,
+  read: (executor: DbExecutor) => Promise<T>,
+): Promise<T> {
+  if (!isPool(database)) {
+    return read(database);
+  }
+
+  const client = await database.connect();
+
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const result = await read(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /**
  * An envelope with its owner, whoever that is, for webhook payloads, which
  * go to endpoints set up for the whole install. Null once it is deleted.
+ * The envelope and its signers are read on one snapshot: a payload is kept
+ * for every retry, so it must never show a completion half-way, such as a
+ * sent envelope whose signers have all signed.
  */
 export async function getApiEnvelopeWithOwner(
   envelopeId: string,
   database: DbExecutor = getDb(),
+): Promise<{
+  envelope: ApiEnvelope;
+  owner: { email: string; id: string; name: string };
+} | null> {
+  return readOnOneSnapshot(database, (snapshot) =>
+    readApiEnvelopeWithOwner(envelopeId, snapshot),
+  );
+}
+
+async function readApiEnvelopeWithOwner(
+  envelopeId: string,
+  database: DbExecutor,
 ): Promise<{
   envelope: ApiEnvelope;
   owner: { email: string; id: string; name: string };
