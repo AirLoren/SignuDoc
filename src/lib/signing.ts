@@ -45,7 +45,11 @@ import {
   signerRecordSchema,
   type CopyRecipientRecord,
 } from "./schemas/signer.ts";
-import { getBranding } from "./settings.ts";
+import {
+  getBranding,
+  readStoredSettings,
+  resolveSettings,
+} from "./settings.ts";
 import {
   checkSigningCredentials,
   MAX_SIGNING_PASSWORD_ATTEMPTS,
@@ -99,9 +103,11 @@ import {
 } from "./envelope-deadline.ts";
 import { describeEntryProblem, judgeRadioGroups } from "./field-choices.ts";
 import {
-  buildElectronicRecordsDisclosure,
+  buildDisclosureSections,
   CONSENT_STATEMENT,
-  ELECTRONIC_RECORDS_DISCLOSURE_VERSION,
+  disclosureSectionsAsText,
+  getDisclosureVersion,
+  normalizeCustomDisclosure,
 } from "./electronic-records-disclosure.ts";
 import {
   checkAccessCode,
@@ -1738,6 +1744,45 @@ export async function checkSigningFieldFit(
     : { fits: true };
 }
 
+/**
+ * The disclosure this signer reads, filled in for their sender. It is read
+ * from the database, not the settings cache, so the signing page and the
+ * consent check always agree on the words just after an administrator
+ * changes them.
+ */
+async function readSignerDisclosure(
+  context: SigningContext,
+  database: DbExecutor,
+) {
+  // Read fresh, not from the short settings cache, so the words and the
+  // support address in them are the ones saved right now.
+  const settings = resolveSettings(await readStoredSettings(database));
+  const customDisclosure = normalizeCustomDisclosure(
+    settings.consentDisclosure,
+  );
+
+  const sections = buildDisclosureSections(
+    {
+      contactAddress: settings.supportAddress ?? context.sender.email,
+      senderName: normalizeSenderName(context.sender),
+    },
+    customDisclosure,
+  );
+
+  return {
+    customDisclosure,
+    sections,
+    // A custom disclosure is named by the words as this signer reads them,
+    // filled in, so a change to the support address or the sender's name
+    // after the page loaded is refused too, and the record holds the words
+    // that were shown.
+    version:
+      customDisclosure === null
+        ? getDisclosureVersion(null)
+        : getDisclosureVersion(disclosureSectionsAsText(sections)),
+  };
+}
+
 export async function recordSignerConsent(
   token: string,
   input: unknown,
@@ -1755,7 +1800,10 @@ export async function recordSignerConsent(
     database,
   );
 
-  if (parsed.disclosureVersion !== ELECTRONIC_RECORDS_DISCLOSURE_VERSION) {
+  const disclosure = await readSignerDisclosure(context, database);
+  const disclosureVersion = disclosure.version;
+
+  if (parsed.disclosureVersion !== disclosureVersion) {
     throw new SigningMutationError(
       "The disclosure has changed. Reload the page to read the current one.",
       409,
@@ -1818,7 +1866,16 @@ export async function recordSignerConsent(
         ipAddress: requestMeta.ipAddress ?? null,
         metadata: {
           ...signerAuditMetadata(context),
-          disclosureVersion: ELECTRONIC_RECORDS_DISCLOSURE_VERSION,
+          disclosureVersion,
+          // The built-in words are known from their version. A custom
+          // disclosure can be changed or taken away later, so the words the
+          // signer saw, filled in as they read them, are kept with the
+          // record.
+          ...(disclosure.customDisclosure === null
+            ? {}
+            : {
+                disclosureText: disclosureSectionsAsText(disclosure.sections),
+              }),
           statement: CONSENT_STATEMENT,
         },
         userAgent: requestMeta.userAgent ?? null,
@@ -1971,7 +2028,7 @@ export async function getSigningPayloadForToken(
     database,
   );
   const storageService = createStorageService();
-  const branding = await getBranding();
+  const disclosure = await readSignerDisclosure(context, database);
 
   await recordViewedEventOnce(context, requestMeta, database);
 
@@ -2042,12 +2099,9 @@ export async function getSigningPayloadForToken(
     consentedAt: checkState.consentedAt,
     currentSignerFields,
     disclosure: {
-      sections: buildElectronicRecordsDisclosure({
-        contactAddress: branding.supportAddress ?? context.sender.email,
-        senderName: normalizeSenderName(context.sender),
-      }),
+      sections: disclosure.sections,
       statement: CONSENT_STATEMENT,
-      version: ELECTRONIC_RECORDS_DISCLOSURE_VERSION,
+      version: disclosure.version,
     },
     declineUrl: getSigningDeclineUrl(token),
     documentUrl: getSigningDocumentUrl(token),
