@@ -620,7 +620,7 @@ export async function restoreDatabase({
   backupPath: string;
   database: DbPool;
   store: BackupStore;
-}): Promise<{ rows: Record<string, number> }> {
+}): Promise<{ revoked: RevokedCredentials; rows: Record<string, number> }> {
   const found = await store.get(backupPath);
 
   if (!found) {
@@ -704,15 +704,78 @@ export async function restoreDatabase({
     }
 
     await flush();
+
+    const revoked = await revokeRestoredCredentials(client);
+
     await client.query("COMMIT");
+
+    return { revoked, rows: counts };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;
   } finally {
     client.release();
   }
+}
 
-  return { rows: counts };
+export type RevokedCredentials = {
+  providerSessions: number;
+  sessions: number;
+  signingLinks: number;
+  verifications: number;
+};
+
+/**
+ * Ends every credential a restore brought back from the backup, inside the
+ * restore's own transaction. A backup holds them as they were when it was
+ * made: a session signed out or ended by an administrator since, a signing
+ * link spent or replaced since, a password reset already used. Brought back
+ * as they were, they would work again. So after a restore:
+ *
+ * - everyone signs in again (sessions, and the one-time codes and links in
+ *   verification, go);
+ * - every signing link and emailed signing code stops working, and a
+ *   signer still to sign gets a new link from the sender's reminder;
+ * - a signature that was under way at a signing provider has to be started
+ *   again.
+ *
+ * The rate limit counts go too: they are kept for minutes, not as records.
+ * Download links for finished documents are kept: nothing ends them early,
+ * so the backup's are the same as the live ones were.
+ */
+export async function revokeRestoredCredentials(
+  client: Pick<DbPool, "query">,
+): Promise<RevokedCredentials> {
+  const sessions = await client.query(`DELETE FROM session`);
+  const verifications = await client.query(`DELETE FROM verification`);
+
+  await client.query(`DELETE FROM rate_limits`);
+
+  const signingLinks = await client.query(
+    `
+      UPDATE signers
+      SET
+        signing_token_hash = NULL,
+        signing_token_expires_at = NULL,
+        email_code_hash = NULL,
+        email_code_expires_at = NULL
+      WHERE signing_token_hash IS NOT NULL OR email_code_hash IS NOT NULL
+    `,
+  );
+  const providerSessions = await client.query(
+    `
+      UPDATE provider_signing_sessions
+      SET state = 'failed', secret_data = ''
+      WHERE state IN ('pending', 'signing')
+    `,
+  );
+
+  return {
+    providerSessions: providerSessions.rowCount ?? 0,
+    sessions: sessions.rowCount ?? 0,
+    signingLinks: signingLinks.rowCount ?? 0,
+    verifications: verifications.rowCount ?? 0,
+  };
 }
 
 /** Copies the backed-up files into the install's store, at their own paths. */

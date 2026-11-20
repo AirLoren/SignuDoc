@@ -16,6 +16,7 @@ import {
   runBackup,
 } from "./backup.ts";
 import { openTestDatabase } from "./db/test-database.ts";
+import { enforceSessionLimits } from "./session-controls.ts";
 import { recordSystemAuditEvent } from "./services/system-audit.ts";
 import { saveSettings } from "./settings.ts";
 
@@ -197,6 +198,106 @@ test("a backup restores into an empty database exactly as it was", async () => {
     source.objects.get("envelopes/a/original.pdf")?.body.toString(),
     "%PDF-1.7 original",
   );
+});
+
+test("a restore ends the sessions, codes and signing links the backup holds", async () => {
+  const userId = await addUser("pat@acme.com");
+  const envelopeId = randomUUID();
+  const waitingId = randomUUID();
+  const signedId = randomUUID();
+  const now = Math.floor(Date.now() / 1000);
+  const limits = { sessionIdleMinutes: null, sessionMaxHours: null };
+
+  await database.query(
+    `
+      insert into session (id, "expiresAt", token, "userId", last_active_at)
+      values ($1, now() + interval '7 days', 'kept-cookie-token', $2, $3)
+    `,
+    [randomUUID(), userId, now],
+  );
+  await database.query(
+    `
+      insert into verification (id, identifier, value, "expiresAt")
+      values ($1, 'reset-password:abc', $2, now() + interval '1 hour')
+    `,
+    [randomUUID(), userId],
+  );
+  await database.query(
+    `
+      insert into envelopes (
+        id, user_id, title, status, source_pdf_key, source_pdf_filename,
+        source_pdf_size_bytes, page_count, source_pdf_hash, sent_at
+      ) values ($1, $2, 'Lease', 'sent', 'k.pdf', 'lease.pdf', 10, 1, $3, $4)
+    `,
+    [envelopeId, userId, "a".repeat(64), now],
+  );
+  await database.query(
+    `
+      insert into signers (
+        id, envelope_id, name, email, sign_order, status,
+        signing_token_hash, signing_token_expires_at,
+        email_code_hash, email_code_expires_at, last_notified_at
+      ) values
+        ($1, $3, 'Riley', 'riley@example.test', 1, 'notified', $4, $6, 'code-hash', $6, $5),
+        ($2, $3, 'Casey', 'casey@example.test', 2, 'pending', null, null, null, null, null)
+    `,
+    [waitingId, signedId, envelopeId, "b".repeat(64), now, now + 3600],
+  );
+
+  // Both work when the backup is made. Whatever happened to them after it
+  // (a sign-out everywhere, a spent link), the backup still has them live.
+  assert.equal(
+    await enforceSessionLimits("kept-cookie-token", limits, { database }),
+    true,
+  );
+
+  const target = memoryStore();
+  const summary = await runBackup({
+    database,
+    keepDays: 30,
+    source: memoryStore(),
+    target,
+  });
+
+  await clearTables();
+
+  const restored = await restoreDatabase({
+    backupPath: summary.databaseBackup,
+    database,
+    store: target,
+  });
+
+  assert.deepEqual(restored.revoked, {
+    providerSessions: 0,
+    sessions: 1,
+    signingLinks: 1,
+    verifications: 1,
+  });
+  assert.equal(
+    await enforceSessionLimits("kept-cookie-token", limits, { database }),
+    false,
+  );
+
+  const verification = await database.query(`select 1 from verification`);
+
+  assert.equal(verification.rowCount, 0);
+
+  const signers = await database.query(
+    `
+      select
+        id, status, signing_token_hash as "tokenHash",
+        email_code_hash as "codeHash"
+      from signers where envelope_id = $1 order by sign_order
+    `,
+    [envelopeId],
+  );
+
+  // The records themselves come back; only the links are gone.
+  assert.deepEqual(signers.rows, [
+    { codeHash: null, id: waitingId, status: "notified", tokenHash: null },
+    { codeHash: null, id: signedId, status: "pending", tokenHash: null },
+  ]);
+  assert.equal(restored.rows.envelopes, 1);
 });
 
 test("a restore refuses a database that already has accounts", async () => {
