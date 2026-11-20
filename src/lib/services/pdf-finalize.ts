@@ -784,8 +784,9 @@ async function drawFieldValue(
       }
 
       // Wrapped and made smaller until the whole value is inside the box.
-      // Signing refuses a value that would only fit below a readable size,
-      // but one accepted earlier is still drawn whole, never cut off.
+      // Signing refuses a typed value that would only fit below a readable
+      // size, but a dropdown choice, or a value accepted earlier, is still
+      // drawn whole, never cut off.
       const box = getTextFieldBox(rect);
       let layout = layoutFieldText(
         fonts.auditRegular,
