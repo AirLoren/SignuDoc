@@ -3887,10 +3887,6 @@ async function voidSentEnvelopeOnce(
         })
       : signer,
   );
-  const auditEvents = [
-    ...(await listAuditEventsForEnvelope(envelopeId, database)),
-    voidedAuditEvent,
-  ];
   const storedCertificateKeys: string[] = [];
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
@@ -3944,6 +3940,16 @@ async function voidSentEnvelopeOnce(
     ) {
       throw new VoidRouteChangedError();
     }
+
+    // The audit trail the certificates show, read with the envelope and its
+    // audit chain held, so an event recorded since the page was opened is
+    // on them and none can be added before the void is.
+    await lockEnvelopeAuditChain(envelopeId, tx);
+
+    const auditEvents = [
+      ...(await listAuditEventsForEnvelope(envelopeId, tx)),
+      voidedAuditEvent,
+    ];
 
     const certificate = await storeEnvelopeCertificatePdf(
       {

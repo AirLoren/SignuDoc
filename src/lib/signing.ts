@@ -58,6 +58,7 @@ import {
 } from "./part11.ts";
 import {
   listAuditEventsForEnvelope,
+  lockEnvelopeAuditChain,
   recordAuditEvent,
   recordEmailSent,
 } from "./services/audit.ts";
@@ -3021,10 +3022,6 @@ async function submitSigningOnce(
       context.envelope.id,
       database,
     );
-    const auditEvents = [
-      ...(await listAuditEventsForEnvelope(context.envelope.id, database)),
-      signedAuditEvent,
-    ];
     const storageIdentity = {
       envelopeId: context.envelope.id,
       userId: context.envelope.userId,
@@ -3078,6 +3075,17 @@ async function submitSigningOnce(
         if (stillToSign) {
           throw new SigningRouteChangedError();
         }
+
+        // The audit trail the certificate shows, read with the envelope and
+        // its audit chain held: an event recorded since the link was opened
+        // (a view, an email, a reminder) is on it, and one recorded from
+        // now on waits until the envelope is finished.
+        await lockEnvelopeAuditChain(context.envelope.id, tx);
+
+        const auditEvents = [
+          ...(await listAuditEventsForEnvelope(context.envelope.id, tx)),
+          signedAuditEvent,
+        ];
 
         // Made while the envelope is locked: the files have fixed keys, and
         // a second submission at the same time waits, then stops above.
@@ -3456,10 +3464,6 @@ async function declineSigningOnce(
     declinedAt,
     declineReason,
   );
-  const auditEvents = [
-    ...(await listAuditEventsForEnvelope(context.envelope.id, database)),
-    declinedAuditEvent,
-  ];
   const storedCertificateKeys: string[] = [];
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
@@ -3526,6 +3530,16 @@ async function declineSigningOnce(
     ) {
       throw new SigningRouteChangedError();
     }
+
+    // The audit trail the certificates show, read with the envelope and its
+    // audit chain held, so an event recorded since the link was opened is
+    // on them and none can be added before the decline is.
+    await lockEnvelopeAuditChain(context.envelope.id, tx);
+
+    const auditEvents = [
+      ...(await listAuditEventsForEnvelope(context.envelope.id, tx)),
+      declinedAuditEvent,
+    ];
 
     // Made while the envelope is locked: the certificates have fixed keys,
     // and a void, the last signature or a second decline at the same time
