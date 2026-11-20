@@ -29,6 +29,15 @@ const errors = {
   "500": errorResponse,
 };
 
+// For the calls that email signers: 503 when the install has no email yet.
+const emailErrors = {
+  ...errors,
+  "503": {
+    ...errorResponse,
+    description: "Email is not set up on the install yet, so nothing was sent.",
+  },
+};
+
 const envelopeResponse = (description: string) => ({
   content: {
     "application/json": { schema: { $ref: "#/components/schemas/Envelope" } },
@@ -477,7 +486,7 @@ export function buildOpenApiDocument(
             "201": envelopeResponse("The envelope, sent if send was given."),
             "413": errorResponse,
             "422": errorResponse,
-            ...errors,
+            ...emailErrors,
           },
           summary: "Create an envelope, and send it if asked",
         },
@@ -570,7 +579,10 @@ export function buildOpenApiDocument(
       "/envelopes/{id}/remind": {
         post: {
           parameters: [idParameter],
-          responses: { "200": envelopeResponse("The envelope."), ...errors },
+          responses: {
+            "200": envelopeResponse("The envelope."),
+            ...emailErrors,
+          },
           summary: "Remind each signer whose turn it is",
         },
       },
@@ -589,7 +601,7 @@ export function buildOpenApiDocument(
             "200": envelopeResponse("The envelope, now sent."),
             "413": errorResponse,
             "422": errorResponse,
-            ...errors,
+            ...emailErrors,
           },
           summary: "Send a draft",
         },
@@ -601,7 +613,9 @@ export function buildOpenApiDocument(
             content: {
               "application/json": {
                 schema: {
-                  properties: { reason: { maxLength: 1000, type: "string" } },
+                  properties: {
+                    reason: { maxLength: 1000, type: ["string", "null"] },
+                  },
                   type: "object",
                 },
               },
@@ -720,7 +734,7 @@ export function buildOpenApiDocument(
             "201": envelopeResponse("The new envelope."),
             "413": errorResponse,
             "422": errorResponse,
-            ...errors,
+            ...emailErrors,
           },
           summary: "Create an envelope from a template",
         },

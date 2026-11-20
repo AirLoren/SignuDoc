@@ -304,6 +304,51 @@ test("every key that is not revoked stays in the list, however many are revoked 
   );
 });
 
+test("a revocation by an administrator being removed at that moment waits, and is then refused", async () => {
+  const leaving = await createUser();
+  const other = await createUser();
+  const { summary } = await createApiKey(
+    other,
+    { expiresInDays: null, name: "Their app", scope: "write" },
+    database,
+  );
+  // The removal of the actor's role, under way but not yet committed.
+  const holder = await database.connect();
+  let revocation: Promise<unknown> | undefined;
+
+  try {
+    await holder.query("begin");
+    await holder.query(`update "user" set role = 'user' where id = $1`, [
+      leaving.userId,
+    ]);
+
+    revocation = revokeApiKey(leaving, summary.id, database);
+    // Handled at once, so a failure before it waits is reported below
+    // instead of as an unhandled rejection.
+    revocation.catch(() => undefined);
+
+    await waitUntilBlockedBy(database, holder);
+    await holder.query("commit");
+  } finally {
+    await holder.query("rollback").catch(() => undefined);
+    await revocation?.catch(() => undefined);
+    holder.release();
+  }
+
+  await assert.rejects(
+    revocation!,
+    (error: unknown) =>
+      error instanceof ApiKeyError && error.statusCode === 403,
+  );
+
+  const key = await database.query<{ revokedAt: number | null }>(
+    `select revoked_at as "revokedAt" from api_keys where id = $1`,
+    [summary.id],
+  );
+
+  assert.equal(key.rows[0]?.revokedAt, null);
+});
+
 test("removing an administrator takes the key rows before the audit lock, as revoking a key does", async () => {
   // revokeApiKey locks a key row and then the audit chain. Hold a key row
   // the way it does, and the role change must wait for it without already

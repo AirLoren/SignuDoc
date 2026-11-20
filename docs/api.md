@@ -80,6 +80,7 @@ Every error has the same shape, and the code is meant for your program:
 | 422    | `idempotency_key_reused` | An `Idempotency-Key` was used before with a different request.                           |
 | 429    | `rate_limited`           | Too many requests. Wait the number of seconds in `Retry-After`.                          |
 | 500    | `internal_error`         | Something went wrong on the install. Try again later.                                    |
+| 503    | `internal_error`         | Email is not set up on the install yet, so nothing was sent. Try again once it is.       |
 
 ## Rate limits
 

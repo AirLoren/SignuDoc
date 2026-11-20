@@ -265,20 +265,21 @@ export async function runIdempotently(
       }
 
       const recovered = await runCatching(() => recover(previous.resourceId));
+      // The first request may have finished meanwhile. Its response is then
+      // the one kept, and the answer here too.
+      const kept = isKept(recovered.status)
+        ? await completeIdempotencyKey({
+            apiKeyId: claim.apiKeyId,
+            key,
+            reservedAt: previous.reservedAt,
+            response: recovered.body,
+            statusCode: recovered.status,
+          })
+        : null;
 
-      if (isKept(recovered.status)) {
-        await completeIdempotencyKey({
-          apiKeyId: claim.apiKeyId,
-          key,
-          reservedAt: previous.reservedAt,
-          response: recovered.body,
-          statusCode: recovered.status,
-        });
-      }
-
-      return apiJson(recovered.body, {
+      return apiJson(kept ? kept.response : recovered.body, {
         headers: { "idempotent-replayed": "true" },
-        status: recovered.status,
+        status: kept ? kept.statusCode : recovered.status,
       });
     }
     case "new":
@@ -320,11 +321,17 @@ export async function runIdempotently(
   }
 
   if (isKept(result.status)) {
-    await completeIdempotencyKey({
+    // A retry may have answered from the envelope first. Its response is
+    // then the one kept, and the answer here too.
+    const kept = await completeIdempotencyKey({
       ...reservation,
       response: result.body,
       statusCode: result.status,
     });
+
+    if (kept) {
+      return apiJson(kept.response, { status: kept.statusCode });
+    }
   } else if (!made) {
     await releaseIdempotencyKey(reservation).catch(() => undefined);
   }
