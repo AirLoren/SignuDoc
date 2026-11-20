@@ -1754,14 +1754,16 @@ async function readSignerDisclosure(
   context: SigningContext,
   database: DbExecutor,
 ) {
-  const branding = await getBranding();
+  // Read fresh, not from the short settings cache, so the words and the
+  // support address in them are the ones saved right now.
+  const settings = resolveSettings(await readStoredSettings(database));
   const customDisclosure = normalizeCustomDisclosure(
-    resolveSettings(await readStoredSettings(database)).consentDisclosure,
+    settings.consentDisclosure,
   );
 
   const sections = buildDisclosureSections(
     {
-      contactAddress: branding.supportAddress ?? context.sender.email,
+      contactAddress: settings.supportAddress ?? context.sender.email,
       senderName: normalizeSenderName(context.sender),
     },
     customDisclosure,

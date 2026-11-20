@@ -553,7 +553,10 @@ export function OrganizationSettings({
               }
             }}
           >
-            <DialogContent className="max-w-lg sm:p-8" showCloseButton={false}>
+            <DialogContent
+              className="max-h-[calc(100dvh-2rem)] max-w-lg overflow-y-auto sm:p-8"
+              showCloseButton={false}
+            >
               <DialogHeader className="space-y-3">
                 <DialogTitle>{CUSTOM_DISCLOSURE_NOTICE.title}</DialogTitle>
                 <DialogDescription asChild>
