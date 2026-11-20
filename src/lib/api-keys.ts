@@ -335,9 +335,13 @@ export async function revokeApiKey(
   const revokedAt = nowInSeconds();
 
   await withTransaction(async (tx) => {
+    // Held until the revocation commits, as when a key is made, so a
+    // removal of the actor's role that lands at the same moment either
+    // waits for it or is seen here. The user row comes before the key row
+    // and the audit chain, the order a role change takes them in too.
     const owner = await queryOne<{ role: string }>(
       tx,
-      `SELECT role FROM "user" WHERE id = $1`,
+      `SELECT role FROM "user" WHERE id = $1 FOR UPDATE`,
       [actor.userId],
     );
 
