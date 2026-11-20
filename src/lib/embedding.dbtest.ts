@@ -832,7 +832,6 @@ test("a signing already under way when its site is removed does not finish", asy
   // expires the link (as removeEmbedOrigin does) once the submission waits.
   const remover = await database.connect();
   let submitted: Promise<unknown> | undefined;
-  const startedAt = Math.floor(Date.now() / 1000);
 
   try {
     await remover.query("begin");
@@ -860,10 +859,12 @@ test("a signing already under way when its site is removed does not finish", asy
 
     await waitUntilBlockedBy(database, remover);
 
-    // The removal lands seconds into the wait, so the link's new expiry is
-    // later than any time the submission read before it began to wait. A
-    // check against that earlier time would still let it through.
-    while (Math.floor(Date.now() / 1000) < startedAt + 3) {
+    // The removal lands seconds after the submission is seen waiting, so
+    // the link's new expiry is later than any time the submission read
+    // before it began to wait. A check against such a time would still let
+    // the link through.
+    const waitingAt = Math.floor(Date.now() / 1000);
+    while (Math.floor(Date.now() / 1000) < waitingAt + 2) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
 
