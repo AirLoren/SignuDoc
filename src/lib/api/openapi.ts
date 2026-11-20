@@ -10,6 +10,8 @@ import {
   signatureMeanings,
 } from "../types/domain.ts";
 
+import { webhookEventTypes } from "../webhooks/events.ts";
+
 const errorResponse = {
   content: {
     "application/json": { schema: { $ref: "#/components/schemas/Error" } },
@@ -350,6 +352,45 @@ export function buildOpenApiDocument(
             url: { format: "uri", type: "string" },
           },
           required: ["uploadId", "url", "method", "headers", "expiresAt"],
+          type: "object",
+        },
+        WebhookDelivery: {
+          properties: {
+            attempts: { type: "integer" },
+            createdAt: { format: "date-time", type: "string" },
+            deliveredAt: isoTime,
+            endpointId: { type: "string" },
+            envelopeId: { type: ["string", "null"] },
+            id: {
+              description: "The webhook-id header it was sent with.",
+              type: "string",
+            },
+            lastStatusCode: { type: ["integer", "null"] },
+            object: { const: "webhook_delivery", type: "string" },
+            payload: {
+              description:
+                "The JSON body it carries: made at its first try and sent unchanged on every later one. Null before its first try. A delivery that failed because its signing secret could not be read has one but was never sent.",
+              type: ["object", "null"],
+            },
+            status: {
+              enum: ["delivered", "failed", "pending"],
+              type: "string",
+            },
+            type: { enum: [...webhookEventTypes], type: "string" },
+          },
+          required: [
+            "object",
+            "id",
+            "type",
+            "status",
+            "attempts",
+            "endpointId",
+            "envelopeId",
+            "lastStatusCode",
+            "payload",
+            "createdAt",
+            "deliveredAt",
+          ],
           type: "object",
         },
       },
@@ -703,6 +744,67 @@ export function buildOpenApiDocument(
             ...emailErrors,
           },
           summary: "Create an envelope from a template",
+        },
+      },
+      "/webhook-deliveries": {
+        get: {
+          parameters: [
+            {
+              description:
+                "Only deliveries queued at or after this time, which is when their event happened, not when they were sent. Times are kept to the second, so a time with a fraction counts from the start of its second.",
+              in: "query",
+              name: "since",
+              schema: { format: "date-time", type: "string" },
+            },
+            {
+              in: "query",
+              name: "status",
+              schema: {
+                enum: ["delivered", "failed", "pending"],
+                type: "string",
+              },
+            },
+            {
+              in: "query",
+              name: "type",
+              schema: { enum: [...webhookEventTypes], type: "string" },
+            },
+            {
+              in: "query",
+              name: "limit",
+              schema: {
+                default: 25,
+                maximum: 100,
+                minimum: 1,
+                type: "integer",
+              },
+            },
+            { in: "query", name: "cursor", schema: { type: "string" } },
+          ],
+          responses: {
+            "200": {
+              content: {
+                "application/json": {
+                  schema: {
+                    properties: {
+                      data: {
+                        items: { $ref: "#/components/schemas/WebhookDelivery" },
+                        type: "array",
+                      },
+                      nextCursor: { type: ["string", "null"] },
+                      object: { const: "list", type: "string" },
+                    },
+                    required: ["object", "data", "nextCursor"],
+                    type: "object",
+                  },
+                },
+              },
+              description:
+                "Webhook deliveries to every endpoint, newest first, each with the payload it carried (null until its first try).",
+            },
+            ...errors,
+          },
+          summary: "List webhook deliveries, to catch up on missed events",
         },
       },
       "/uploads": {

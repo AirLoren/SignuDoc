@@ -249,7 +249,7 @@ Every endpoint that returns an envelope returns the same object:
   completion once it is completed, declined or voided.
 
 To know when something happens without asking again and again, use
-webhooks (coming in the next release).
+[webhooks](#webhooks).
 
 ## Endpoints
 
@@ -269,8 +269,152 @@ webhooks (coming in the next release).
 | `POST /api/v1/uploads`                         | write  | An upload URL for a PDF over 4 MB.                                                                                                                                                                      |
 | `GET /api/v1/templates`                        | read   | Saved templates, with their roles in signing order.                                                                                                                                                     |
 | `POST /api/v1/templates/{id}/envelopes`        | write  | An envelope from a template: `title`, `signers` (`name`, `email`, and `signatureMeaning` on Part 11 installs, one per role in order), and optionally `metadata` and `send`. Takes an `Idempotency-Key`. |
+| `GET /api/v1/webhook-deliveries`               | read   | Webhook deliveries, newest first, with the payload each carried: `?since=` (ISO time), `?type=`, `?status=`, `?limit=`, `?cursor=`. See [Webhooks](#webhooks).                                          |
 | `GET /api/v1/openapi.json`                     | none   | The OpenAPI 3.1 description of all of this, for code generators and API tools.                                                                                                                          |
 
 Envelopes made through the API are ordinary envelopes: they show in the key's
 administrator's documents, can be followed and voided there, and their audit
 trail records the key that sent them.
+
+## Webhooks
+
+A webhook tells your app the moment an envelope changes, so it does not
+have to ask. An administrator adds an endpoint under Settings,
+Organization, Webhooks: an `https://` URL, the events it wants, and an
+optional description. The signing secret (`whsec_…`) is shown once, then.
+"Send test" sends a `webhook.test` event at once and says how your app
+answered.
+
+Endpoints belong to the whole install: each one gets events for every
+envelope, whoever sent it. `data.owner` says whose envelope it is, so an app
+can ignore the ones that are not its own. An install can have 10 endpoints.
+
+### Events
+
+| Event                | When                                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| `envelope.sent`      | The envelope was sent. `data.signer` is the first signer, now invited.                       |
+| `signer.viewed`      | A signer opened it for the first time.                                                       |
+| `signer.signed`      | A signer signed. `data.signer` is who.                                                       |
+| `envelope.completed` | Everyone signed. The signed PDF and the certificate are ready to download when this arrives. |
+| `envelope.declined`  | A signer declined. `data.reason` is the reason they gave, if any.                            |
+| `envelope.voided`    | The sender voided it. `data.reason` is why, if given.                                        |
+| `envelope.expired`   | Its deadline passed before everyone signed.                                                  |
+
+### What arrives
+
+Each event is a `POST` with a JSON body:
+
+```json
+{
+  "type": "signer.signed",
+  "timestamp": "2026-11-18T09:14:03.000Z",
+  "data": {
+    "envelope": { "object": "envelope", "id": "…", "status": "sent", "…": "…" },
+    "owner": { "id": "…", "email": "ops@example.com", "name": "Ops" },
+    "signer": { "id": "…", "ref": "client", "status": "signed", "…": "…" }
+  }
+}
+```
+
+`data.envelope` is the same [envelope](#the-envelope) the API returns, as it
+was when the event was first sent.
+
+### Checking the signature
+
+Deliveries follow [Standard Webhooks](https://www.standardwebhooks.com), so
+you can check them with one of its libraries instead of your own code. Each
+carries three headers:
+
+- `webhook-id`: the delivery's id (`msg_…`). The same on every try, so use
+  it to ignore a delivery you already handled.
+- `webhook-timestamp`: when this try was sent, in seconds since 1970.
+  Refuse one more than five minutes old.
+- `webhook-signature`: `v1,` and the base64 HMAC-SHA256 of
+  `{webhook-id}.{webhook-timestamp}.{body}`, keyed with the secret's bytes
+  (the base64 after `whsec_`). Check it against the raw body, before you
+  parse it.
+
+Without a library, in Node.js:
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+function isFromSignuDoc(headers, rawBody, secret) {
+  const id = headers["webhook-id"];
+  const timestamp = headers["webhook-timestamp"];
+  const signatures = headers["webhook-signature"];
+
+  if (!id || !timestamp || !signatures) {
+    return false;
+  }
+
+  // Written this way round so a timestamp that is not a number fails too.
+  if (!(Math.abs(Date.now() / 1000 - Number(timestamp)) <= 300)) {
+    return false;
+  }
+
+  const key = Buffer.from(secret.slice("whsec_".length), "base64");
+  const expected = Buffer.from(
+    `v1,${createHmac("sha256", key).update(`${id}.${timestamp}.${rawBody}`).digest("base64")}`,
+  );
+
+  // During a secret rotation there are two signatures, space separated.
+  return signatures.split(" ").some((signature) => {
+    const given = Buffer.from(signature);
+
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  });
+}
+```
+
+"New secret" in Settings makes a new secret and shows it once. For 24 hours
+after that, deliveries are signed with both the old and the new one, so you
+can switch without missing any. Another new secret can be made once those
+24 hours are over, so the old one always gets its full day. To replace a
+secret sooner, for example one that leaked, remove the endpoint and add it
+again.
+
+### Answers and retries
+
+Store or queue the event first, then answer with any `2xx` within 10
+seconds and do the slow work after. A `2xx` counts as delivered, so an
+event your app answered but did not keep is not sent again. Any other
+answer, a redirect, or no answer counts as a failure, and the delivery
+is tried again 1 minute, 5 minutes, 30 minutes, 2 hours, 8 hours, 24 hours
+and 24 hours later, about two and a half days in all. After the eighth try
+it is marked failed. A delivery whose envelope has since been deleted is
+not sent again. The delivery log in Settings shows the last 100
+deliveries per endpoint, with your app's answer, and "Send again" puts a
+delivered or failed one back in line.
+
+Retries go out when something wakes the install: the next change to any
+envelope, the next API call, or the daily cron job. On Vercel's Hobby plan
+crons run once a day, so on a quiet install a retry can wait until the next
+day. On Pro you can run it more often by changing the schedule of
+`/api/internal/webhooks` in `vercel.json`, for example to `*/5 * * * *`.
+
+If your app was down, `GET /api/v1/webhook-deliveries?since=…` lists what
+it missed, with the same payloads. `since` counts from when each delivery
+was queued, which is when its event happened, not when it was sent.
+Deliveries can arrive out of order, as one can still be retrying while a
+later one gets through, so the newest event your app has is not a safe
+`since`. Give a time from before anything it may have missed, for example
+three days before it went down (retries take about two and a half days),
+and skip what it already has by its `webhook-id`. Times are kept to the
+second, so a `since` with a fraction counts from the start of its second.
+Deliveries are kept 30 days after they are delivered, and otherwise 90
+days after their last try or "Send again".
+
+### Safety
+
+The URL must be `https://` and must not point at a private, loopback or
+link-local address. The address is checked each time a delivery is sent,
+and the request goes to the address that was checked. Redirects are not
+followed. For a receiver on your own machine while developing, set
+`WEBHOOK_ALLOW_PRIVATE_URLS=1`; it allows `http://` and local addresses,
+and is ignored on Vercel.
+
+Signing secrets are stored encrypted with a key derived from
+`BETTER_AUTH_SECRET`. If that secret changes, deliveries fail with a note
+to make a new secret in Settings.
