@@ -15,6 +15,7 @@ import {
   type ApiActor,
 } from "./api/envelopes.ts";
 import { openTestDatabase } from "./db/test-database.ts";
+import { ELECTRONIC_RECORDS_DISCLOSURE_VERSION } from "./electronic-records-disclosure.ts";
 import {
   addEmbedOrigin,
   EmbeddingError,
@@ -34,7 +35,9 @@ import { hashOpaqueToken } from "./services/opaque-tokens.ts";
 import {
   declineSigningForToken,
   getSigningPayloadForToken,
+  recordSignerConsent,
   SigningAccessError,
+  submitSigningForToken,
 } from "./signing.ts";
 import { setWebhookDrainScheduler } from "./webhooks/outbox.ts";
 
@@ -50,6 +53,9 @@ const SETTINGS = [
   "STORAGE_LOCAL_DIR",
 ] as const;
 const ORIGIN = "https://app.example.com";
+// A PNG of one transparent pixel, standing in for a drawn signature.
+const DRAWN_SIGNATURE =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 let database: pg.Pool;
 let workDir: string;
@@ -376,6 +382,119 @@ test("an embedded envelope emails no invitation, and the app gets a link for the
   assert.ok(
     await getSigningPayloadForToken(tokenOf(replacement.url), { database }),
   );
+});
+
+test("signers of an embedded envelope who share a step each get a link, and the next step is not emailed", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const tag = randomUUID().slice(0, 8);
+  const signatureFor = (signer: string, x: number) => ({
+    height: 0.05,
+    page: 1,
+    signer,
+    type: "signature",
+    width: 0.2,
+    x,
+    y: 0.7,
+  });
+  const envelope = await createEnvelopeForApi(
+    admin,
+    apiCreateEnvelopeSchema.parse({
+      fields: [
+        signatureFor("a", 0.05),
+        signatureFor("b", 0.35),
+        signatureFor("c", 0.65),
+      ],
+      send: { delivery: "embedded", permittedUseConfirmed: true },
+      signers: [
+        {
+          email: `first-${tag}@example.test`,
+          name: "First",
+          ref: "a",
+          step: 1,
+        },
+        {
+          email: `second-${tag}@example.test`,
+          name: "Second",
+          ref: "b",
+          step: 1,
+        },
+        {
+          email: `third-${tag}@example.test`,
+          name: "Third",
+          ref: "c",
+          step: 2,
+        },
+      ],
+      title: "Portal agreement",
+    }),
+    { body: pdf, contentType: "application/pdf", filename: "a.pdf" },
+    database,
+  );
+  const [first, second, third] = envelope.signers;
+
+  assert.deepEqual(
+    envelope.signers.map((signer) => signer.status),
+    ["notified", "notified", "pending"],
+  );
+
+  // Both signers of the first step can have a link at once, and the next
+  // step's cannot yet.
+  const tokens = [
+    await linkFor(admin, envelope.id, first!.id),
+    await linkFor(admin, envelope.id, second!.id),
+  ];
+
+  await assert.rejects(
+    linkFor(admin, envelope.id, third!.id),
+    (error: unknown) =>
+      error instanceof EmbeddingError && error.statusCode === 409,
+  );
+
+  for (const [index, token] of tokens.entries()) {
+    const signerId = [first!.id, second!.id][index]!;
+    const field = await database.query<{ id: string }>(
+      `select id from fields where envelope_id = $1 and signer_id = $2`,
+      [envelope.id, signerId],
+    );
+
+    assert.deepEqual(await openEmbedLink(token, ORIGIN, database), {
+      ok: true,
+    });
+    await recordSignerConsent(
+      token,
+      { disclosureVersion: ELECTRONIC_RECORDS_DISCLOSURE_VERSION },
+      { database },
+    );
+    await submitSigningForToken(
+      token,
+      {
+        clientTimezoneOffsetMinutes: 0,
+        fields: [
+          {
+            fieldId: field.rows[0]!.id,
+            imageDataUrl: DRAWN_SIGNATURE,
+            inputMethod: "drawn",
+            type: "signature",
+          },
+        ],
+      },
+      { database },
+    );
+  }
+
+  // The second step has started, and its signer was not emailed: the app
+  // asks for their link.
+  const statuses = await database.query<{ status: string }>(
+    `select status from signers where id = $1`,
+    [third!.id],
+  );
+
+  assert.equal(statuses.rows[0]?.status, "notified");
+  assert.equal(await invitationsTo(third!.email), 0);
+  assert.ok(await linkFor(admin, envelope.id, third!.id));
 });
 
 test("an embedded link not opened in time stops working", async () => {

@@ -22,7 +22,7 @@ export { httpEmbedOriginsAllowed, parseEmbedOrigin } from "./embed-origin.ts";
 // - An administrator lists the sites allowed to frame signing pages.
 // - An envelope sent through the API with delivery "embedded" emails no
 //   invitations or reminders.
-// - For the signer whose turn it is, the app asks the API for a link made
+// - For each signer whose turn it is, the app asks the API for a link made
 //   for one of those sites. Each request replaces the last link. A link
 //   not opened within 15 minutes stops working; once opened it lasts for
 //   the signing session.
@@ -222,7 +222,7 @@ export function embedSigningPath(token: string, origin: string): string {
 }
 
 /**
- * A new signing link for the signer whose turn it is on an embedded
+ * A new signing link for a signer whose turn it is on an embedded
  * envelope of `userId`'s, made for `origin`. Replaces the signer's last
  * link.
  */

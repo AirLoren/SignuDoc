@@ -5,9 +5,9 @@ import { issueEmbedLink } from "@/lib/embedding";
 
 type RouteContext = { params: Promise<{ id: string; signerId: string }> };
 
-// A signing link for an embedded envelope, for the signer whose turn it
-// is, to show in a frame on an allowed site. Each call replaces the
-// signer's last link. See docs/api.md, "Embedded signing".
+// A signing link for an embedded envelope, for a signer whose turn it is,
+// to show in a frame on an allowed site. Each call replaces the signer's
+// last link. See docs/api.md, "Embedded signing".
 
 export async function POST(request: Request, context: RouteContext) {
   return handleApi(request, "write", "api_embed_link_failure", async (api) => {

@@ -5,7 +5,7 @@ import { sendManualEnvelopeNudge } from "@/lib/reminders";
 
 type Context = { params: Promise<{ id: string }> };
 
-// Emails the signer whose turn it is a reminder, under the same limit as
+// Emails a reminder to each signer whose turn it is, under the same limit as
 // the reminder button in the web app.
 export async function POST(request: Request, context: Context) {
   const { id } = await context.params;

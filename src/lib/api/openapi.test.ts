@@ -75,3 +75,17 @@ test("the OpenAPI description allows the values the API accepts", () => {
   );
   assert.deepEqual(fromTemplate.signatureMeaning.enum, [...signatureMeanings]);
 });
+
+test("the OpenAPI description gives this install's signer limit", () => {
+  const document = buildOpenApiDocument("https://sign.example.com/api/v1", 40);
+  const fromTemplate =
+    document.paths["/templates/{id}/envelopes"].post.requestBody.content[
+      "application/json"
+    ].schema.properties.signers;
+
+  assert.equal(
+    document.components.schemas.CreateEnvelope.properties.signers.maxItems,
+    40,
+  );
+  assert.equal(fromTemplate.maxItems, 40);
+});

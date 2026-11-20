@@ -180,6 +180,7 @@ function describeEvent(event: SystemAuditEvent): string {
 const downloadedFileLabels: Record<string, string> = {
   audit_trail: "audit trail",
   evidence: "certificate",
+  original: "document as sent",
   signed: "signed PDF",
 };
 
