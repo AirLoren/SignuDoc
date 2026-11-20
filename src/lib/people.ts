@@ -7,6 +7,7 @@ import {
   withTransaction,
 } from "./db/connection.ts";
 import { revokeApiKeysForUser } from "./api-keys.ts";
+import { CURRENT_IDENTITY_VERIFIED_AT_SQL } from "./part11.ts";
 import type { RequestClient } from "./security/request.ts";
 import { recordSystemAuditEvent } from "./services/system-audit.ts";
 
@@ -88,7 +89,7 @@ const PERSON_COLUMNS = `
   u.role,
   u."emailVerified" AS "emailVerified",
   u."createdAt" AS "createdAt",
-  u.identity_verified_at AS "identityVerifiedAt",
+  ${CURRENT_IDENTITY_VERIFIED_AT_SQL} AS "identityVerifiedAt",
   u.identity_verification_note AS "identityVerificationNote",
   u.signing_locked_at AS "signingLockedAt",
   u."twoFactorEnabled" AS "twoFactorEnabled",

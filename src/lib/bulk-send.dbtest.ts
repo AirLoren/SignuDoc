@@ -649,8 +649,9 @@ test("retrying a confirmed Part 11 batch keeps a skipped row skipped after the s
   await database.query(
     `
       insert into public."user" (
-        id, name, email, role, "emailVerified", identity_verified_at, signing_locked_at
-      ) values ($1, 'Ann Ready', $2, 'user', true, 1, null)
+        id, name, email, role, "emailVerified", identity_verified_at, signing_locked_at,
+        identity_verified_name, identity_verified_email
+      ) values ($1, 'Ann Ready', $2, 'user', true, 1, null, 'Ann Ready', $2)
     `,
     [readyUserId, readyEmail],
   );
@@ -713,8 +714,9 @@ test("retrying a confirmed Part 11 batch keeps a skipped row skipped after the s
     await database.query(
       `
         insert into public."user" (
-          id, name, email, role, "emailVerified", identity_verified_at, signing_locked_at
-        ) values ($1, 'Ada Later', $2, 'user', true, 1, null)
+          id, name, email, role, "emailVerified", identity_verified_at, signing_locked_at,
+          identity_verified_name, identity_verified_email
+        ) values ($1, 'Ada Later', $2, 'user', true, 1, null, 'Ada Later', $2)
       `,
       [skippedUserId, skippedEmail],
     );
@@ -743,6 +745,84 @@ test("retrying a confirmed Part 11 batch keeps a skipped row skipped after the s
       ).rowCount,
       0,
     );
+  } finally {
+    if (previous.rowCount) {
+      await database.query(
+        `update app_settings set part11_mode = $1 where id`,
+        [previous.rows[0]!.part11_mode],
+      );
+    } else {
+      await database.query(`delete from app_settings where id`);
+    }
+  }
+});
+
+test("a Part 11 row goes out only in the confirmed person's name, and is signed in that name", async () => {
+  const userId = await createUser();
+  const template = await createOneRoleTemplate(userId);
+  const accountEmail = `alice-${randomUUID()}@example.test`;
+  const accountId = randomUUID();
+
+  createdUsers.push(accountId);
+  await database.query(
+    `
+      insert into public."user" (
+        id, name, email, role, "emailVerified", identity_verified_at, signing_locked_at,
+        identity_verified_name, identity_verified_email
+      ) values ($1, 'Alice Account Holder', $2, 'user', true, 1, null, 'Alice Account Holder', $2)
+    `,
+    [accountId, accountEmail],
+  );
+
+  const previous = await database.query<{ part11_mode: boolean }>(
+    `select part11_mode from app_settings where id`,
+  );
+
+  await database.query(
+    `
+      insert into app_settings (id, signup_mode, created_at, updated_at, part11_mode)
+      values (true, 'open', 1, 1, true)
+      on conflict (id) do update set part11_mode = true
+    `,
+  );
+
+  try {
+    const refused = await bulkSendFromTemplate(
+      userId,
+      template.id,
+      confirmBody(`name,email\nDr Victim Name,${accountEmail}\n`, {
+        signatureMeaning: "approval",
+      }),
+      { ...options(), sender: senderFor(userId) },
+    );
+
+    assert.equal(refused.rows[0]?.status, "skipped");
+    assert.match(
+      refused.rows[0]?.reason ?? "",
+      /confirmed as Alice Account Holder/,
+    );
+
+    // The same person written another way still goes.
+    const result = await bulkSendFromTemplate(
+      userId,
+      template.id,
+      confirmBody(`name,email\nalice holder,${accountEmail.toUpperCase()}\n`, {
+        signatureMeaning: "approval",
+      }),
+      { ...options(), sender: senderFor(userId) },
+    );
+
+    assert.equal(result.rows[0]?.status, "sent", result.rows[0]?.reason ?? "");
+
+    const signer = await database.query<{ name: string; userId: string }>(
+      `select name, user_id as "userId" from signers where envelope_id = $1`,
+      [result.rows[0]?.envelopeId],
+    );
+
+    // Named as the administrator confirmed them, not as the CSV had it.
+    assert.deepEqual(signer.rows, [
+      { name: "Alice Account Holder", userId: accountId },
+    ]);
   } finally {
     if (previous.rowCount) {
       await database.query(

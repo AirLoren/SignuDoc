@@ -2759,7 +2759,10 @@ export async function sendDraftEnvelope(
     }
   }
 
-  const part11SignerAccounts = new Map<string, string>();
+  const part11SignerAccounts = new Map<
+    string,
+    { name: string; userId: string }
+  >();
 
   if (part11) {
     const checks = await listSignerCheckSettings(envelopeId, database);
@@ -2786,7 +2789,10 @@ export async function sendDraftEnvelope(
         );
       }
 
-      part11SignerAccounts.set(signer.id, account.userId);
+      part11SignerAccounts.set(signer.id, {
+        name: account.name,
+        userId: account.userId,
+      });
     }
   }
 
@@ -2938,16 +2944,19 @@ export async function sendDraftEnvelope(
           envelopeId,
         ]);
 
-        for (const [signerId, accountId] of part11SignerAccounts) {
+        // Each signer is bound to their account and named as the
+        // administrator confirmed them, so the signature and its audit
+        // record carry the confirmed name, not one typed for the draft.
+        for (const [signerId, account] of part11SignerAccounts) {
           const bound = await tx.query(
             `
               UPDATE signers
-              SET user_id = $1
+              SET user_id = $1, name = $4
               WHERE id = $2
                 AND envelope_id = $3
                 AND signature_meaning IS NOT NULL
             `,
-            [accountId, signerId, envelopeId],
+            [account.userId, signerId, envelopeId, account.name],
           );
 
           if (bound.rowCount !== 1) {
