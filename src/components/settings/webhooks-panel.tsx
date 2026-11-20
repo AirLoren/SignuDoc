@@ -77,7 +77,18 @@ function deliveryTone(status: WebhookDeliverySummary["status"]) {
       : "pill-warning";
 }
 
-function DeliveryLog({ endpointId }: { endpointId: string }) {
+/**
+ * One endpoint's recent deliveries. `refreshKey` changes when the panel
+ * changes an endpoint: the log reads itself again but stays mounted, so a
+ * "Send again" under way and its error are not lost.
+ */
+function DeliveryLog({
+  endpointId,
+  refreshKey,
+}: {
+  endpointId: string;
+  refreshKey: number;
+}) {
   const [deliveries, setDeliveries] = useState<WebhookDeliverySummary[] | null>(
     null,
   );
@@ -111,7 +122,7 @@ function DeliveryLog({ endpointId }: { endpointId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [endpointId, revision]);
+  }, [endpointId, refreshKey, revision]);
 
   function refresh() {
     setError(null);
@@ -687,7 +698,7 @@ export function WebhooksPanel() {
                 )}
               </div>
               {openLogId === endpoint.id ? (
-                <DeliveryLog endpointId={endpoint.id} key={revision} />
+                <DeliveryLog endpointId={endpoint.id} refreshKey={revision} />
               ) : null}
             </li>
           ))}

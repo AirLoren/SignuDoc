@@ -395,12 +395,15 @@ day. On Pro you can run it more often by changing the schedule of
 
 If your app was down, `GET /api/v1/webhook-deliveries?since=…` lists what
 it missed, with the same payloads. `since` counts from when each delivery
-was queued, which is when its event happened, not when it was sent: give
-the time of the last event your app has. Times are kept to the second, so
-a `since` with a fraction counts from the start of its second, and you may
-get a delivery you already have: skip it by its `webhook-id`. Deliveries
-are kept 30 days after they are delivered, and otherwise 90 days after
-their last try or "Send again".
+was queued, which is when its event happened, not when it was sent.
+Deliveries can arrive out of order, as one can still be retrying while a
+later one gets through, so the newest event your app has is not a safe
+`since`. Give a time from before anything it may have missed, for example
+three days before it went down (retries take about two and a half days),
+and skip what it already has by its `webhook-id`. Times are kept to the
+second, so a `since` with a fraction counts from the start of its second.
+Deliveries are kept 30 days after they are delivered, and otherwise 90
+days after their last try or "Send again".
 
 ### Safety
 
