@@ -235,6 +235,45 @@ export async function peekRateLimit(
   };
 }
 
+/**
+ * Takes back one request counted by consumeRateLimit, for limits that
+ * count every attempt up front (so parallel ones cannot all pass a peek)
+ * but only mean to keep the ones that fail. A count that drops to nothing
+ * is removed, so its window starts again with the next failure.
+ */
+export async function refundRateLimit(
+  key: string,
+  {
+    database,
+    now = Date.now(),
+  }: ConsumeRateLimitOptions & { now?: number } = {},
+): Promise<void> {
+  try {
+    const executor = database ?? getDb();
+    const removed = await executor.query(
+      "delete from public.rate_limits where key = $1 and count <= 1",
+      [hashKey(key)],
+    );
+
+    if ((removed.rowCount ?? 0) === 0) {
+      await executor.query(
+        "update public.rate_limits set count = count - 1 where key = $1 and count > 1 and expires_at > $2",
+        [hashKey(key), now],
+      );
+    }
+  } catch (error) {
+    warnAboutFallback(error);
+
+    const entry = memoryStore.get(key);
+
+    if (entry && entry.count <= 1) {
+      memoryStore.delete(key);
+    } else if (entry && entry.expiresAt > now) {
+      entry.count -= 1;
+    }
+  }
+}
+
 /** Forgets a limit's count, as after a sign-in that worked. */
 export async function clearRateLimit(
   key: string,

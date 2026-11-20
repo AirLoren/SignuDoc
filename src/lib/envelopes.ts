@@ -2841,8 +2841,16 @@ export async function sendDraftEnvelope(
     }
   }
 
-  // Everyone in the first step of the signing order is invited now.
-  const firstSigners = firstStepSigners(signers);
+  // Everyone in the first step of the signing order is invited now. A
+  // Part 11 signer is invited, and recorded as sent to, in the name the
+  // administrator confirmed, which is the name saved on the signer below.
+  const firstSigners = firstStepSigners(
+    signers.map((signer) => {
+      const account = part11SignerAccounts.get(signer.id);
+
+      return account ? { ...signer, name: account.name } : signer;
+    }),
+  );
   const firstSigner = firstSigners[0];
 
   if (!firstSigner) {

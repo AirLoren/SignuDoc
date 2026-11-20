@@ -823,6 +823,18 @@ test("a Part 11 row goes out only in the confirmed person's name, and is signed 
     assert.deepEqual(signer.rows, [
       { name: "Alice Account Holder", userId: accountId },
     ]);
+
+    // The send is recorded in the same name the signer row carries.
+    const sent = await database.query<{ signerName: string }>(
+      `
+        select metadata->>'signerName' as "signerName"
+        from audit_events
+        where envelope_id = $1 and event = 'sent'
+      `,
+      [result.rows[0]?.envelopeId],
+    );
+
+    assert.deepEqual(sent.rows, [{ signerName: "Alice Account Holder" }]);
   } finally {
     if (previous.rowCount) {
       await database.query(

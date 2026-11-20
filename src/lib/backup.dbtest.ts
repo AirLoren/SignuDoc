@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { after, before, beforeEach, test } from "node:test";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 import type pg from "pg";
 
@@ -236,10 +237,11 @@ test("a restore ends the sessions, codes and signing links the backup holds", as
       insert into signers (
         id, envelope_id, name, email, sign_order, status,
         signing_token_hash, signing_token_expires_at,
-        email_code_hash, email_code_expires_at, last_notified_at
+        email_code_hash, email_code_expires_at, last_notified_at,
+        last_nudged_at
       ) values
-        ($1, $3, 'Riley', 'riley@example.test', 1, 'notified', $4, $6, 'code-hash', $6, $5),
-        ($2, $3, 'Casey', 'casey@example.test', 2, 'pending', null, null, null, null, null)
+        ($1, $3, 'Riley', 'riley@example.test', 1, 'notified', $4, $6, 'code-hash', $6, $5, $5),
+        ($2, $3, 'Casey', 'casey@example.test', 2, 'pending', null, null, null, null, null, null)
     `,
     [waitingId, signedId, envelopeId, "b".repeat(64), now, now + 3600],
   );
@@ -286,18 +288,87 @@ test("a restore ends the sessions, codes and signing links the backup holds", as
     `
       select
         id, status, signing_token_hash as "tokenHash",
-        email_code_hash as "codeHash"
+        email_code_hash as "codeHash", last_nudged_at as "nudgedAt",
+        last_notified_at as "notifiedAt"
       from signers where envelope_id = $1 order by sign_order
     `,
     [envelopeId],
   );
 
-  // The records themselves come back; only the links are gone.
+  // The records themselves come back; only the links are gone. The
+  // reminder sent just before the backup no longer holds back the one that
+  // brings a new link.
   assert.deepEqual(signers.rows, [
-    { codeHash: null, id: waitingId, status: "notified", tokenHash: null },
-    { codeHash: null, id: signedId, status: "pending", tokenHash: null },
+    {
+      codeHash: null,
+      id: waitingId,
+      notifiedAt: now,
+      nudgedAt: null,
+      status: "notified",
+      tokenHash: null,
+    },
+    {
+      codeHash: null,
+      id: signedId,
+      notifiedAt: null,
+      nudgedAt: null,
+      status: "pending",
+      tokenHash: null,
+    },
   ]);
   assert.equal(restored.rows.envelopes, 1);
+});
+
+test("a backup made before identity confirmations kept their name keeps its confirmations", async () => {
+  const userId = await addUser("pat@acme.com");
+
+  await database.query(
+    `
+      update "user"
+      set identity_verified_at = 1700000000,
+          identity_verification_note = 'Passport checked',
+          identity_verified_name = null,
+          identity_verified_email = null
+      where id = $1
+    `,
+    [userId],
+  );
+
+  const target = memoryStore();
+  const summary = await runBackup({
+    database,
+    keepDays: 30,
+    source: memoryStore(),
+    target,
+  });
+
+  // As an older SignuDoc would have written it: without that migration.
+  const stored = target.objects.get(summary.databaseBackup)!;
+  const lines = gunzipSync(stored.body).toString("utf8").split("\n");
+  const header = JSON.parse(lines[0]!) as { migrations: string[] };
+
+  header.migrations = header.migrations.filter(
+    (version) => version !== "20261120100000_identity_verified_snapshot",
+  );
+  lines[0] = JSON.stringify(header);
+  stored.body = gzipSync(Buffer.from(lines.join("\n")));
+
+  await clearTables();
+  await restoreDatabase({
+    backupPath: summary.databaseBackup,
+    database,
+    store: target,
+  });
+
+  const restored = await database.query(
+    `
+      select identity_verified_name as name, identity_verified_email as email
+      from "user" where id = $1
+    `,
+    [userId],
+  );
+
+  assert.deepEqual(restored.rows, [{ email: "pat@acme.com", name: "Pat" }]);
 });
 
 test("a restore refuses a database that already has accounts", async () => {

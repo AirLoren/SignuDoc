@@ -103,7 +103,7 @@ import {
   nextSignerLinkExpiresAt,
 } from "./envelope-deadline.ts";
 import { describeEntryProblem, judgeRadioGroups } from "./field-choices.ts";
-import { consumeRateLimit, peekRateLimit } from "./security/rate-limit.ts";
+import { consumeRateLimit, refundRateLimit } from "./security/rate-limit.ts";
 import {
   buildDisclosureSections,
   CONSENT_STATEMENT,
@@ -1639,13 +1639,20 @@ export async function verifySignerCheck(
     // An access code can be short, so wrong ones are counted per signer and
     // code, over every link and address: a guesser gets a few tries a week,
     // not a few every quarter of an hour. A new code from the sender starts
-    // a new count.
-    const failures = {
-      key: `signing-access-code-failures:${context.signer.id!}:${state.accessCodeHash!}`,
-      limit: ACCESS_CODE_MAX_FAILURES,
-    };
+    // a new count. Each try is counted before the code is compared, so tries
+    // sent at the same moment cannot all pass the check; a right one is
+    // then taken back off the count.
+    const failuresKey = `signing-access-code-failures:${context.signer.id!}:${state.accessCodeHash!}`;
+    const attempt = await consumeRateLimit(
+      {
+        key: failuresKey,
+        limit: ACCESS_CODE_MAX_FAILURES,
+        windowMs: ACCESS_CODE_FAILURE_WINDOW_MS,
+      },
+      { database },
+    );
 
-    if (!(await peekRateLimit(failures, { database })).allowed) {
+    if (!attempt.allowed) {
       throw new SigningMutationError(
         "Too many wrong access codes. Ask the sender for the code, or for a new one.",
         429,
@@ -1654,11 +1661,8 @@ export async function verifySignerCheck(
 
     passed = checkAccessCode(parsed.code, state.accessCodeHash!);
 
-    if (!passed) {
-      await consumeRateLimit(
-        { ...failures, windowMs: ACCESS_CODE_FAILURE_WINDOW_MS },
-        { database },
-      );
+    if (passed) {
+      await refundRateLimit(failuresKey, { database });
     }
   } else {
     // Count the attempt and read the code in one statement, so parallel

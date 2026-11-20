@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 
 import type pg from "pg";
 
-import { openTestDatabase } from "./db/test-database.ts";
+import { afterStatement, openTestDatabase } from "./db/test-database.ts";
 import { clearRateLimitStoreForTests } from "./security/rate-limit.ts";
 import { issueSigningLink } from "./services/signing-links.ts";
 import { hashAccessCode } from "./signer-checks.ts";
@@ -114,4 +114,64 @@ test("a signer's wrong access codes run out, and a new code starts over", async 
   );
 
   assert.deepEqual(await tryCode(token, "9876"), ["access_code"]);
+});
+
+test("guesses sent at the same moment cannot pass the last try together, and right codes are not counted", async () => {
+  const { token } = await createEnvelopeWithAccessCode("4321");
+
+  // Right codes along the way take nothing from the count.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assert.deepEqual(await tryCode(token, "4321"), ["access_code"]);
+  }
+
+  for (let attempt = 0; attempt < ACCESS_CODE_MAX_FAILURES - 1; attempt += 1) {
+    await assert.rejects(
+      tryCode(token, String(6000 + attempt)),
+      (error: unknown) =>
+        error instanceof SigningMutationError && error.statusCode === 400,
+    );
+  }
+
+  // One try is left. Five sent together, each held right after it first
+  // asks about the count until all five have: only one is compared.
+  const together = 5;
+  let arrived = 0;
+  let releaseAll!: () => void;
+  const allArrived = new Promise<void>((resolve) => {
+    releaseAll = resolve;
+  });
+  const pool = afterStatement(
+    database,
+    (text) => arrived < together && text.includes("public.rate_limits"),
+    async () => {
+      arrived += 1;
+
+      if (arrived === together) {
+        releaseAll();
+      }
+
+      await allArrived;
+    },
+  );
+  const results = await Promise.allSettled(
+    Array.from({ length: together }, (_, offset) =>
+      verifySignerCheck(
+        token,
+        { code: String(7000 + offset), method: "access_code" },
+        { database: pool },
+      ),
+    ),
+  );
+  const statuses = results.map((result) =>
+    result.status === "rejected" &&
+    result.reason instanceof SigningMutationError
+      ? result.reason.statusCode
+      : "passed",
+  );
+
+  assert.deepEqual(
+    statuses.toSorted(),
+    [400, 429, 429, 429, 429],
+    JSON.stringify(statuses),
+  );
 });

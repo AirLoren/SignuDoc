@@ -62,7 +62,7 @@ What a restore brings back: everything in the database at the time of the backup
 What a restore does not bring back: anything that lets someone in. A backup holds sign-ins and links as they were when it was made, including ones that were signed out, used or replaced since, so the restore ends them all:
 
 - Everyone signs in again, and password reset links and emailed codes from before the restore stop working.
-- Every signing link stops working. For each envelope still out for signature, send a reminder from its page: that emails the signer a new link.
+- Every signing link stops working. For each envelope still out for signature, send a reminder from its page: that emails the signer a new link. The usual wait between reminders starts over with the restore, so you can send one at once. Embedded envelopes get no reminders: the app that shows them asks for a new link through the API's [embed-link endpoint](api.md#embedded-signing).
 - A signature that was under way at a signing provider has to be started again.
 
 Passwords and API keys come back as they were at the time of the backup. If someone changed a password, or an administrator revoked an API key, after the backup was made, do it again. If the restore follows a break-in, also change `BETTER_AUTH_SECRET` (everyone using two-step sign-in then sets it up again, see step 4).

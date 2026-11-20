@@ -648,6 +648,7 @@ export async function restoreDatabase({
   const counts: Record<string, number> = {};
   let batchTable: string | null = null;
   let batch: unknown[] = [];
+  let backupMigrations = new Set<string>();
 
   async function flush() {
     if (!batchTable || batch.length === 0) {
@@ -684,6 +685,8 @@ export async function restoreDatabase({
           );
         }
 
+        backupMigrations = new Set(entry.header.migrations);
+
         // A new install can already have a row or two of its own (a seal
         // key, its settings). The backup's take their place.
         for (const table of [...entry.header.tables].reverse()) {
@@ -704,6 +707,7 @@ export async function restoreDatabase({
     }
 
     await flush();
+    await backfillRowsFromOlderBackup(client, backupMigrations);
 
     const revoked = await revokeRestoredCredentials(client);
 
@@ -715,6 +719,39 @@ export async function restoreDatabase({
     throw error;
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Backfills a migration makes on the rows it finds. Restore applies the
+ * migrations to an empty database first, so when a backup was made before
+ * one of these, its rows arrive after the backfill ran and are filled here
+ * instead. Each runs only when the backup lacks its migration.
+ */
+const BACKFILLS_FOR_OLDER_BACKUPS: { migration: string; sql: string }[] = [
+  {
+    // Confirmations made before the confirmed name and address were kept
+    // were of the account as it was then (see that migration).
+    migration: "20261120100000_identity_verified_snapshot",
+    sql: `
+      UPDATE "user"
+      SET
+        identity_verified_name = name,
+        identity_verified_email = email
+      WHERE identity_verified_at IS NOT NULL
+        AND identity_verified_name IS NULL
+    `,
+  },
+];
+
+export async function backfillRowsFromOlderBackup(
+  client: Pick<DbPool, "query">,
+  backupMigrations: ReadonlySet<string>,
+) {
+  for (const backfill of BACKFILLS_FOR_OLDER_BACKUPS) {
+    if (!backupMigrations.has(backfill.migration)) {
+      await client.query(backfill.sql);
+    }
   }
 }
 
@@ -735,7 +772,9 @@ export type RevokedCredentials = {
  * - everyone signs in again (sessions, and the one-time codes and links in
  *   verification, go);
  * - every signing link and emailed signing code stops working, and a
- *   signer still to sign gets a new link from the sender's reminder;
+ *   signer still to sign gets a new link from the sender's reminder (the
+ *   reminder's wait starts over, so one can go at once), or, on an
+ *   embedded envelope, from the app asking the API for a new link;
  * - a signature that was under way at a signing provider has to be started
  *   again.
  *
@@ -758,7 +797,13 @@ export async function revokeRestoredCredentials(
         signing_token_hash = NULL,
         signing_token_expires_at = NULL,
         email_code_hash = NULL,
-        email_code_expires_at = NULL
+        email_code_expires_at = NULL,
+        -- The sender's reminder is how the signer gets a new link, so a
+        -- reminder sent just before the backup must not hold it back.
+        last_nudged_at = CASE
+          WHEN signing_token_hash IS NOT NULL THEN NULL
+          ELSE last_nudged_at
+        END
       WHERE signing_token_hash IS NOT NULL OR email_code_hash IS NOT NULL
     `,
   );
