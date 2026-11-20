@@ -48,6 +48,11 @@ export type ApiKeySummary = {
   id: string;
   lastUsedAt: number | null;
   name: string;
+  /**
+   * Whether the owner has asked to close their account. Their keys are
+   * turned away from then on and are deleted with the account.
+   */
+  ownerClosing: boolean;
   ownerEmail: string;
   ownerName: string;
   prefix: string;
@@ -87,7 +92,10 @@ const SUMMARY_COLUMNS = `
   k.expires_at AS "expiresAt",
   k.revoked_at AS "revokedAt",
   u.email AS "ownerEmail",
-  u.name AS "ownerName"
+  u.name AS "ownerName",
+  EXISTS (
+    SELECT 1 FROM account_closure_requests c WHERE c.user_id = k.user_id
+  ) AS "ownerClosing"
 `;
 
 function nowInSeconds() {
