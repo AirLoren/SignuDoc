@@ -115,7 +115,7 @@ To test a production build on your machine, set `APP_URL=http://localhost:3000` 
 Document import currently enforces these limits:
 
 - PDF files only
-- 20 MB maximum upload size
+- 20 MB maximum upload size, and at most 1,000 pages
 - password-protected or encrypted PDFs are rejected
 - pure XFA or unsupported PDF variants are rejected
 
