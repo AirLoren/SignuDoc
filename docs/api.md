@@ -45,6 +45,14 @@ What to know about keys:
   its administrator stops being an administrator, or when their account is
   being closed. A key that stopped because its administrator lost the role
   stays revoked if they get it back; make a new one.
+- **Single sign-on does not reach keys.** On an install where people sign
+  in only through single sign-on (`PASSWORD_SIGN_IN=off`), removing someone
+  at your identity provider stops them signing in, but they are still an
+  administrator here, so the keys they made keep working. When an
+  administrator leaves, take the role away under Settings, Organization,
+  People, which revokes their keys, or revoke the keys under API keys, which
+  lists every administrator's keys. An app's keys made from its own
+  administrator account, as above, do not depend on anyone staying.
 - **Keys skip two-step sign-in.** They are for servers, so keep them in your
   app's secret settings (for example a Vercel environment variable), never
   in a browser or a mobile app, and revoke a key as soon as it may have

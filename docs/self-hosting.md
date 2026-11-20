@@ -218,6 +218,7 @@ How it behaves:
 - **Two-step sign-in** is not asked for after single sign-on: the provider's sign-in, with its own MFA, is the check. When an administrator requires two-step sign-in, it applies to people who have a password; someone who only uses single sign-on is not held up.
 - **Turning passwords off.** With single sign-on set up, `PASSWORD_SIGN_IN=off` stops password sign-in, password sign-up and password reset links. Put one or two administrator addresses in `PASSWORD_SIGN_IN_ALLOWED_EMAILS` (comma-separated) so there is a way in if the provider is down; their sign-in page shows "Sign in with a password instead". Without single sign-on set up, `PASSWORD_SIGN_IN=off` does nothing, so nobody is locked out by a half-finished setup.
 - **The site audit trail** records single sign-on sign-ins, and refused ones with the reason (for example, an address the sign-up rule turned away).
+- **API keys** keep working after their administrator is removed at the provider, because that does not change their role here. When an administrator leaves, take the role away under People, which revokes their keys, or revoke the keys under API keys. See [Keys](api.md#keys).
 - A missing or broken setting (one of the three left out, an issuer that is not `https://`) turns single sign-on off and leaves a warning in the function logs, so password sign-in keeps working.
 
 SAML is not supported. Okta, Entra ID and Google all offer OIDC for the same application.

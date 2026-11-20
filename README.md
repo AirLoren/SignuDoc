@@ -70,6 +70,10 @@ The dashboard shows each document as a card with its first page, its status (dra
 
 Open any envelope and choose Save as template. The template keeps the document, the fields and the signing order, with roles instead of names. Using it asks who signs this time and opens a draft ready to send.
 
+### Send from your other apps
+
+Your own apps can send documents through SignuDoc's API. An administrator makes a key under Settings, and one call creates an envelope from a PDF with its signers and fields, and sends it. Signed webhooks tell your app when an envelope is sent, viewed, signed, completed, declined, voided or expires. Embedded signing shows the signing page inside your own site, for the sites an administrator allows. The [API guide](docs/api.md) has the details, and `/api/v1/openapi.json` on your install describes every endpoint.
+
 ### Sealed, certified, and checkable by anyone
 
 When the last signer finishes, SignuDoc builds the signed PDF and an audit certificate, seals both, and emails them to every signer and copy recipient. Names and text in Latin, Greek, Cyrillic, Chinese, Japanese and Korean scripts are drawn correctly. Anyone can drop a copy on the Verify page to see whether it is exactly the file the site produced; the file never leaves their device, only its fingerprint does.
@@ -147,19 +151,19 @@ DocuSign does more, and charges for it per user. SignuDoc does the everyday sign
 | **Phones**                                   | ✅ in the browser                                                                                                           | ✅ native iPhone and Android apps                                            |
 | **Two-step sign-in**                         | ✅ authenticator app, and administrators can require it                                                                     | ✅                                                                           |
 | **Single sign-on**                           | ✅ OpenID Connect, in every install                                                                                         | ✅ SAML, on Enhanced, priced by sales                                        |
+| **API and webhooks**                         | ✅ an API with keys, signed webhooks, and signing inside your own site, in every install                                    | ✅ API plans from $50 a month                                                |
 
 ### Where DocuSign does more
 
-|                                                         | SignuDoc                                                          | DocuSign eSignature                                   |
-| ------------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------- |
-| **More than one document per envelope, and Word files** | — PDF only, one per envelope                                      | ✅                                                    |
-| **Bulk send, web forms, payments**                      | —                                                                 | ✅ on Business Pro                                    |
-| **API and webhooks**                                    | — not yet                                                         | ✅ API plans from $50 a month                         |
-| **Integrations**                                        | —                                                                 | ✅ 1,000+, including Salesforce, Microsoft and Google |
-| **Languages**                                           | — signing pages in English                                        | ✅ signing in 44 languages                            |
-| **Advanced and qualified signatures (eIDAS)**           | With a provider you add: eID Easy or a CSC remote signing service | ✅                                                    |
-| **HIPAA, 21 CFR Part 11, certifications**               | Part 11 mode and a SOC 2 pack; you validate and get audited       | ✅ on Enhanced or as add-ons                          |
-| **Support**                                             | GitHub issues                                                     | ✅ 24/7 on Enhanced                                   |
+|                                                         | SignuDoc                                                            | DocuSign eSignature                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------- |
+| **More than one document per envelope, and Word files** | — PDF only, one per envelope                                        | ✅                                                    |
+| **Bulk send, web forms, payments**                      | —                                                                   | ✅ on Business Pro                                    |
+| **Integrations**                                        | — none built in; connect your own apps through the API and webhooks | ✅ 1,000+, including Salesforce, Microsoft and Google |
+| **Languages**                                           | — signing pages in English                                          | ✅ signing in 44 languages                            |
+| **Advanced and qualified signatures (eIDAS)**           | With a provider you add: eID Easy or a CSC remote signing service   | ✅                                                    |
+| **HIPAA, 21 CFR Part 11, certifications**               | Part 11 mode and a SOC 2 pack; you validate and get audited         | ✅ on Enhanced or as add-ons                          |
+| **Support**                                             | GitHub issues                                                       | ✅ 24/7 on Enhanced                                   |
 
 If your agreements run through Salesforce, need SMS checks or ID document checks, or go out by the thousand in bulk, DocuSign earns its price. If you want to send everyday agreements, keep the evidence, and own the whole thing, SignuDoc is built for you.
 
@@ -235,7 +239,7 @@ Files stay on disk and emails are written to `.data/outbox` instead of being sen
 
 ## Built on Vercel
 
-- **Vercel-native from end to end.** Next.js 16 on Vercel Functions, Neon Postgres and Resend from the Vercel Marketplace, private Vercel Blob storage with direct browser uploads, daily Vercel cron jobs for reminders, cleanup and backups, and optional [Vercel BotID](https://vercel.com/docs/botid).
+- **Vercel-native from end to end.** Next.js 16 on Vercel Functions, Neon Postgres and Resend from the Vercel Marketplace, private Vercel Blob storage with direct browser uploads, daily Vercel cron jobs for reminders, cleanup, backups and webhook retries, and optional [Vercel BotID](https://vercel.com/docs/botid).
 - **Secure by default.** Private file storage with no public URLs, a strict Content Security Policy, rate limits kept in Postgres, signing links that are hashed at rest, sign-in lockout, and a setup page that only the first visitor, or the holder of a `SETUP_TOKEN`, can use.
 - **Tested.** Unit tests, database tests against a real Postgres, and a browser test that sets up a fresh install, sends a document and signs it, run on every pull request.
 
@@ -258,6 +262,7 @@ Your install carries your organization's name, and your organization is responsi
 ## Learn more
 
 - [Self-hosting guide](docs/self-hosting.md): deploying, first-run setup, what it costs, your own domain, updates, sign-in security and single sign-on, the EU, the seal, cleanup, rate limits, bot protection and every optional setting.
+- [API guide](docs/api.md): API keys, the `/api/v1` endpoints, webhooks and embedded signing.
 - [Backup and restore](docs/backup-and-restore.md): daily backups to a second Blob store, and restoring one.
 - [SOC 2 pack](docs/soc2/README.md) and [Part 11 validation pack](docs/part11/README.md): starting documents for an audit or a validation.
 - [Deploying with an AI agent](docs/deploy-with-an-agent.md): every screen of the deploy, for an agent that uses your browser.
