@@ -187,6 +187,7 @@ export function buildOpenApiDocument(
             },
             createdAt: { format: "date-time", type: "string" },
             declinedAt: isoTime,
+            delivery: { enum: ["email", "embedded"], type: "string" },
             expired: { type: "boolean" },
             expiresAt: isoTime,
             files: {
@@ -276,6 +277,13 @@ export function buildOpenApiDocument(
         },
         SendOptions: {
           properties: {
+            delivery: {
+              default: "email",
+              description:
+                "embedded: signers sign inside your app (see POST /envelopes/{id}/signers/{signerId}/embed-link), and no invitations or reminders are emailed. It needs a site on the install's list of allowed sites, simple signatures (signatureLevel simple), no signer accessCode or requireEmailCode, and an install that is not in Part 11 mode; otherwise the send is refused with 400.",
+              enum: ["email", "embedded"],
+              type: "string",
+            },
             expiresInDays: { maximum: 365, minimum: 1, type: "integer" },
             permittedUseConfirmed: {
               const: true,
@@ -289,6 +297,8 @@ export function buildOpenApiDocument(
               type: ["integer", "null"],
             },
             signatureLevel: {
+              description:
+                "advanced and qualified are sent by email only, not with delivery embedded.",
               enum: ["simple", "advanced", "qualified"],
               type: "string",
             },
@@ -611,6 +621,70 @@ export function buildOpenApiDocument(
             ...emailErrors,
           },
           summary: "Send a draft",
+        },
+      },
+      "/envelopes/{id}/signers/{signerId}/embed-link": {
+        post: {
+          parameters: [
+            idParameter,
+            {
+              in: "path",
+              name: "signerId",
+              required: true,
+              schema: { type: "string" },
+            },
+          ],
+          requestBody: {
+            content: {
+              "application/json": {
+                schema: {
+                  properties: {
+                    origin: {
+                      description:
+                        "The exact origin of the page that frames the signer, such as https://app.example.com. Must be allowed in Settings.",
+                      type: "string",
+                    },
+                  },
+                  required: ["origin"],
+                  type: "object",
+                },
+              },
+            },
+            required: true,
+          },
+          responses: {
+            "201": {
+              content: {
+                "application/json": {
+                  schema: {
+                    properties: {
+                      expiresAt: {
+                        description:
+                          "When the link stops working if it is not opened.",
+                        format: "date-time",
+                        type: "string",
+                      },
+                      object: { const: "embed_link", type: "string" },
+                      url: {
+                        description:
+                          "The page to show in the frame, with its origin parameter. Use it as it is.",
+                        format: "uri",
+                        type: "string",
+                      },
+                    },
+                    required: ["object", "url", "expiresAt"],
+                    type: "object",
+                  },
+                },
+              },
+              description:
+                "The link to frame (url) and when it stops working if not opened (expiresAt). Each call replaces the signer's last link.",
+            },
+            "413": errorResponse,
+            ...errors,
+          },
+          summary:
+            "Get a signing link to show in a frame, for a signer whose turn it is",
         },
       },
       "/envelopes/{id}/void": {

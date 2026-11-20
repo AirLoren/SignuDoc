@@ -26,6 +26,8 @@ const EVENT_LABELS: Record<SystemAuditEvent["event"], string> = {
   api_key_created: "API key created",
   api_key_revoked: "API key revoked",
   email_domain_changed: "Email domain changed",
+  embed_origin_added: "Site allowed to embed signing",
+  embed_origin_removed: "Site no longer allowed to embed signing",
   envelope_deleted: "Finished envelope deleted",
   envelope_deletion_cancelled: "Envelope deletion cancelled",
   envelope_deletion_scheduled: "Envelope deletion scheduled",
@@ -114,6 +116,9 @@ function describeEvent(event: SystemAuditEvent): string {
       ]
         .filter(Boolean)
         .join(", ");
+    case "embed_origin_added":
+    case "embed_origin_removed":
+      return typeof metadata.origin === "string" ? metadata.origin : "";
     case "webhook_endpoint_created":
     case "webhook_endpoint_changed":
     case "webhook_endpoint_deleted":

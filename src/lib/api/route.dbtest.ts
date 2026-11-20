@@ -348,3 +348,26 @@ test("only refusals a retry would get again are kept for the key", () => {
   assert.equal(route.isKept(429), false);
   assert.equal(route.isKept(503), false);
 });
+
+test("the embed-link limit refuses in its own words, with Retry-After", async () => {
+  const context = await createContext(`unused-${randomUUID()}`);
+  const limit = {
+    ...route.API_EMBED_LINK_LIMIT,
+    key: `test-embed-link-${randomUUID()}`,
+    limit: 1,
+  };
+
+  assert.equal(await route.applyAccountLimit(context, limit), null);
+
+  const refused = await route.applyAccountLimit(context, limit);
+
+  assert.equal(refused?.status, 429);
+  assert.ok(Number(refused?.headers.get("retry-after")) > 0);
+  assert.deepEqual(await refused?.json(), {
+    error: {
+      code: "rate_limited",
+      message:
+        "This key has asked for too many signing links for now. Wait and try again.",
+    },
+  });
+});

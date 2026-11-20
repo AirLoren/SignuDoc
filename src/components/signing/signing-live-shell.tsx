@@ -55,6 +55,7 @@ import {
 } from "@/lib/field-choices";
 import { getInitials } from "@/lib/initials";
 import { truncateToWholeCharacters } from "@/lib/text-truncate";
+import { postToEmbedParent } from "./embed-parent-message";
 
 const typedSignatureFont =
   '"Snell Roundhand", "Brush Script MT", "Segoe Script", cursive';
@@ -479,9 +480,12 @@ function describeProviderProblem(
 }
 
 export function SigningLiveShell({
+  embedOrigin = null,
   record,
   signatureProblem = null,
 }: {
+  /** The site framing an embedded signing page, told when it is done. */
+  embedOrigin?: string | null;
   record: SigningPayload;
   signatureProblem?: ProviderSignatureProblem | null;
 }) {
@@ -853,6 +857,14 @@ export function SigningLiveShell({
 
       const fallbackRedirectPath = `${window.location.pathname.replace(/\/$/, "")}/done?title=${encodeURIComponent(record.envelopeTitle)}`;
 
+      if (embedOrigin) {
+        postToEmbedParent(embedOrigin, {
+          envelopeId: record.envelopeId,
+          signerId: record.signer.id,
+          type: "signudoc:signed",
+        });
+      }
+
       leavingOnPurposeRef.current = true;
       window.location.assign(payload?.redirectPath ?? fallbackRedirectPath);
     } catch {
@@ -924,6 +936,14 @@ export function SigningLiveShell({
         setDeclineError(payload?.error ?? defaultDeclineErrorMessage);
         setIsDeclining(false);
         return;
+      }
+
+      if (embedOrigin) {
+        postToEmbedParent(embedOrigin, {
+          envelopeId: record.envelopeId,
+          signerId: record.signer.id,
+          type: "signudoc:declined",
+        });
       }
 
       // Not a reload: a decline retires this link, so reloading would land

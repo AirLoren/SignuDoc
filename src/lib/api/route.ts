@@ -7,6 +7,7 @@ import {
   type RateLimitState,
 } from "../auth/api-key.ts";
 import { DownloadAccessError } from "../downloads.ts";
+import { EmbeddingError } from "../embedding.ts";
 import {
   EnvelopeDocumentAccessError,
   EnvelopeMutationError,
@@ -54,6 +55,14 @@ export function apiErrorFor(error: unknown): Response | null {
     return error.code === "too_large"
       ? apiError(413, "payload_too_large", error.message)
       : apiError(400, "invalid_request", error.message);
+  }
+
+  if (error instanceof EmbeddingError) {
+    return apiError(
+      error.statusCode,
+      codeForStatus(error.statusCode),
+      error.message,
+    );
   }
 
   if (error instanceof PendingUploadError) {
@@ -170,7 +179,13 @@ export async function handleApi(
 
 type ApiResult = { body: unknown; status: number };
 
-type AccountLimit = { key: string; limit: number; windowMs: number };
+type AccountLimit = {
+  key: string;
+  limit: number;
+  /** What the 429 says. Left out, it speaks of envelopes made or sent. */
+  refusal?: string;
+  windowMs: number;
+};
 
 /**
  * Whether a response is kept for retries: not a 5xx, and not a 429. A
@@ -361,7 +376,7 @@ async function applyAccountLimits(
       });
 
       if (!state.allowed) {
-        return accountLimitRefusal(state.retryAfterSeconds);
+        return accountLimitRefusal(state.retryAfterSeconds, limit.refusal);
       }
     }
   }
@@ -409,6 +424,15 @@ export const API_SEND_LIMIT = {
   windowMs: 60 * 60 * 1000,
 };
 
+/** Signing links for embedded envelopes: per key, every 10 minutes. */
+export const API_EMBED_LINK_LIMIT = {
+  key: "api-embed-link",
+  limit: 300,
+  refusal:
+    "This key has asked for too many signing links for now. Wait and try again.",
+  windowMs: 10 * 60 * 1000,
+};
+
 /**
  * Counts this request against a per-key limit on creating or sending. These
  * are looser than the web app's per-person limits, since an app sends in
@@ -426,18 +450,18 @@ export async function applyAccountLimit(
 
   return decision.allowed
     ? null
-    : accountLimitRefusal(decision.retryAfterSeconds);
+    : accountLimitRefusal(decision.retryAfterSeconds, input.refusal);
 }
 
 function accountLimitKey(context: ApiContext, input: AccountLimit) {
   return `${input.key}:${context.actor.apiKeyId}`;
 }
 
-function accountLimitRefusal(retryAfterSeconds: number): Response {
-  return apiError(
-    429,
-    "rate_limited",
-    "This key has created or sent too many envelopes for now. Wait and try again.",
-    { "retry-after": String(retryAfterSeconds) },
-  );
+function accountLimitRefusal(
+  retryAfterSeconds: number,
+  message = "This key has created or sent too many envelopes for now. Wait and try again.",
+): Response {
+  return apiError(429, "rate_limited", message, {
+    "retry-after": String(retryAfterSeconds),
+  });
 }

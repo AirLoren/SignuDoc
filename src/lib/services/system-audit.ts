@@ -47,6 +47,8 @@ export const systemAuditEventTypes = [
   "webhook_endpoint_created",
   "webhook_endpoint_changed",
   "webhook_endpoint_deleted",
+  "embed_origin_added",
+  "embed_origin_removed",
   "envelope_deleted",
   "envelope_file_downloaded",
   "envelope_deletion_scheduled",
