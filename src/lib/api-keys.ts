@@ -179,7 +179,9 @@ export async function createApiKey(
       ? null
       : createdAt + input.expiresInDays * DAY_IN_SECONDS;
 
-  await withTransaction(async (tx) => {
+  // The summary is read in the same transaction, so a failed read undoes
+  // the key instead of leaving one live whose secret was never shown.
+  const summary = await withTransaction(async (tx) => {
     // Held while counting, so two requests at once cannot both slip under
     // the limit, and while the role is checked, so a removal that lands at
     // the same moment is seen.
@@ -247,13 +249,15 @@ export async function createApiKey(
       },
       tx,
     );
+
+    const created = await getApiKeySummary(id, tx);
+
+    if (!created) {
+      throw new Error("A key that was just created could not be read back.");
+    }
+
+    return created;
   }, database);
-
-  const summary = await getApiKeySummary(id, database);
-
-  if (!summary) {
-    throw new Error("A key that was just created could not be read back.");
-  }
 
   return { key, summary };
 }
