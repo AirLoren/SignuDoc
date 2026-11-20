@@ -2275,7 +2275,9 @@ type SigningContext = Awaited<ReturnType<typeof resolveSigningContext>>;
 /**
  * Refuses an answer too long to be read in its box on the finished document,
  * before anything is saved, so the signer can shorten it. Without this the
- * value would be drawn so small that no one could read it.
+ * value would be drawn so small that no one could read it. A dropdown choice
+ * is the sender's text, which the signer cannot shorten, so it is taken and
+ * drawn whole however small.
  */
 async function assertTypedValuesFitTheirFields(
   context: SigningContext,
@@ -2284,10 +2286,7 @@ async function assertTypedValuesFitTheirFields(
   const entries = context.fields.flatMap((field) => {
     const value = field.id ? fieldUpdates.get(field.id)?.value : null;
 
-    return (field.type === "text" ||
-      field.type === "number" ||
-      field.type === "dropdown") &&
-      value
+    return (field.type === "text" || field.type === "number") && value
       ? [{ field, value }]
       : [];
   });
