@@ -126,15 +126,21 @@ curl https://sign.example.com/api/v1/envelopes \
 ```
 
 The answer is the envelope (see [The envelope](#the-envelope)), with status
-`sent`, and the first signer has their invitation email. Leave out `send` to
+`sent`, and the first signer has their invitation email (every signer of the
+first step, when signers share one). Leave out `send` to
 make a draft and send it later with `POST /api/v1/envelopes/{id}/send`.
 
 Things to know:
 
-- **Signers** sign in the order given. Each has a `ref`, your own name for
-  them (letters, digits, `.`, `_`, `:` and `-`), which fields use to say whose
-  they are and which comes back with the signer. Up to 10 signers, and up to
-  10 `copyRecipients` (`name`, `email`) who get the finished document.
+- **Signers** sign in the order given, one after the other. To have some sign
+  at the same time, give every signer a `step` (1, 2, 3, ...): signers who
+  share a step are invited together, sign in any order, and the next step
+  starts once they all have. Each signer has a `ref`, your own name for them
+  (letters, digits, `.`, `_`, `:` and `-`), which fields use to say whose they
+  are and which comes back with the signer. Up to 25 signers, or as many as
+  the install sets with `MAX_SIGNERS_PER_ENVELOPE` (up to 100; the
+  `maxItems` in `/api/v1/openapi.json` says), and up to 10 `copyRecipients`
+  (`name`, `email`) who get the finished document.
   `accessCode` and `requireEmailCode: true` add the same extra checks the web
   app offers. On a Part 11 install, give each signer a `signatureMeaning`
   (`approval`, `review`, `responsibility` or `authorship`) before sending.
@@ -216,6 +222,7 @@ Every endpoint that returns an envelope returns the same object:
       "name": "Casey Client",
       "email": "casey@example.com",
       "order": 1,
+      "step": 1,
       "status": "notified",
       "viewedAt": null,
       "signedAt": null,
@@ -232,8 +239,9 @@ Every endpoint that returns an envelope returns the same object:
   envelope past its deadline has `expired: true` until it is voided or the
   deadline moves.
 - A signer's `status` is `pending` (not their turn yet), `notified` (their
-  turn, invited), `signed` or `declined`. `viewedAt` is when they first
-  opened it.
+  turn, invited), `signed` or `declined`. `step` is their step of the signing
+  order: signers who share one sign at the same time. `viewedAt` is when they
+  first opened it.
 - `files` gives the paths to download once there is something to download:
   the signed PDF once the envelope is completed, and the certificate of
   completion once it is completed, declined or voided.
@@ -251,7 +259,7 @@ webhooks (coming in the next release).
 | `GET /api/v1/envelopes/{id}`                   | read   | One envelope.                                                                                                                                                                                           |
 | `POST /api/v1/envelopes/{id}/send`             | write  | Sends a draft. Body: the `send` options above.                                                                                                                                                          |
 | `POST /api/v1/envelopes/{id}/void`             | write  | Voids a sent envelope. Body: `{"reason": "…"}`, required on Part 11 installs.                                                                                                                           |
-| `POST /api/v1/envelopes/{id}/remind`           | write  | Emails the signer whose turn it is a reminder, at most once a day as in the web app.                                                                                                                    |
+| `POST /api/v1/envelopes/{id}/remind`           | write  | Emails a reminder to each signer whose turn it is, at most once a day as in the web app.                                                                                                                |
 | `DELETE /api/v1/envelopes/{id}`                | write  | Deletes a draft.                                                                                                                                                                                        |
 | `GET /api/v1/envelopes/{id}/events`            | read   | The audit trail, oldest first.                                                                                                                                                                          |
 | `GET /api/v1/envelopes/{id}/files/signed`      | read   | The signed PDF.                                                                                                                                                                                         |

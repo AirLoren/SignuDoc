@@ -214,6 +214,81 @@ test("one call creates and sends an envelope, with refs, metadata and the key in
   assert.equal(stored.rows[0]?.apiKeyId, actor.apiKeyId);
 });
 
+test("signers given one step are invited together, and each signer shows its step", async () => {
+  const actor = await createActor();
+  const envelope = await createEnvelopeForApi(
+    actor,
+    request({
+      send: { permittedUseConfirmed: true },
+      signers: [
+        {
+          email: "client@example.test",
+          name: "Casey Client",
+          ref: "client",
+          step: 1,
+        },
+        {
+          email: "witness@example.test",
+          name: "Wes Witness",
+          ref: "witness",
+          step: 1,
+        },
+      ],
+    }),
+    source(),
+    database,
+  );
+
+  assert.deepEqual(
+    envelope.signers.map((signer) => [signer.ref, signer.step, signer.status]),
+    [
+      ["client", 1, "notified"],
+      ["witness", 1, "notified"],
+    ],
+  );
+
+  // Without steps, each signer has a step of their own.
+  const plain = await createEnvelopeForApi(
+    actor,
+    request(),
+    source(),
+    database,
+  );
+
+  assert.deepEqual(
+    plain.signers.map((signer) => signer.step),
+    [1, 2],
+  );
+
+  // Steps go to every signer or to none, as in the web app.
+  await assert.rejects(
+    createEnvelopeForApi(
+      actor,
+      request({
+        signers: [
+          {
+            email: "client@example.test",
+            name: "Casey Client",
+            ref: "client",
+            step: 1,
+          },
+          {
+            email: "witness@example.test",
+            name: "Wes Witness",
+            ref: "witness",
+          },
+        ],
+      }),
+      source(),
+      database,
+    ),
+    (error: unknown) =>
+      error instanceof EnvelopeMutationError &&
+      error.statusCode === 400 &&
+      /every signer a step/.test(error.message),
+  );
+});
+
 test("a create that cannot be finished leaves no draft behind", async () => {
   const actor = await createActor();
   const countDrafts = async () =>

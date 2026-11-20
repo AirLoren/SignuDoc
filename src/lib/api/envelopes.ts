@@ -25,6 +25,7 @@ import {
   reminderIntervalDaysSchema,
 } from "../schemas/envelope.ts";
 import { fieldTypeSchema } from "../schemas/field.ts";
+import { signingStepOf } from "../signing-steps.ts";
 import {
   MAX_COPY_RECIPIENTS_PER_ENVELOPE,
   MAX_SIGNERS_CEILING,
@@ -53,6 +54,8 @@ export type ApiSigner = {
   ref: string | null;
   signedAt: string | null;
   status: SignerStatus;
+  /** Signers who share a step sign at the same time. */
+  step: number;
   viewedAt: string | null;
 };
 
@@ -120,6 +123,10 @@ const apiSignerSchema = z.object({
   ref: refSchema,
   requireEmailCode: z.boolean().optional(),
   signatureMeaning: z.enum(signatureMeanings).optional(),
+  // The step of the signing order, as in the web app: signers who share a
+  // step sign at the same time. Given for every signer or for none; left
+  // out, they sign one after the other in the order of the list.
+  step: z.number().int().positive().max(MAX_SIGNERS_CEILING).optional(),
 });
 
 const apiFieldSchema = z.object({
@@ -268,6 +275,7 @@ export async function createEnvelopeForApi(
           name: signer.name,
           requireEmailCode: signer.requireEmailCode,
           signatureMeaning: signer.signatureMeaning,
+          signingStep: signer.step,
           signOrder: index + 1,
         })),
       },
@@ -385,6 +393,7 @@ type SignerRow = {
   name: string;
   role: "cc" | "signer";
   signedAt: number | null;
+  signingStep: number | null;
   signOrder: number;
   status: SignerStatus;
   viewedAt: number | null;
@@ -427,6 +436,7 @@ async function readSigners(
         s.email,
         s.role,
         s.sign_order AS "signOrder",
+        s.signing_step AS "signingStep",
         s.status,
         s.signed_at AS "signedAt",
         s.declined_at AS "declinedAt",
@@ -505,6 +515,7 @@ export function toApiEnvelope(
         ref: signer.apiRef,
         signedAt: isoTime(signer.signedAt),
         status: signer.status,
+        step: signingStepOf(signer),
         viewedAt: isoTime(signer.viewedAt),
       })),
     status: row.status,
