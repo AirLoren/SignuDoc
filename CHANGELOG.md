@@ -41,8 +41,9 @@ Thank you to everyone who helped with this release. @mvanhorn built Send to
 many and worked through every review round until a lost connection, a slow
 retry or an edited draft could no longer send anyone a second envelope.
 @RayFernando1337 found the stuck dropdown and explained exactly why a signer
-could not get past it, and @HimanshuMahto moved the empty-page notice out of
-the way and added a test that checks nothing covers the document.
+could not get past it, @chrisremboldt reported the notice that covered pages
+without fields in #182, and @HimanshuMahto moved it out of the way and added
+a test that checks nothing covers the document.
 
 This release changes the database, in three migrations:
 `20261118090000_bulk_send_batches.sql`,
