@@ -23,16 +23,23 @@ function formatDate(seconds: number | null) {
     : dateFormatter.format(new Date(seconds * 1000));
 }
 
+// The same checks the server makes when a key is used, so that a key the
+// API turns away never shows as active. Only a key that could still be
+// used, or one stopped only by its owner's closing account, can be revoked.
 function keyState(key: ApiKeySummary, now: number) {
   if (key.revokedAt !== null) {
-    return { label: "Revoked", tone: "pill-neutral" };
+    return { label: "Revoked", revocable: false, tone: "pill-neutral" };
   }
 
   if (key.expiresAt !== null && key.expiresAt <= now) {
-    return { label: "Expired", tone: "pill-warning" };
+    return { label: "Expired", revocable: false, tone: "pill-warning" };
   }
 
-  return { label: "Active", tone: "pill-success" };
+  if (key.ownerClosing) {
+    return { label: "Stopped", revocable: true, tone: "pill-warning" };
+  }
+
+  return { label: "Active", revocable: true, tone: "pill-success" };
 }
 
 export function ApiKeysPanel() {
@@ -367,12 +374,20 @@ export function ApiKeysPanel() {
                     ? ` Expires ${expires}.`
                     : ""}
                 </p>
-                {state.label === "Active" ? (
+                {state.label === "Stopped" ? (
+                  <p className="text-sm text-(--secondary)">
+                    {key.ownerName} is closing their account, so apps using this
+                    key are turned away. It is deleted with the account.
+                  </p>
+                ) : null}
+                {state.revocable ? (
                   <div className="flex flex-wrap items-center gap-2">
                     {revokingId === key.id ? (
                       <>
                         <span className="text-sm text-(--secondary)">
-                          Revoke this key? Apps using it stop working at once.
+                          {state.label === "Stopped"
+                            ? "Revoke this key? It can never be used again."
+                            : "Revoke this key? Apps using it stop working at once."}
                         </span>
                         <button
                           className="btn-quiet btn-quiet-danger"
