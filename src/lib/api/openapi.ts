@@ -21,6 +21,7 @@ const errors = {
   "404": errorResponse,
   "409": errorResponse,
   "429": errorResponse,
+  "500": errorResponse,
 };
 
 const envelopeResponse = (description: string) => ({
@@ -39,11 +40,19 @@ const idParameter = {
 
 const idempotencyKey = {
   description:
-    "Any unique string up to 255 characters. A retry with the same key and body within 24 hours gets the first response again.",
+    "Any unique string of 1 to 255 characters, not only spaces (spaces at either end are ignored). A retry with the same key and body within 24 hours gets the first response again.",
   in: "header",
   name: "Idempotency-Key",
   required: false,
-  schema: { maxLength: 255, type: "string" },
+  schema: { maxLength: 255, minLength: 1, pattern: "\\S", type: "string" },
+};
+
+/** Titles: not blank, and spaces at either end are dropped. */
+const titleSchema = {
+  maxLength: 160,
+  minLength: 1,
+  pattern: "\\S",
+  type: "string",
 };
 
 const isoTime = { format: "date-time", type: ["string", "null"] };
@@ -117,7 +126,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               minItems: 1,
               type: "array",
             },
-            title: { maxLength: 160, type: "string" },
+            title: titleSchema,
             uploadId: {
               description: "With JSON: the id from POST /uploads.",
               type: "string",
@@ -627,7 +636,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                       minItems: 1,
                       type: "array",
                     },
-                    title: { maxLength: 160, type: "string" },
+                    title: titleSchema,
                   },
                   required: ["title", "signers"],
                   type: "object",

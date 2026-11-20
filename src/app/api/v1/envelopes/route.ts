@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { readBodyWithin } from "@/lib/api/body";
+import { MAX_JSON_BODY_BYTES, readBodyWithin } from "@/lib/api/body";
 import { apiError, apiJson, bodyTooLarge } from "@/lib/api/http";
 import {
   apiCreateEnvelopeSchema,
@@ -72,24 +72,29 @@ export async function POST(request: Request) {
     "write",
     "api_envelope_create_failure",
     async (context) => {
-      // A little room over the PDF limit for the form's own parts. Reading
-      // stops there, so an oversized request is never held whole.
+      const contentType = request.headers.get("content-type") ?? "";
+      const isMultipart = contentType
+        .toLowerCase()
+        .startsWith("multipart/form-data");
+      // A PDF comes as multipart, allowed a little over the PDF limit for
+      // the form's own parts. Anything else is JSON and held to the JSON
+      // limit. Reading stops at the limit, so an oversized request is
+      // never held whole.
       const raw = await readBodyWithin(
         request,
-        MAX_UPLOAD_SIZE_BYTES + 256 * 1024,
+        isMultipart ? MAX_UPLOAD_SIZE_BYTES + 256 * 1024 : MAX_JSON_BODY_BYTES,
       );
 
       if (!raw) {
         return bodyTooLarge();
       }
 
-      const contentType = request.headers.get("content-type") ?? "";
       let data: unknown;
       let readPdf: () => Promise<SourcePdf>;
       let cleanUp = async () => {};
       let fingerprint: Uint8Array | string = raw;
 
-      if (contentType.toLowerCase().startsWith("multipart/form-data")) {
+      if (isMultipart) {
         const form = await new Request(request.url, {
           body: raw,
           headers: { "content-type": contentType },
