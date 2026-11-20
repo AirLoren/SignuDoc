@@ -4,6 +4,7 @@ import {
   CheckIcon,
   ClockIcon,
   DownloadIcon,
+  FileTextIcon,
   MinusIcon,
   PencilIcon,
   XIcon,
@@ -248,6 +249,15 @@ export function EnvelopeDetailShell({
     reminderIntervalDays === null
       ? "Automatic reminders are off."
       : `Automatic reminders: ${formatReminderInterval(reminderIntervalDays).toLowerCase()}.`;
+  // The document as it was sent, before anyone signed: while it is out for
+  // signature, and once it was declined or voided. A completed envelope
+  // has its signed PDF instead.
+  const documentUrl =
+    activeRecord.status === "sent" ||
+    activeRecord.status === "declined" ||
+    activeRecord.status === "voided"
+      ? `/api/envelopes/${encodeURIComponent(envelopeId)}/document`
+      : null;
   const activeSigner =
     activeRecord.status === "sent"
       ? activeRecord.signers.find((signer) => signer.status === "waiting")
@@ -551,12 +561,27 @@ export function EnvelopeDetailShell({
 
         <div className="mt-5 flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex min-w-0 items-center gap-5">
-            <span className="hidden h-28 shrink-0 items-center justify-center rounded-2xl bg-(--surface) px-4 py-3 sm:flex">
-              <DocumentThumbnail
-                envelopeId={envelopeId}
-                title={activeRecord.title}
-              />
-            </span>
+            {documentUrl ? (
+              <a
+                aria-label={`View ${activeRecord.title} (opens in a new tab)`}
+                className="hidden h-28 shrink-0 items-center justify-center rounded-2xl bg-(--surface) px-4 py-3 outline-none transition hover:bg-(--surface-strong) focus-visible:ring-3 focus-visible:ring-ring/50 sm:flex"
+                href={documentUrl}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                <DocumentThumbnail
+                  envelopeId={envelopeId}
+                  title={activeRecord.title}
+                />
+              </a>
+            ) : (
+              <span className="hidden h-28 shrink-0 items-center justify-center rounded-2xl bg-(--surface) px-4 py-3 sm:flex">
+                <DocumentThumbnail
+                  envelopeId={envelopeId}
+                  title={activeRecord.title}
+                />
+              </span>
+            )}
             <div className="min-w-0 space-y-2.5">
               <h1
                 className={`text-[clamp(1.5rem,3vw,1.875rem)] font-extrabold leading-tight tracking-[-0.03em] wrap-break-word ${
@@ -595,6 +620,17 @@ export function EnvelopeDetailShell({
           </div>
 
           <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap lg:justify-end">
+            {documentUrl ? (
+              <ShellButton href={documentUrl} inNewTab variant="secondary">
+                <FileTextIcon
+                  aria-hidden="true"
+                  className="size-[1.125rem]"
+                  strokeWidth={2.2}
+                />
+                View document
+              </ShellButton>
+            ) : null}
+
             {isOwnEnvelope && activeRecord.status === "draft" ? (
               <>
                 <ShellButton
