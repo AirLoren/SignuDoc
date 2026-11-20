@@ -119,11 +119,23 @@ async function refuseBadKey(
     );
   }
 
-  await consumeRateLimit({
+  const counted = await consumeRateLimit({
     key: failureKey,
     limit: FAILED_ATTEMPT_LIMIT,
     windowMs: FAILED_ATTEMPT_WINDOW_MS,
   });
+
+  // Bad keys sent at the same moment can all pass the check above, so the
+  // count they leave decides too.
+  if (!counted.allowed) {
+    return apiError(
+      429,
+      "rate_limited",
+      "Too many requests with a bad key. Try again later.",
+      { "retry-after": String(counted.retryAfterSeconds) },
+    );
+  }
+
   logSecurityEvent("warn", {
     category: "api_key_rejected",
     ipAddress,

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-import { apiError } from "@/lib/api/http";
+import { MAX_JSON_BODY_BYTES, readBodyWithin } from "@/lib/api/body";
+import { apiError, bodyTooLarge } from "@/lib/api/http";
 import {
   apiSendOptionsSchema,
   describeZodError,
@@ -12,12 +13,12 @@ import {
 import {
   API_CREATE_LIMIT,
   API_SEND_LIMIT,
-  applyAccountLimit,
   handleApi,
   runIdempotently,
 } from "@/lib/api/route";
 import { deleteDraftEnvelope } from "@/lib/envelopes";
 import { createDraftFromTemplate } from "@/lib/templates";
+import { signatureMeanings } from "@/lib/types/domain";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -32,7 +33,16 @@ const bodySchema = z.object({
     )
     .optional(),
   send: apiSendOptionsSchema.optional(),
-  signers: z.array(z.object({ email: z.string(), name: z.string() })).min(1),
+  signers: z
+    .array(
+      z.object({
+        email: z.string(),
+        name: z.string(),
+        // Part 11 installs need one for each signer before sending.
+        signatureMeaning: z.enum(signatureMeanings).optional(),
+      }),
+    )
+    .min(1),
   title: z.string(),
 });
 
@@ -46,13 +56,13 @@ export async function POST(request: Request, context: Context) {
     "write",
     "api_template_use_failure",
     async (api) => {
-      const limited = await applyAccountLimit(api, API_CREATE_LIMIT);
+      const raw = await readBodyWithin(request, MAX_JSON_BODY_BYTES);
 
-      if (limited) {
-        return limited;
+      if (!raw) {
+        return bodyTooLarge();
       }
 
-      const text = await request.text();
+      const text = new TextDecoder().decode(raw);
       let parsed: unknown;
 
       try {
@@ -65,14 +75,6 @@ export async function POST(request: Request, context: Context) {
 
       if (!body.success) {
         return apiError(400, "invalid_request", describeZodError(body.error));
-      }
-
-      if (body.data.send) {
-        const sendLimited = await applyAccountLimit(api, API_SEND_LIMIT);
-
-        if (sendLimited) {
-          return sendLimited;
-        }
       }
 
       const readBack = async (envelopeId: string) => {
@@ -123,6 +125,9 @@ export async function POST(request: Request, context: Context) {
           return readBack(draft.envelopeId);
         },
         readBack,
+        body.data.send
+          ? [API_CREATE_LIMIT, API_SEND_LIMIT]
+          : [API_CREATE_LIMIT],
       );
     },
   );

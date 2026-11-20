@@ -7,13 +7,18 @@ import { getDb, queryOne, type DbExecutor } from "../db/connection.ts";
 // hours and a retry with the same key and the same request gets that
 // response again. A different request under the same key is refused, and
 // a retry while the first is still running is told to wait.
+//
+// Each reservation is known by when it was made (`reservedAt`), and every
+// later write names it. So work left over from an old reservation, such as
+// a slow recovery just as its 24 hours run out, never touches the newer
+// reservation of a request that reused the key.
 
 export const IDEMPOTENCY_WINDOW_SECONDS = 24 * 60 * 60;
 
 export type IdempotencyClaim =
-  | { kind: "new" }
+  | { kind: "new"; reservedAt: number }
   | { kind: "replay"; response: unknown; statusCode: number }
-  | { kind: "recover"; resourceId: string }
+  | { kind: "recover"; reservedAt: number; resourceId: string }
   | { kind: "in_progress" }
   | { kind: "mismatch" };
 
@@ -66,11 +71,12 @@ export async function claimIdempotencyKey(
   );
 
   if ((inserted.rowCount ?? 0) === 1) {
-    return { kind: "new" };
+    return { kind: "new", reservedAt: now };
   }
 
   const existing = await queryOne<{
     requestHash: string;
+    reservedAt: number;
     resourceId: string | null;
     response: unknown;
     statusCode: number | null;
@@ -78,7 +84,7 @@ export async function claimIdempotencyKey(
     database,
     `
       SELECT request_hash AS "requestHash", status_code AS "statusCode",
-        response, resource_id AS "resourceId"
+        response, resource_id AS "resourceId", created_at AS "reservedAt"
       FROM api_idempotency
       WHERE api_key_id = $1 AND idempotency_key = $2
     `,
@@ -98,7 +104,11 @@ export async function claimIdempotencyKey(
     // The first request made its envelope and then failed, or is still
     // finishing: either way the answer is that envelope.
     return existing.resourceId
-      ? { kind: "recover", resourceId: existing.resourceId }
+      ? {
+          kind: "recover",
+          reservedAt: Number(existing.reservedAt),
+          resourceId: existing.resourceId,
+        }
       : { kind: "in_progress" };
   }
 
@@ -109,25 +119,28 @@ export async function claimIdempotencyKey(
   };
 }
 
+/** One reservation of a key, as a claim made it. */
+export type IdempotencyReservation = {
+  apiKeyId: string;
+  key: string;
+  reservedAt: number;
+};
+
 /** Keeps the response for retries. */
 export async function completeIdempotencyKey(
-  input: {
-    apiKeyId: string;
-    key: string;
-    response: unknown;
-    statusCode: number;
-  },
+  input: IdempotencyReservation & { response: unknown; statusCode: number },
   database: DbExecutor = getDb(),
 ) {
   await database.query(
     `
       UPDATE api_idempotency
-      SET status_code = $3, response = $4
-      WHERE api_key_id = $1 AND idempotency_key = $2
+      SET status_code = $4, response = $5
+      WHERE api_key_id = $1 AND idempotency_key = $2 AND created_at = $3
     `,
     [
       input.apiKeyId,
       input.key,
+      input.reservedAt,
       input.statusCode,
       JSON.stringify(input.response),
     ],
@@ -139,16 +152,16 @@ export async function completeIdempotencyKey(
  * failure cannot lead a retry to make it again.
  */
 export async function rememberIdempotentResource(
-  input: { apiKeyId: string; key: string; resourceId: string },
+  input: IdempotencyReservation & { resourceId: string },
   database: DbExecutor = getDb(),
 ) {
   await database.query(
     `
       UPDATE api_idempotency
-      SET resource_id = $3
-      WHERE api_key_id = $1 AND idempotency_key = $2
+      SET resource_id = $4
+      WHERE api_key_id = $1 AND idempotency_key = $2 AND created_at = $3
     `,
-    [input.apiKeyId, input.key, input.resourceId],
+    [input.apiKeyId, input.key, input.reservedAt, input.resourceId],
   );
 }
 
@@ -157,12 +170,15 @@ export async function rememberIdempotentResource(
  * install had a problem), so the retry runs for real.
  */
 export async function releaseIdempotencyKey(
-  input: { apiKeyId: string; key: string },
+  input: IdempotencyReservation,
   database: DbExecutor = getDb(),
 ) {
   await database.query(
-    `DELETE FROM api_idempotency WHERE api_key_id = $1 AND idempotency_key = $2`,
-    [input.apiKeyId, input.key],
+    `
+      DELETE FROM api_idempotency
+      WHERE api_key_id = $1 AND idempotency_key = $2 AND created_at = $3
+    `,
+    [input.apiKeyId, input.key, input.reservedAt],
   );
 }
 

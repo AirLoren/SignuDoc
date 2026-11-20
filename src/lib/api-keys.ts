@@ -286,32 +286,32 @@ export const LISTED_REVOKED_API_KEYS = 50;
 export async function listApiKeys(
   database: DbExecutor = getDb(),
 ): Promise<ApiKeySummary[]> {
-  const [live, revoked] = await Promise.all([
-    queryMany<ApiKeySummary>(
-      database,
-      `
-        SELECT ${SUMMARY_COLUMNS}
-        FROM api_keys k
-        JOIN "user" u ON u.id = k.user_id
-        WHERE k.revoked_at IS NULL
-        ORDER BY k.created_at DESC, k.id
-      `,
-    ),
-    queryMany<ApiKeySummary>(
-      database,
-      `
-        SELECT ${SUMMARY_COLUMNS}
-        FROM api_keys k
-        JOIN "user" u ON u.id = k.user_id
-        WHERE k.revoked_at IS NOT NULL
-        ORDER BY k.revoked_at DESC, k.id
-        LIMIT $1
-      `,
-      [LISTED_REVOKED_API_KEYS],
-    ),
-  ]);
-
-  return [...live, ...revoked];
+  // One statement, so both groups come from the same moment: a key revoked
+  // while the list is read shows once, not as both working and revoked.
+  return queryMany<ApiKeySummary>(
+    database,
+    `
+      WITH listed AS (
+        SELECT id, 0 AS list_group, created_at AS sorted_by
+        FROM api_keys
+        WHERE revoked_at IS NULL
+        UNION ALL
+        (
+          SELECT id, 1 AS list_group, revoked_at AS sorted_by
+          FROM api_keys
+          WHERE revoked_at IS NOT NULL
+          ORDER BY revoked_at DESC, id
+          LIMIT $1
+        )
+      )
+      SELECT ${SUMMARY_COLUMNS}
+      FROM listed l
+      JOIN api_keys k ON k.id = l.id
+      JOIN "user" u ON u.id = k.user_id
+      ORDER BY l.list_group, l.sorted_by DESC, k.id
+    `,
+    [LISTED_REVOKED_API_KEYS],
+  );
 }
 
 /** Revokes a key for the administrator `actor`. Revoking twice is fine. */
@@ -505,11 +505,17 @@ export async function authenticateApiKey(
     row.lastUsedAt === null ||
     now - row.lastUsedAt >= LAST_USED_WRITE_INTERVAL_SECONDS
   ) {
+    // The interval is checked again against the row as it is now, so
+    // requests at the same moment write once and an older time never
+    // replaces a newer one.
     await database
-      .query(`UPDATE api_keys SET last_used_at = $1 WHERE id = $2`, [
-        now,
-        row.id,
-      ])
+      .query(
+        `
+          UPDATE api_keys SET last_used_at = $1
+          WHERE id = $2 AND (last_used_at IS NULL OR last_used_at <= $1 - $3)
+        `,
+        [now, row.id, LAST_USED_WRITE_INTERVAL_SECONDS],
+      )
       .catch((error: unknown) => {
         console.error("Recording when an API key was used failed:", error);
       });
