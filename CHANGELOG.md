@@ -25,6 +25,13 @@ migration steps (`20261118090000_bulk_send_batches.sql`,
 batch stores its results so a retry does not send the same envelopes again,
 and a stored failure reason is cleared when its envelope is deleted.
 
+## [0.6.0] - 2026-11-20
+
+Other apps can now work with SignuDoc: an API with keys, signed webhooks, and
+signing inside another site's page. Signers can also sign at the same time,
+and the sender can open the document while it is out for signature. This
+release changes the database: see the end of this entry.
+
 ### API
 
 - API keys: an administrator can make keys under Settings, Organization, API
@@ -32,13 +39,14 @@ and a stored failure reason is cleared when its envelope is deleted.
   its hash is stored, and it acts as the administrator who made it. Keys can
   be read-only, can expire, and stop working when revoked or when their
   administrator stops being one. `GET /api/v1/me` checks a key works. See
-  [docs/api.md](docs/api.md).
+  [docs/api.md](docs/api.md) (#43, PR #44).
 - API endpoints under `/api/v1`: create an envelope from a PDF with its
   signers, copy recipients and fields, and send it, in one call (all or
   nothing, safe to retry with an `Idempotency-Key`); send, void, remind and
   delete; list and read envelopes and their audit trail; download the signed
   PDF and the certificate; start an envelope from a template; upload PDFs
-  over 4 MB straight to Blob. `GET /api/v1/openapi.json` describes it all.
+  over 4 MB straight to Blob. `GET /api/v1/openapi.json` describes it all
+  (PR #45).
 - Webhooks: an administrator can add endpoints under Settings,
   Organization, Webhooks, to be told when an envelope is sent, viewed,
   signed, completed, declined, voided or expires. Deliveries are signed the
@@ -46,7 +54,7 @@ and a stored failure reason is cleared when its envelope is deleted.
   report, and retried for about two and a half days. Settings shows a
   delivery log with "Send again", a test button and secret rotation;
   `GET /api/v1/webhook-deliveries` lets an app catch up. A new daily cron
-  job, `/api/internal/webhooks`, sends retries that are due.
+  job, `/api/internal/webhooks`, sends retries that are due (PR #46).
 - Embedded signing: an app can send an envelope with
   `"delivery": "embedded"` and show the signing page in a frame on its own
   site, from a link it asks for at
@@ -54,11 +62,78 @@ and a stored failure reason is cleared when its envelope is deleted.
   are emailed. Only sites an administrator lists under Settings,
   Organization, Embedded signing can frame the page, and the frame tells
   the app with `postMessage` when the signer signs or declines. The
-  certificate of completion says the signer was identified by the app.
+  certificate of completion says the signer was identified by the app
+  (PR #48).
+- For installs where people sign in only through single sign-on, the API
+  guide explains that removing someone at the identity provider leaves the
+  keys they made working, and how to stop them when that person leaves
+  (from @seanGSISG in #43).
 
-This changes the database: the new `api_keys`, `api_idempotency`,
-`webhook_endpoints`, `webhook_deliveries` and `embed_allowed_origins`
-tables and six new columns are added by the migrations that run on deploy.
+### Signing
+
+- Signers can sign at the same time. On Add signers, "Sign at the same time
+  as Signer N" puts signers in one step: everyone in a step is invited when
+  it starts and can sign in any order, and the next step starts once they
+  have all signed. Steps and one-after-another signers can be mixed.
+  Reminders, deadline changes, the expiry notice and voiding cover everyone
+  whose turn it is, and the certificate numbers signers by step. Part 11
+  mode and advanced or qualified signatures keep one signer after another.
+  See [Signing order](docs/signing-order.md) (#85, PR #157 by @MattJackson,
+  carried in PR #190).
+- An envelope can have up to 25 signers instead of 10, and
+  `MAX_SIGNERS_PER_ENVELOPE` sets any limit from 1 to 100 (PR #157).
+- A browser test now checks that a long typed signature keeps the signature
+  dialog and its buttons on a phone screen. PR #168 fixed this in 0.5.2
+  (#112, PR #187).
+
+### Sending
+
+- While an envelope is out for signature, and after it is declined, voided
+  or expired, its page has a View document button, and its first-page
+  picture opens the document as it was sent, in a new tab. An administrator
+  opening another member's document is recorded in the site audit trail
+  (#87, PR #188).
+- A field save from an older Place fields page, such as the save sent on
+  the way out that arrives late, or one from a second tab, is refused with a
+  request to reload, instead of overwriting newer fields (PR #186, a
+  follow-up to #165).
+
+### Settings and docs
+
+- With Part 11 mode on, "Who can create an account" says that Part 11
+  signers need an account whose identity an administrator has confirmed, so
+  the sign-up rule must let them make one (#107, PR #187).
+- The Part 11 change-control guide describes the numbered releases, with
+  their tag, source archive, SBOM and checksums (#101, PR #187).
+- The development guide explains how to run a production build on your own
+  computer with email capture (#114, PR #183 by @Chirag0401, carried in
+  PR #187).
+- The README covers sign-in security, backups, the administrator features
+  and the API, with new screenshots (PRs #189 and #195).
+
+Thank you to everyone who helped with this release. @azshaw asked for the
+API, webhooks and embedded signing in #43, and set out in four clear parts
+what an app needs, down to letting chosen sites frame the signing page, which
+is how embedded signing works. @steven-khimba, @mattwpickles and @seanGSISG
+told us what they would build with it, and @seanGSISG's note on single
+sign-on is now in the API guide. @MattJackson built signing at the same time,
+which @melsom123 asked for. @infoivy asked for View document, @Chirag0401
+wrote the guide to local production builds, and @coygeek reported four more
+careful issues.
+
+This release changes the database, in eight migrations:
+`20261118090000_api_keys.sql`, `20261118100000_api_envelopes.sql`,
+`20261118100500_api_idempotency_resource.sql`,
+`20261118110000_webhooks.sql`, `20261118120000_embedded_signing.sql`,
+`20261118120500_embed_link_api_key.sql`, `20261119090000_signing_steps.sql`
+and `20261119120000_fields_revision.sql`. They add the `api_keys`,
+`api_idempotency`, `webhook_endpoints`, `webhook_deliveries` and
+`embed_allowed_origins` tables and nine columns on envelopes and signers.
+Every signer already in an envelope gets the step of their place in the
+order, so envelopes out for signature carry on as before. On Vercel the
+production build applies the migrations. On other hosts, run
+`npm run db:migrate` as on every deploy, and if you use webhooks, have your
+scheduler call `/api/internal/webhooks` once a day too.
 
 ## [0.5.2] - 2026-11-19
 
@@ -481,6 +556,7 @@ checked against the real services:
 
 SignuDoc is software, not legal advice. See the README's legal disclaimer.
 
+[0.6.0]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.6.0
 [0.5.2]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.2
 [0.5.1]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.1
 [0.5.0]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.0
