@@ -3,6 +3,8 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 
+import { fieldTypeSchema } from "../schemas/field.ts";
+import { signatureMeanings } from "../types/domain.ts";
 import { buildOpenApiDocument } from "./openapi.ts";
 
 // Every route file under src/app/api/v1 has a path in the OpenAPI
@@ -56,4 +58,20 @@ test("the OpenAPI description matches the route files", async () => {
 
     assert.deepEqual(described, methods, `methods for ${route}`);
   }
+});
+
+test("the OpenAPI description allows the values the API accepts", () => {
+  const document = buildOpenApiDocument("https://sign.example.com/api/v1");
+  const { CreateEnvelope, Field } = document.components.schemas;
+  const fromTemplate =
+    document.paths["/templates/{id}/envelopes"].post.requestBody.content[
+      "application/json"
+    ].schema.properties.signers.items.properties;
+
+  assert.deepEqual(Field.properties.type.enum, fieldTypeSchema.options);
+  assert.deepEqual(
+    CreateEnvelope.properties.signers.items.properties.signatureMeaning.enum,
+    [...signatureMeanings],
+  );
+  assert.deepEqual(fromTemplate.signatureMeaning.enum, [...signatureMeanings]);
 });

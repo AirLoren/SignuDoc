@@ -1,9 +1,14 @@
-import { apiError, apiJson } from "@/lib/api/http";
+import { MAX_JSON_BODY_BYTES, readBodyWithin } from "@/lib/api/body";
+import { apiError, apiJson, bodyTooLarge } from "@/lib/api/http";
 import { getApiEnvelope } from "@/lib/api/envelopes";
 import { handleApi } from "@/lib/api/route";
 import { voidSentEnvelope } from "@/lib/envelopes";
 
 type Context = { params: Promise<{ id: string }> };
+
+// As long as a reason the app keeps. A longer one is refused rather than
+// cut short, so the audit trail has the reason exactly as it was sent.
+const MAX_REASON_LENGTH = 1000;
 
 // Voids an envelope that is out for signature. The signers are told, and
 // nobody can sign it any more.
@@ -17,7 +22,13 @@ export async function POST(request: Request, context: Context) {
     async ({ actor }) => {
       // No body is fine; a body that is not a JSON object is refused, so a
       // cut-off request never voids without the reason it meant to give.
-      const text = await request.text();
+      const raw = await readBodyWithin(request, MAX_JSON_BODY_BYTES);
+
+      if (!raw) {
+        return bodyTooLarge();
+      }
+
+      const text = new TextDecoder().decode(raw);
       let body: unknown = {};
 
       if (text.trim()) {
@@ -45,9 +56,13 @@ export async function POST(request: Request, context: Context) {
       if (
         reason !== undefined &&
         reason !== null &&
-        typeof reason !== "string"
+        (typeof reason !== "string" || reason.length > MAX_REASON_LENGTH)
       ) {
-        return apiError(400, "invalid_request", "reason must be a string.");
+        return apiError(
+          400,
+          "invalid_request",
+          "reason must be a string of at most 1,000 characters.",
+        );
       }
 
       await voidSentEnvelope(actor.userId, id, {

@@ -1,6 +1,9 @@
 // The OpenAPI 3.1 description of /api/v1, served at /api/v1/openapi.json.
 // openapi.test.ts checks that every route file has a path here and every
-// path here has a route file, so the two cannot drift apart.
+// path here has a route file, so the two cannot drift apart. Lists of
+// allowed values come from the app's own, so they cannot drift either.
+
+import { fieldTypes, signatureMeanings } from "../types/domain.ts";
 
 const errorResponse = {
   content: {
@@ -101,12 +104,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                   requireEmailCode: { type: "boolean" },
                   signatureMeaning: {
                     description: "Part 11 installs only.",
-                    enum: [
-                      "approval",
-                      "review",
-                      "responsibility",
-                      "authorship",
-                    ],
+                    enum: [...signatureMeanings],
                     type: "string",
                   },
                 },
@@ -218,19 +216,7 @@ export function buildOpenApiDocument(serverUrl: string) {
             page: { minimum: 1, type: "integer" },
             required: { default: true, type: "boolean" },
             signer: { description: "The signer's ref.", type: "string" },
-            type: {
-              enum: [
-                "signature",
-                "initials",
-                "date",
-                "text",
-                "checkbox",
-                "number",
-                "dropdown",
-                "radio",
-              ],
-              type: "string",
-            },
+            type: { enum: [...fieldTypes], type: "string" },
             width: { exclusiveMinimum: 0, maximum: 1, type: "number" },
             x: { maximum: 1, minimum: 0, type: "number" },
             y: { maximum: 1, minimum: 0, type: "number" },
@@ -364,7 +350,9 @@ export function buildOpenApiDocument(serverUrl: string) {
                         type: "array",
                       },
                       nextCursor: { type: ["string", "null"] },
+                      object: { const: "list", type: "string" },
                     },
+                    required: ["object", "data", "nextCursor"],
                     type: "object",
                   },
                 },
@@ -380,7 +368,12 @@ export function buildOpenApiDocument(serverUrl: string) {
           requestBody: {
             content: {
               "application/json": {
-                schema: { $ref: "#/components/schemas/CreateEnvelope" },
+                schema: {
+                  allOf: [
+                    { $ref: "#/components/schemas/CreateEnvelope" },
+                    { required: ["uploadId"] },
+                  ],
+                },
               },
               "multipart/form-data": {
                 schema: {
@@ -410,7 +403,25 @@ export function buildOpenApiDocument(serverUrl: string) {
       "/envelopes/{id}": {
         delete: {
           parameters: [idParameter],
-          responses: { "200": { description: "Deleted." }, ...errors },
+          responses: {
+            "200": {
+              content: {
+                "application/json": {
+                  schema: {
+                    properties: {
+                      deleted: { const: true, type: "boolean" },
+                      id: { type: "string" },
+                      object: { const: "envelope", type: "string" },
+                    },
+                    required: ["deleted", "id", "object"],
+                    type: "object",
+                  },
+                },
+              },
+              description: "Deleted.",
+            },
+            ...errors,
+          },
           summary: "Delete a draft",
         },
         get: {
@@ -494,6 +505,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
           responses: {
             "200": envelopeResponse("The envelope, now sent."),
+            "413": errorResponse,
             "422": errorResponse,
             ...errors,
           },
@@ -515,6 +527,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
           responses: {
             "200": envelopeResponse("The envelope, now voided."),
+            "413": errorResponse,
             ...errors,
           },
           summary: "Void a sent envelope",
@@ -587,20 +600,32 @@ export function buildOpenApiDocument(serverUrl: string) {
               "application/json": {
                 schema: {
                   properties: {
-                    metadata: { type: "object" },
+                    metadata: {
+                      description:
+                        "Up to 2048 bytes of JSON, returned with the envelope.",
+                      type: "object",
+                    },
                     send: { $ref: "#/components/schemas/SendOptions" },
                     signers: {
                       description: "One per role, in the template's order.",
                       items: {
                         properties: {
-                          email: { type: "string" },
-                          name: { type: "string" },
+                          email: { format: "email", type: "string" },
+                          name: { maxLength: 120, type: "string" },
+                          signatureMeaning: {
+                            description: "Part 11 installs only.",
+                            enum: [...signatureMeanings],
+                            type: "string",
+                          },
                         },
+                        required: ["name", "email"],
                         type: "object",
                       },
+                      maxItems: 10,
+                      minItems: 1,
                       type: "array",
                     },
-                    title: { type: "string" },
+                    title: { maxLength: 160, type: "string" },
                   },
                   required: ["title", "signers"],
                   type: "object",
@@ -611,6 +636,8 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
           responses: {
             "201": envelopeResponse("The new envelope."),
+            "413": errorResponse,
+            "422": errorResponse,
             ...errors,
           },
           summary: "Create an envelope from a template",

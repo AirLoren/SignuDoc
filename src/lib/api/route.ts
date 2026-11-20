@@ -132,15 +132,26 @@ export async function handleApi(
 
 type ApiResult = { body: unknown; status: number };
 
+type AccountLimit = { key: string; limit: number; windowMs: number };
+
+/** Whether a response is kept for retries: not a 5xx, and not a 429. */
+function isKept(status: number) {
+  return status < 500 && status !== 429;
+}
+
 /**
  * Runs `run` once per Idempotency-Key. Without the header it simply runs.
- * Only a response the caller can act on is kept: a 5xx lets the key go, so
- * a retry runs again.
+ * Only a response the caller can act on is kept: a 5xx or a 429 lets the
+ * key go, so a retry runs again.
  *
  * Except once `run` has done what cannot be undone: it calls `remember`
  * with the envelope's id as soon as the envelope is made (and sent, if
  * asked). From then on a failure keeps the key, and a retry gets
  * `recover(id)`, the envelope as it is, instead of a second envelope.
+ *
+ * `limits` count only a request that does the work now. A replay or a
+ * recovery costs nothing, so a retry of a request that worked is never
+ * refused for being over a limit.
  */
 export async function runIdempotently(
   context: ApiContext,
@@ -148,6 +159,7 @@ export async function runIdempotently(
   body: Uint8Array | string,
   run: (remember: (resourceId: string) => Promise<void>) => Promise<ApiResult>,
   recover?: (resourceId: string) => Promise<ApiResult>,
+  limits: AccountLimit[] = [],
 ): Promise<Response> {
   const key = readIdempotencyKey(context.request.headers);
 
@@ -160,6 +172,12 @@ export async function runIdempotently(
   }
 
   if (key === null) {
+    const refused = await applyAccountLimits(context, limits);
+
+    if (refused) {
+      return refused;
+    }
+
     const result = await runCatching(() => run(async () => {}));
 
     return apiJson(result.body, { status: result.status });
@@ -203,10 +221,11 @@ export async function runIdempotently(
 
       const recovered = await runCatching(() => recover(previous.resourceId));
 
-      if (recovered.status < 500) {
+      if (isKept(recovered.status)) {
         await completeIdempotencyKey({
           apiKeyId: claim.apiKeyId,
           key,
+          reservedAt: previous.reservedAt,
           response: recovered.body,
           statusCode: recovered.status,
         });
@@ -221,42 +240,63 @@ export async function runIdempotently(
       break;
   }
 
+  const reservation = {
+    apiKeyId: claim.apiKeyId,
+    key,
+    reservedAt: previous.reservedAt,
+  };
   let remembered = false;
   const remember = async (resourceId: string) => {
-    await rememberIdempotentResource({
-      apiKeyId: claim.apiKeyId,
-      key,
-      resourceId,
-    });
+    await rememberIdempotentResource({ ...reservation, resourceId });
     remembered = true;
   };
   let result: ApiResult;
 
   try {
+    const refused = await applyAccountLimits(context, limits);
+
+    if (refused) {
+      await releaseIdempotencyKey(reservation).catch(() => undefined);
+      return refused;
+    }
+
     result = await runCatching(() => run(remember));
   } catch (error) {
     // Once the envelope exists, the key stays with it (see above).
     if (!remembered) {
-      await releaseIdempotencyKey(claim).catch(() => undefined);
+      await releaseIdempotencyKey(reservation).catch(() => undefined);
     }
 
     throw error;
   }
 
-  if (result.status >= 500) {
-    if (!remembered) {
-      await releaseIdempotencyKey(claim).catch(() => undefined);
-    }
-  } else {
+  if (isKept(result.status)) {
     await completeIdempotencyKey({
-      apiKeyId: claim.apiKeyId,
-      key,
+      ...reservation,
       response: result.body,
       statusCode: result.status,
     });
+  } else if (!remembered) {
+    await releaseIdempotencyKey(reservation).catch(() => undefined);
   }
 
   return apiJson(result.body, { status: result.status });
+}
+
+/** The first of `limits` this request is over, as a 429, or null. */
+async function applyAccountLimits(
+  context: ApiContext,
+  limits: AccountLimit[],
+): Promise<Response | null> {
+  for (const limit of limits) {
+    const refused = await applyAccountLimit(context, limit);
+
+    if (refused) {
+      return refused;
+    }
+  }
+
+  return null;
 }
 
 /** Known errors become a kept response; anything else is thrown on. */
@@ -298,7 +338,7 @@ export const API_SEND_LIMIT = {
  */
 export async function applyAccountLimit(
   context: ApiContext,
-  input: { key: string; limit: number; windowMs: number },
+  input: AccountLimit,
 ): Promise<Response | null> {
   const decision = await consumeRateLimit({
     key: `${input.key}:${context.actor.apiKeyId}`,
