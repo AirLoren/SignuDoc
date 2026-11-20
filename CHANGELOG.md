@@ -19,11 +19,13 @@ release says when it does.
   downloaded as a CSV. In Part 11 mode, a row is skipped when the signer
   does not have a verified, identity-checked account.
 
-Send the same template to many people at once from a CSV. This needs two
+Send the same template to many people at once from a CSV. This needs three
 migration steps (`20261118090000_bulk_send_batches.sql`,
-`20261118120000_bulk_send_row_reason_cleared_with_envelope.sql`): a confirmed
-batch stores its results so a retry does not send the same envelopes again,
-and a stored failure reason is cleared when its envelope is deleted.
+`20261118120000_bulk_send_row_reason_cleared_with_envelope.sql`,
+`20261120090000_bulk_send_skipped_rows.sql`): a confirmed batch stores its
+results so a retry does not send the same envelopes again, a stored failure
+reason is cleared when its envelope is deleted, and rows skipped by the Part
+11 account check are stored so a retry skips them again.
 
 ## [0.6.0] - 2026-11-20
 
