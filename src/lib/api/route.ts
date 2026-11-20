@@ -13,7 +13,7 @@ import {
 } from "../envelopes.ts";
 import { ReminderMutationError } from "../reminders.ts";
 import { logRouteError } from "../security/logging.ts";
-import { consumeRateLimit } from "../security/rate-limit.ts";
+import { consumeRateLimit, peekRateLimit } from "../security/rate-limit.ts";
 import {
   getClientIpAddress,
   getRequestPathname,
@@ -76,13 +76,36 @@ export function apiErrorFor(error: unknown): Response | null {
   return null;
 }
 
+function internalError(): Response {
+  return apiError(
+    500,
+    "internal_error",
+    "Something went wrong on the install. Try again later.",
+  );
+}
+
 export async function handleApi(
   request: Request,
   scope: ApiKeyScope,
   category: string,
   handler: (context: ApiContext) => Promise<Response>,
 ): Promise<Response> {
-  const principal = await requireApiKey(request, scope);
+  let principal: Awaited<ReturnType<typeof requireApiKey>>;
+
+  // Checking the key can fail too (the database is down). That gets the
+  // same JSON answer and the same log line as a failure further on.
+  try {
+    principal = await requireApiKey(request, scope);
+  } catch (error) {
+    logRouteError(error, {
+      category,
+      ipAddress: getClientIpAddress(request.headers),
+      message: "Unexpected failure while checking an API key.",
+      path: getRequestPathname(request),
+    });
+
+    return internalError();
+  }
 
   if (principal instanceof Response) {
     return principal;
@@ -119,14 +142,7 @@ export async function handleApi(
       userId: principal.user.id,
     });
 
-    return withRateLimitHeaders(
-      apiError(
-        500,
-        "internal_error",
-        "Something went wrong on the install. Try again later.",
-      ),
-      principal.rateLimit,
-    );
+    return withRateLimitHeaders(internalError(), principal.rateLimit);
   }
 }
 
@@ -283,11 +299,29 @@ export async function runIdempotently(
   return apiJson(result.body, { status: result.status });
 }
 
-/** The first of `limits` this request is over, as a 429, or null. */
+/**
+ * The first of `limits` this request is over, as a 429, or null. With more
+ * than one, all are checked before any is counted, so a request that one
+ * limit refuses does not use up the others (a create that would also send,
+ * refused for sending, still leaves the key its creates).
+ */
 async function applyAccountLimits(
   context: ApiContext,
   limits: AccountLimit[],
 ): Promise<Response | null> {
+  if (limits.length > 1) {
+    for (const limit of limits) {
+      const state = await peekRateLimit({
+        key: accountLimitKey(context, limit),
+        limit: limit.limit,
+      });
+
+      if (!state.allowed) {
+        return accountLimitRefusal(state.retryAfterSeconds);
+      }
+    }
+  }
+
   for (const limit of limits) {
     const refused = await applyAccountLimit(context, limit);
 
@@ -341,17 +375,25 @@ export async function applyAccountLimit(
   input: AccountLimit,
 ): Promise<Response | null> {
   const decision = await consumeRateLimit({
-    key: `${input.key}:${context.actor.apiKeyId}`,
+    key: accountLimitKey(context, input),
     limit: input.limit,
     windowMs: input.windowMs,
   });
 
   return decision.allowed
     ? null
-    : apiError(
-        429,
-        "rate_limited",
-        "This key has created or sent too many envelopes for now. Wait and try again.",
-        { "retry-after": String(decision.retryAfterSeconds) },
-      );
+    : accountLimitRefusal(decision.retryAfterSeconds);
+}
+
+function accountLimitKey(context: ApiContext, input: AccountLimit) {
+  return `${input.key}:${context.actor.apiKeyId}`;
+}
+
+function accountLimitRefusal(retryAfterSeconds: number): Response {
+  return apiError(
+    429,
+    "rate_limited",
+    "This key has created or sent too many envelopes for now. Wait and try again.",
+    { "retry-after": String(retryAfterSeconds) },
+  );
 }
