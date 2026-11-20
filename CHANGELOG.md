@@ -8,6 +8,18 @@ release says when it does.
 
 ## [Unreleased]
 
+### API
+
+- API keys: an administrator can make keys under Settings, Organization, API
+  keys, for another app to use the SignuDoc API. A key is shown once, only
+  its hash is stored, and it acts as the administrator who made it. Keys can
+  be read-only, can expire, and stop working when revoked or when their
+  administrator stops being one. `GET /api/v1/me` checks a key works. See
+  [docs/api.md](docs/api.md).
+
+This changes the database: the new `api_keys` table is added by the
+migration that runs on deploy.
+
 ## [0.5.2] - 2026-11-19
 
 Twenty-four bug fixes. Seventeen fix reported issues (sixteen from @coygeek,

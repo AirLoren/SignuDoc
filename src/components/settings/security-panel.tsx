@@ -23,6 +23,8 @@ type AuditResponse = {
 const EVENT_LABELS: Record<SystemAuditEvent["event"], string> = {
   account_closure_requested: "Account closure requested",
   account_deleted: "Account deleted",
+  api_key_created: "API key created",
+  api_key_revoked: "API key revoked",
   email_domain_changed: "Email domain changed",
   envelope_deleted: "Finished envelope deleted",
   envelope_deletion_cancelled: "Envelope deletion cancelled",
@@ -98,6 +100,17 @@ function describeEvent(event: SystemAuditEvent): string {
       return metadata.action === "removed" ? "Removed" : "Replaced";
     case "email_domain_changed":
       return typeof metadata.domain === "string" ? metadata.domain : "";
+    case "api_key_created":
+    case "api_key_revoked":
+      return [
+        typeof metadata.name === "string" ? metadata.name : null,
+        typeof metadata.prefix === "string" ? `${metadata.prefix}…` : null,
+        metadata.reason === "role_removed"
+          ? "owner is no longer an administrator"
+          : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
     case "envelope_deleted":
       return [
         typeof metadata.title === "string" ? `"${metadata.title}"` : null,
