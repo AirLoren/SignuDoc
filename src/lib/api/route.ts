@@ -265,17 +265,21 @@ export async function runIdempotently(
       }
 
       const recovered = await runCatching(() => recover(previous.resourceId));
-      // The first request may have finished meanwhile. Its response is then
-      // the one kept, and the answer here too.
-      const kept = isKept(recovered.status)
-        ? await completeIdempotencyKey({
-            apiKeyId: claim.apiKeyId,
-            key,
-            reservedAt: previous.reservedAt,
-            response: recovered.body,
-            statusCode: recovered.status,
-          })
-        : null;
+      // Only an answer that shows the envelope is kept. One that finds it
+      // gone (deleted meanwhile) is not: the first request may still be
+      // finishing, and its own answer must not be replaced. And the first
+      // request may have finished meanwhile: its response is then the one
+      // kept, and the answer here too.
+      const kept =
+        recovered.status >= 200 && recovered.status < 300
+          ? await completeIdempotencyKey({
+              apiKeyId: claim.apiKeyId,
+              key,
+              reservedAt: previous.reservedAt,
+              response: recovered.body,
+              statusCode: recovered.status,
+            })
+          : null;
 
       return apiJson(kept ? kept.response : recovered.body, {
         headers: { "idempotent-replayed": "true" },
