@@ -21,6 +21,9 @@ export function EmbeddingPanel() {
   const [origins, setOrigins] = useState<string[] | null>(null);
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Why the list did not load, kept apart from the errors of a change so
+  // that adding or removing a site does not hide it, with a way to retry.
+  const [listError, setListError] = useState<string | null>(null);
   // What is being changed, so each button names only its own change.
   const [pending, setPending] = useState<Change | null>(null);
   const [revision, setRevision] = useState(0);
@@ -38,13 +41,14 @@ export function EmbeddingPanel() {
         if (!cancelled) {
           if (response.ok && payload?.origins) {
             setOrigins(payload.origins.map((entry) => entry.origin));
+            setListError(null);
           } else {
-            setError(payload?.error ?? GENERIC_ERROR_MESSAGE);
+            setListError(payload?.error ?? GENERIC_ERROR_MESSAGE);
           }
         }
       } catch {
         if (!cancelled) {
-          setError(GENERIC_ERROR_MESSAGE);
+          setListError(GENERIC_ERROR_MESSAGE);
         }
       }
     })();
@@ -154,6 +158,26 @@ export function EmbeddingPanel() {
         <p className="notice notice-danger max-w-2xl" role="alert">
           {error}
         </p>
+      ) : null}
+
+      {listError ? (
+        <div
+          className="notice notice-danger flex max-w-2xl flex-wrap items-center justify-between gap-2"
+          role="alert"
+        >
+          <span>
+            {origins === null
+              ? `The allowed sites could not be loaded. ${listError}`
+              : `The list may be out of date. ${listError}`}
+          </span>
+          <button
+            className="btn-quiet"
+            onClick={() => setRevision((current) => current + 1)}
+            type="button"
+          >
+            Try again
+          </button>
+        </div>
       ) : null}
 
       {origins === null ? null : origins.length === 0 ? (

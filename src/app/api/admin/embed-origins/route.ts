@@ -9,6 +9,7 @@ import {
 import {
   handleWebhookAdmin,
   noStore,
+  notAJsonObject,
   readJsonObject,
   type AdminRouteWords,
 } from "@/lib/webhooks/admin-route";
@@ -51,6 +52,10 @@ export function POST(request: Request) {
     "embed_origin_add_failure",
     async (actor) => {
       const body = await readJsonObject(request);
+
+      if (!body) {
+        return notAJsonObject();
+      }
 
       try {
         const origin = await addEmbedOrigin(actor, body.origin);
