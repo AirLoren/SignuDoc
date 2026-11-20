@@ -43,12 +43,16 @@ export async function handleWebhookAdmin(
       );
     }
 
-    return await run({
+    const response = await run({
       email: sessionResult.user.email,
       ipAddress,
       userAgent: getRequestUserAgent(request.headers),
       userId: sessionResult.user.id,
     });
+
+    // Whatever the route answered, a refusal of its own included.
+    response.headers.set("cache-control", noStore["cache-control"]);
+    return response;
   } catch (error) {
     if (error instanceof WebhookEndpointError) {
       return NextResponse.json(

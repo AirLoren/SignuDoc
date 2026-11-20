@@ -75,6 +75,9 @@ let env: Record<string, string | undefined>;
 
 before(async () => {
   database = await openTestDatabase();
+  // Endpoints left by a run that stopped part way would count toward the
+  // cap of 10, so start from none, as afterEach leaves it.
+  await database.query(`delete from webhook_endpoints`);
   workDir = await mkdtemp(path.join(tmpdir(), "signudoc-webhooks-"));
 
   for (const name of SETTINGS) {
