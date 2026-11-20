@@ -491,9 +491,15 @@ test("removing a site stops the links made for it, opened or not", async () => {
 
   const envelope = await create(admin);
   const token = await linkFor(admin, envelope.id, envelope.signers[0]!.id);
+  // A second link that is never opened.
+  const waiting = await create(admin);
+  const unopened = await linkFor(admin, waiting.id, waiting.signers[0]!.id);
 
   assert.deepEqual(await openEmbedLink(token, ORIGIN, database), { ok: true });
   await removeEmbedOrigin(admin, ORIGIN, database);
+
+  const isExpired = (error: unknown) =>
+    error instanceof SigningAccessError && error.state === "expired";
 
   assert.deepEqual(await openEmbedLink(token, ORIGIN, database), {
     ok: false,
@@ -501,16 +507,22 @@ test("removing a site stops the links made for it, opened or not", async () => {
   });
   await assert.rejects(
     getSigningPayloadForToken(token, { database }),
-    (error: unknown) =>
-      error instanceof SigningAccessError && error.state === "expired",
+    isExpired,
+  );
+  await assert.rejects(
+    getSigningPayloadForToken(unopened, { database }),
+    isExpired,
   );
 
-  // Adding the site back does not revive the old link; a new one works.
+  // Adding the site back revives neither old link; a new one works.
   await addEmbedOrigin(admin, ORIGIN, { database });
   await assert.rejects(
     getSigningPayloadForToken(token, { database }),
-    (error: unknown) =>
-      error instanceof SigningAccessError && error.state === "expired",
+    isExpired,
+  );
+  await assert.rejects(
+    getSigningPayloadForToken(unopened, { database }),
+    isExpired,
   );
 
   const fresh = await linkFor(admin, envelope.id, envelope.signers[0]!.id);

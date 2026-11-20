@@ -10,10 +10,16 @@ import {
   handleWebhookAdmin,
   noStore,
   readJsonObject,
+  type AdminRouteWords,
 } from "@/lib/webhooks/admin-route";
 
 // The sites allowed to show signing pages in a frame (embedded signing).
 // Administrators only, not on hosted installs.
+
+const EMBEDDING_WORDS: AdminRouteWords = {
+  failure: "Unexpected failure in an embedded signing settings request.",
+  hosted: "Embedded signing is for self-hosted installs.",
+};
 
 function embeddingErrorResponse(error: unknown): Response {
   if (error instanceof EmbeddingError) {
@@ -27,11 +33,15 @@ function embeddingErrorResponse(error: unknown): Response {
 }
 
 export function GET(request: Request) {
-  return handleWebhookAdmin(request, "embed_origin_list_failure", async () =>
-    NextResponse.json(
-      { origins: await listEmbedOrigins() },
-      { headers: noStore },
-    ),
+  return handleWebhookAdmin(
+    request,
+    "embed_origin_list_failure",
+    async () =>
+      NextResponse.json(
+        { origins: await listEmbedOrigins() },
+        { headers: noStore },
+      ),
+    EMBEDDING_WORDS,
   );
 }
 
@@ -50,6 +60,7 @@ export function POST(request: Request) {
         return embeddingErrorResponse(error);
       }
     },
+    EMBEDDING_WORDS,
   );
 }
 
@@ -68,5 +79,6 @@ export function DELETE(request: Request) {
         return embeddingErrorResponse(error);
       }
     },
+    EMBEDDING_WORDS,
   );
 }

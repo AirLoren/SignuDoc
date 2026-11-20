@@ -12,13 +12,28 @@ import { WebhookEndpointError, type WebhookActor } from "./endpoints.ts";
 
 // What every /api/admin/webhooks route shares: administrators only, not on
 // a hosted install, never cached, and known errors become plain messages.
+// The embedded signing settings use it too, with their own words.
 
 export const noStore = { "cache-control": "private, no-store" };
+
+/** What a feature's settings routes say when they cannot run. */
+export type AdminRouteWords = {
+  /** Logged with an unexpected failure. */
+  failure: string;
+  /** The answer on a hosted install. */
+  hosted: string;
+};
+
+const WEBHOOK_WORDS: AdminRouteWords = {
+  failure: "Unexpected failure in a webhook settings request.",
+  hosted: "Webhooks are for self-hosted installs.",
+};
 
 export async function handleWebhookAdmin(
   request: Request,
   category: string,
   run: (actor: WebhookActor) => Promise<Response>,
+  words: AdminRouteWords = WEBHOOK_WORDS,
 ): Promise<Response> {
   const sessionResult = await requireAdminSession(request);
 
@@ -28,7 +43,7 @@ export async function handleWebhookAdmin(
 
   if ((await getSettings()).hosted) {
     return NextResponse.json(
-      { error: "Webhooks are for self-hosted installs." },
+      { error: words.hosted },
       { headers: noStore, status: 400 },
     );
   }
@@ -53,7 +68,7 @@ export async function handleWebhookAdmin(
     logRouteError(error, {
       category,
       ipAddress: actor.ipAddress ?? null,
-      message: "Unexpected failure in a webhook settings request.",
+      message: words.failure,
       path: getRequestPathname(request),
       userId: actor.userId,
     });

@@ -553,9 +553,33 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
           responses: {
             "201": {
+              content: {
+                "application/json": {
+                  schema: {
+                    properties: {
+                      expiresAt: {
+                        description:
+                          "When the link stops working if it is not opened.",
+                        format: "date-time",
+                        type: "string",
+                      },
+                      object: { const: "embed_link", type: "string" },
+                      url: {
+                        description:
+                          "The page to show in the frame, with its origin parameter. Use it as it is.",
+                        format: "uri",
+                        type: "string",
+                      },
+                    },
+                    required: ["object", "url", "expiresAt"],
+                    type: "object",
+                  },
+                },
+              },
               description:
                 "The link to frame (url) and when it stops working if not opened (expiresAt). Each call replaces the signer's last link.",
             },
+            "413": errorResponse,
             ...errors,
           },
           summary:

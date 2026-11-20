@@ -451,11 +451,12 @@ curl https://sign.example.com/api/v1/envelopes/8c1d…/signers/51ab…/embed-lin
 }
 ```
 
-Put `url` in a frame on the page at `origin`:
+Put `url` in a frame on the page at `origin`, exactly as it came, with its
+`origin` parameter:
 
 ```html
 <iframe
-  src="https://sign.example.com/embed/sign/…"
+  src="https://sign.example.com/embed/sign/…?origin=https%3A%2F%2Fapp.example.com"
   title="Sign your agreement"
   style="width: 100%; height: 800px; border: 0"
 ></iframe>

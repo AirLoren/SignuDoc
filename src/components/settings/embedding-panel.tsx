@@ -15,11 +15,14 @@ type Payload = {
   origins?: Array<{ createdAt: number; origin: string }>;
 } | null;
 
+type Change = { method: "DELETE" | "POST"; origin: string };
+
 export function EmbeddingPanel() {
   const [origins, setOrigins] = useState<string[] | null>(null);
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<string | null>(null);
+  // What is being changed, so each button names only its own change.
+  const [pending, setPending] = useState<Change | null>(null);
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -51,8 +54,8 @@ export function EmbeddingPanel() {
     };
   }, [revision]);
 
-  async function change(method: "DELETE" | "POST", origin: string) {
-    setPending(origin);
+  async function change(method: Change["method"], origin: string) {
+    setPending({ method, origin });
     setError(null);
 
     try {
@@ -75,8 +78,18 @@ export function EmbeddingPanel() {
         return;
       }
 
+      // The list changes at once, in case reading it again fails.
       if (method === "POST") {
+        const added = payload?.origin ?? origin;
+
         setValue("");
+        setOrigins((current) =>
+          current && !current.includes(added) ? [...current, added] : current,
+        );
+      } else {
+        setOrigins((current) =>
+          current ? current.filter((listed) => listed !== origin) : current,
+        );
       }
 
       setRevision((current) => current + 1);
@@ -133,7 +146,7 @@ export function EmbeddingPanel() {
           onClick={() => void change("POST", value)}
           type="button"
         >
-          {pending === value && value ? "Adding..." : "Allow site"}
+          {pending?.method === "POST" ? "Adding..." : "Allow site"}
         </button>
       </div>
 
@@ -167,7 +180,9 @@ export function EmbeddingPanel() {
                 onClick={() => void change("DELETE", origin)}
                 type="button"
               >
-                {pending === origin ? "Removing..." : "Remove"}
+                {pending?.method === "DELETE" && pending.origin === origin
+                  ? "Removing..."
+                  : "Remove"}
               </button>
             </li>
           ))}
