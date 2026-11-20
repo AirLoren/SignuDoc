@@ -18,7 +18,20 @@ import {
   FieldError,
   FieldLabel,
 } from "@/components/ui/field";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  CUSTOM_DISCLOSURE_LEGAL_NOTE,
+  CUSTOM_DISCLOSURE_NOTICE,
+  tidyDisclosureText,
+} from "@/lib/consent-disclosure-notice";
 import type { EmailDnsRecord, EmailStatus } from "@/lib/email-status";
 import type {
   OrganizationSettingsField,
@@ -92,6 +105,11 @@ export function OrganizationSettings({
   // Bumped after a save, so the email panel looks again: a new sender
   // address means a different domain to check.
   const [emailRevision, setEmailRevision] = useState(0);
+  // The disclosure as last saved, to tell whether a save changes it.
+  const [savedConsentDisclosure, setSavedConsentDisclosure] = useState(
+    initialSettings.consentDisclosure,
+  );
+  const [isDisclosureNoticeOpen, setIsDisclosureNoticeOpen] = useState(false);
 
   function handleChange(field: OrganizationSettingsField) {
     return (event: ChangeEvent<HTMLInputElement>) => {
@@ -128,13 +146,39 @@ export function OrganizationSettings({
     setFeedback(null);
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  /**
+   * Whether saving puts the administrator's own words in place of what
+   * signers read now, which needs them to agree to the notice first. Going
+   * back to the standard text, or saving the same words again, does not.
+   */
+  function savingChangesToOwnDisclosure(): boolean {
+    const next = tidyDisclosureText(values.consentDisclosure);
+
+    return (
+      !values.hosted &&
+      next.length > 0 &&
+      next !== tidyDisclosureText(values.defaultConsentDisclosure) &&
+      next !== tidyDisclosureText(savedConsentDisclosure)
+    );
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (isSaving) {
       return;
     }
 
+    if (savingChangesToOwnDisclosure()) {
+      setIsDisclosureNoticeOpen(true);
+      return;
+    }
+
+    void saveSettings(false);
+  }
+
+  async function saveSettings(disclosureNoticeAgreed: boolean) {
+    setIsDisclosureNoticeOpen(false);
     setErrors({});
     setFeedback(null);
     setIsSaving(true);
@@ -145,6 +189,7 @@ export function OrganizationSettings({
           allowedEmailDomains: values.allowedEmailDomains,
           brandColor: values.brandColor,
           consentDisclosure: values.consentDisclosure,
+          consentDisclosureAcknowledged: disclosureNoticeAgreed,
           organizationName: values.organizationName,
           privacyUrl: values.privacyUrl,
           retentionDays: values.retentionDays,
@@ -170,6 +215,7 @@ export function OrganizationSettings({
       }
 
       setValues(payload.settings);
+      setSavedConsentDisclosure(payload.settings.consentDisclosure);
       setEmailRevision((revision) => revision + 1);
       setFeedback({ message: "Organization settings saved.", tone: "success" });
       // The header and the accent color come from the layout around this
@@ -388,9 +434,9 @@ export function OrganizationSettings({
                 <p className="max-w-2xl text-sm leading-6 text-(--secondary)">
                   Optional. Signers read this and tick a box to agree to use
                   electronic records and signatures before they sign. Leave it
-                  empty to show the standard text. The words each signer saw are
-                  kept with their record. Laws differ by place and by who signs,
-                  so ask a lawyer before shortening it.
+                  empty to use the standard text, or press &ldquo;Start from the
+                  standard text&rdquo; to edit it. The words each signer saw are
+                  kept with their record.
                 </p>
               </div>
               <Field className="gap-2 text-sm">
@@ -434,6 +480,9 @@ export function OrganizationSettings({
                     to write to goes.
                   </FieldDescription>
                 )}
+                <p className="text-xs leading-5 text-(--secondary)">
+                  {CUSTOM_DISCLOSURE_LEGAL_NOTE}
+                </p>
               </Field>
               <div className="flex flex-wrap gap-3">
                 <ShellButton
@@ -494,6 +543,48 @@ export function OrganizationSettings({
             {isSaving ? "Saving..." : "Save organization settings"}
           </ShellButton>
         </form>
+
+        {isDisclosureNoticeOpen ? (
+          <Dialog
+            open
+            onOpenChange={(open) => {
+              if (!open) {
+                setIsDisclosureNoticeOpen(false);
+              }
+            }}
+          >
+            <DialogContent className="max-w-lg sm:p-8" showCloseButton={false}>
+              <DialogHeader className="space-y-3">
+                <DialogTitle>{CUSTOM_DISCLOSURE_NOTICE.title}</DialogTitle>
+                <DialogDescription asChild>
+                  <div className="space-y-3 text-sm leading-6 text-(--secondary)">
+                    {CUSTOM_DISCLOSURE_NOTICE.paragraphs.map((paragraph) => (
+                      <p key={paragraph.text}>
+                        {paragraph.lead ? (
+                          <strong className="font-bold text-(--fg)">
+                            {paragraph.lead}{" "}
+                          </strong>
+                        ) : null}
+                        {paragraph.text}
+                      </p>
+                    ))}
+                  </div>
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter className="gap-3 sm:justify-end">
+                <ShellButton
+                  onClick={() => setIsDisclosureNoticeOpen(false)}
+                  variant="secondary"
+                >
+                  Cancel
+                </ShellButton>
+                <ShellButton onClick={() => void saveSettings(true)}>
+                  {CUSTOM_DISCLOSURE_NOTICE.agree}
+                </ShellButton>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        ) : null}
 
         <EmailSetupPanel key={emailRevision} />
 

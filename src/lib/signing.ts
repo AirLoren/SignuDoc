@@ -47,7 +47,6 @@ import {
 } from "./schemas/signer.ts";
 import {
   getBranding,
-  getSettings,
   readStoredSettings,
   resolveSettings,
 } from "./settings.ts";
@@ -106,6 +105,7 @@ import { describeEntryProblem, judgeRadioGroups } from "./field-choices.ts";
 import {
   buildDisclosureSections,
   CONSENT_STATEMENT,
+  disclosureSectionsAsText,
   getDisclosureVersion,
   normalizeCustomDisclosure,
 } from "./electronic-records-disclosure.ts";
@@ -1744,6 +1744,34 @@ export async function checkSigningFieldFit(
     : { fits: true };
 }
 
+/**
+ * The disclosure this signer reads, filled in for their sender. It is read
+ * from the database, not the settings cache, so the signing page and the
+ * consent check always agree on the words just after an administrator
+ * changes them.
+ */
+async function readSignerDisclosure(
+  context: SigningContext,
+  database: DbExecutor,
+) {
+  const branding = await getBranding();
+  const customDisclosure = normalizeCustomDisclosure(
+    resolveSettings(await readStoredSettings(database)).consentDisclosure,
+  );
+
+  return {
+    customDisclosure,
+    sections: buildDisclosureSections(
+      {
+        contactAddress: branding.supportAddress ?? context.sender.email,
+        senderName: normalizeSenderName(context.sender),
+      },
+      customDisclosure,
+    ),
+    version: getDisclosureVersion(customDisclosure),
+  };
+}
+
 export async function recordSignerConsent(
   token: string,
   input: unknown,
@@ -1761,12 +1789,8 @@ export async function recordSignerConsent(
     database,
   );
 
-  // Read from the database, not the settings cache, so that a disclosure an
-  // administrator has just changed is the one a signer is held to at once.
-  const customDisclosure = normalizeCustomDisclosure(
-    resolveSettings(await readStoredSettings(database)).consentDisclosure,
-  );
-  const disclosureVersion = getDisclosureVersion(customDisclosure);
+  const disclosure = await readSignerDisclosure(context, database);
+  const disclosureVersion = disclosure.version;
 
   if (parsed.disclosureVersion !== disclosureVersion) {
     throw new SigningMutationError(
@@ -1834,10 +1858,13 @@ export async function recordSignerConsent(
           disclosureVersion,
           // The built-in words are known from their version. A custom
           // disclosure can be changed or taken away later, so the words the
-          // signer saw are kept with the record.
-          ...(customDisclosure === null
+          // signer saw, filled in as they read them, are kept with the
+          // record.
+          ...(disclosure.customDisclosure === null
             ? {}
-            : { disclosureText: customDisclosure }),
+            : {
+                disclosureText: disclosureSectionsAsText(disclosure.sections),
+              }),
           statement: CONSENT_STATEMENT,
         },
         userAgent: requestMeta.userAgent ?? null,
@@ -1990,10 +2017,7 @@ export async function getSigningPayloadForToken(
     database,
   );
   const storageService = createStorageService();
-  const branding = await getBranding();
-  const customDisclosure = normalizeCustomDisclosure(
-    (await getSettings()).consentDisclosure,
-  );
+  const disclosure = await readSignerDisclosure(context, database);
 
   await recordViewedEventOnce(context, requestMeta, database);
 
@@ -2064,15 +2088,9 @@ export async function getSigningPayloadForToken(
     consentedAt: checkState.consentedAt,
     currentSignerFields,
     disclosure: {
-      sections: buildDisclosureSections(
-        {
-          contactAddress: branding.supportAddress ?? context.sender.email,
-          senderName: normalizeSenderName(context.sender),
-        },
-        customDisclosure,
-      ),
+      sections: disclosure.sections,
       statement: CONSENT_STATEMENT,
-      version: getDisclosureVersion(customDisclosure),
+      version: disclosure.version,
     },
     declineUrl: getSigningDeclineUrl(token),
     documentUrl: getSigningDocumentUrl(token),

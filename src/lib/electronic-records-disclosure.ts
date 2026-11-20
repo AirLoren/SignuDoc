@@ -10,6 +10,8 @@
 
 import { createHash } from "node:crypto";
 
+import { tidyDisclosureText } from "./consent-disclosure-notice.ts";
+
 export const ELECTRONIC_RECORDS_DISCLOSURE_VERSION = "2026-11-13";
 
 /** The longest custom disclosure, in characters. */
@@ -88,7 +90,7 @@ export const CONSENT_STATEMENT =
 export function normalizeCustomDisclosure(
   text: string | null | undefined,
 ): string | null {
-  const normalized = (text ?? "").replace(/\r\n?/g, "\n").trim();
+  const normalized = tidyDisclosureText(text);
 
   return normalized.length === 0 ? null : normalized;
 }
@@ -188,9 +190,41 @@ function fillPlaceholders(
   party: DisclosureParty,
   contact: string = contactFor(party),
 ): string {
+  // Callbacks, so a "$" in a name or address is copied as it is rather
+  // than read as a replacement pattern.
   return text
-    .replaceAll("{sender}", party.senderName)
-    .replaceAll("{contact}", contact);
+    .replaceAll("{sender}", () => party.senderName)
+    .replaceAll("{contact}", () => contact);
+}
+
+/**
+ * The sections as one text, the way the signer read them: a heading on its
+ * own line above its paragraph, and a blank line between sections. It is
+ * what the audit trail keeps of a custom disclosure.
+ */
+export function disclosureSectionsAsText(
+  sections: readonly DisclosureSection[],
+): string {
+  return sections
+    .map((section) =>
+      section.heading ? `${section.heading}\n${section.text}` : section.text,
+    )
+    .join("\n\n");
+}
+
+/**
+ * A custom disclosure as it is saved. The standard text saved unchanged is
+ * the same as no custom text, so it is stored as none and keeps the
+ * built-in version.
+ */
+export function toStoredCustomDisclosure(
+  text: string | null | undefined,
+): string | null {
+  const normalized = normalizeCustomDisclosure(text);
+
+  return normalized === normalizeCustomDisclosure(standardDisclosureTemplate())
+    ? null
+    : normalized;
 }
 
 /**

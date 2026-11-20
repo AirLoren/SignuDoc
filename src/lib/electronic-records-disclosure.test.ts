@@ -5,10 +5,12 @@ import {
   buildDisclosureSections,
   buildElectronicRecordsDisclosure,
   DISCLOSURE_MAX_LENGTH,
+  disclosureSectionsAsText,
   ELECTRONIC_RECORDS_DISCLOSURE_VERSION,
   getDisclosureVersion,
   normalizeCustomDisclosure,
   standardDisclosureTemplate,
+  toStoredCustomDisclosure,
   validateCustomDisclosure,
 } from "./electronic-records-disclosure.ts";
 
@@ -136,4 +138,40 @@ test("the standard template, used as custom text, reads the same as the built-in
       senderName: "Jordan Lee",
     }),
   );
+});
+
+test("a dollar sign in a name or address is copied as it is", () => {
+  const sections = buildDisclosureSections(
+    { contactAddress: "pay$$@acme.com", senderName: "Dollar $$ $& Consulting" },
+    "## From {sender}\nWrite to {contact}.",
+  );
+
+  assert.deepEqual(sections, [
+    {
+      heading: "From Dollar $$ $& Consulting",
+      text: "Write to Dollar $$ $& Consulting at pay$$@acme.com.",
+    },
+  ]);
+});
+
+test("the words a signer read are kept as one text, filled in", () => {
+  const sections = buildDisclosureSections(
+    party,
+    "## Signing online\n{sender} asks you to sign online.\n\nWrite to {contact}.",
+  );
+
+  assert.equal(
+    disclosureSectionsAsText(sections),
+    "Signing online\nAcme Corp asks you to sign online.\n\nWrite to Acme Corp at help@acme.com.",
+  );
+});
+
+test("the standard text saved unchanged is stored as no custom text", () => {
+  assert.equal(toStoredCustomDisclosure(standardDisclosureTemplate()), null);
+  assert.equal(
+    toStoredCustomDisclosure(`  ${standardDisclosureTemplate()}\r\n`),
+    null,
+  );
+  assert.equal(toStoredCustomDisclosure("Our words."), "Our words.");
+  assert.equal(toStoredCustomDisclosure("   "), null);
 });

@@ -8,6 +8,25 @@ release says when it does.
 
 ## [Unreleased]
 
+### Settings
+
+- An administrator can write the disclosure signers read and agree to before
+  signing, under Settings, Organization, "What signers agree to before
+  signing", or start from the standard text and edit it. Empty keeps the
+  standard text. A line starting with `## ` is a heading, and `{sender}` and
+  `{contact}` fill in who is asking and who to write to. Saving words of
+  their own first shows a notice that the standard text covers what the U.S.
+  E-SIGN Act requires, that changing it may make signatures invalid, and that
+  nothing in SignuDoc is legal advice; the administrator presses "I agree",
+  and that is recorded in the site audit trail. The version stored with each
+  signer's agreement follows the text, and their audit trail keeps the words
+  they read. The hosted service keeps the standard text (PR #193 by
+  @carefulcomputer).
+
+This needs one migration, `20261119130000_consent_disclosure.sql`, which adds
+the `app_settings.consent_disclosure` column. Until it has run, the setting
+reads as empty and signers see the standard text.
+
 ## [0.7.0] - 2026-11-20
 
 A sender can now send one template to many people at once from a CSV. Two

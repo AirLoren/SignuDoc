@@ -6,6 +6,7 @@ import { getDb, type DbExecutor } from "./db/connection.ts";
 import {
   normalizeCustomDisclosure,
   standardDisclosureTemplate,
+  toStoredCustomDisclosure,
   validateCustomDisclosure,
 } from "./electronic-records-disclosure.ts";
 import { emailSchema } from "./schemas/common.ts";
@@ -151,6 +152,9 @@ const organizationSettingsSchema = z.object({
   // Left out means unchanged. The length is judged after tidying, below; this
   // only keeps an absurd request from getting that far.
   consentDisclosure: z.string().max(20_000).optional(),
+  // The administrator agreed to the notice about changing the disclosure.
+  // Needed only when the saved words change to words of their own.
+  consentDisclosureAcknowledged: z.boolean().optional(),
   organizationName: z.string().trim().min(1).max(120),
   privacyUrl: optionalWebUrl.default(null),
   retentionDays: z
@@ -213,6 +217,30 @@ function withoutLockedFields(
   return input;
 }
 
+export const CONSENT_DISCLOSURE_NOTICE_REQUIRED =
+  'Read the notice about changing what signers agree to, and press "I agree", before saving your own words.';
+
+/**
+ * Whether a save puts the administrator's own words in place of what
+ * signers read now. Going back to the standard text, or saving the same
+ * words again, does not.
+ */
+export function changesToOwnDisclosure(
+  consentDisclosure: string | undefined,
+  current: Pick<ResolvedSettings, "consentDisclosure">,
+): boolean {
+  if (consentDisclosure === undefined) {
+    return false;
+  }
+
+  const next = toStoredCustomDisclosure(consentDisclosure);
+
+  return (
+    next !== null &&
+    next !== normalizeCustomDisclosure(current.consentDisclosure)
+  );
+}
+
 /**
  * Validates and saves the Organization form. Addresses that are fixed by an
  * environment variable are left as they are stored, since the stored value
@@ -267,6 +295,11 @@ export async function updateOrganizationSettings(
 
   if (disclosureProblem !== null) {
     fieldErrors.consentDisclosure = disclosureProblem;
+  } else if (
+    changesToOwnDisclosure(input.consentDisclosure, current) &&
+    input.consentDisclosureAcknowledged !== true
+  ) {
+    fieldErrors.consentDisclosure = CONSENT_DISCLOSURE_NOTICE_REQUIRED;
   }
 
   // Part 11 records are never deleted on a timer.
@@ -292,7 +325,7 @@ export async function updateOrganizationSettings(
             ...(input.consentDisclosure === undefined
               ? {}
               : {
-                  consentDisclosure: normalizeCustomDisclosure(
+                  consentDisclosure: toStoredCustomDisclosure(
                     input.consentDisclosure,
                   ),
                 }),

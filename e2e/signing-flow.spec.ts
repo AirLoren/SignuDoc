@@ -190,6 +190,55 @@ test("a new install is set up, a sender sends a PDF and a recipient signs it", a
     ).toBeVisible();
     await expect.poll(() => readAccentColor(adminPage)).toBe(BRAND_COLOR);
 
+    // Words of the administrator's own in place of the standard disclosure
+    // are saved only after they agree to the notice about E-SIGN. Cancel
+    // saves nothing, and going back to the standard text needs no notice.
+    const disclosureBox = adminPage.getByLabel("Disclosure text");
+    const saveOrganization = adminPage.getByRole("button", {
+      name: "Save organization settings",
+    });
+    const notice = adminPage.getByRole("dialog", {
+      name: "Before you change what signers agree to",
+    });
+
+    await expect(
+      adminPage.getByText(
+        "We're not lawyers, and nothing here is legal advice",
+      ),
+    ).toBeVisible();
+    await disclosureBox.fill("## Signing online\nWe send this online.");
+    await saveOrganization.click();
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText("U.S. E-SIGN Act");
+    await expect(notice).toContainText("Nothing in SignuDoc");
+    await notice.getByRole("button", { name: "Cancel" }).click();
+    await expect(notice).toBeHidden();
+    await expect(
+      adminPage.getByText("Organization settings saved."),
+    ).toBeHidden();
+
+    await saveOrganization.click();
+    await notice.getByRole("button", { name: "I agree" }).click();
+    await expect(
+      adminPage.getByText("Organization settings saved."),
+    ).toBeVisible();
+
+    await adminPage.reload();
+    await expect(disclosureBox).toHaveValue(
+      "## Signing online\nWe send this online.",
+    );
+
+    await adminPage
+      .getByRole("button", { name: "Use the standard text" })
+      .click();
+    await saveOrganization.click();
+    await expect(notice).toBeHidden();
+    await expect(
+      adminPage.getByText("Organization settings saved."),
+    ).toBeVisible();
+    await adminPage.reload();
+    await expect(disclosureBox).toHaveValue("");
+
     // Setup can only happen once.
     await adminPage.goto("/setup");
     await expect(adminPage).not.toHaveURL(/\/setup/);
