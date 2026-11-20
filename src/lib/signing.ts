@@ -789,6 +789,9 @@ async function lockSentEnvelope(
  * before any of their rows are written. The token is read once when the
  * page is opened; a correction can replace the hash in the meantime and
  * leave status as notified, which the later UPDATE used to treat as enough.
+ * The link must also not have expired since: removing an embedding site
+ * expires its links, and a submission already under way must not finish
+ * on one.
  */
 async function lockSignerForPresentedToken(
   tx: DbExecutor,
@@ -811,9 +814,10 @@ async function lockSignerForPresentedToken(
         AND envelope_id = $2
         AND status = 'notified'
         AND signing_token_hash = $3
+        AND (signing_token_expires_at IS NULL OR signing_token_expires_at >= $4)
       FOR NO KEY UPDATE
     `,
-    [signerId, envelopeId, tokenHash],
+    [signerId, envelopeId, tokenHash, Math.floor(Date.now() / 1000)],
   );
 
   if (!locked) {

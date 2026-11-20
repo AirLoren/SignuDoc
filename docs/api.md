@@ -503,7 +503,8 @@ Put `url` in a frame on the page at `origin`, exactly as it came, with its
   signers who share a step are all `notified` at once: watch for the
   `signer.signed` webhook, whose `data.envelope` shows who is `notified`
   now.
-- Asking for links is limited to 300 per 10 minutes per account.
+- Asking for links is limited to 300 per 10 minutes per key. Past that the
+  answer is 429 with `Retry-After`.
 
 ### Hear what happened
 

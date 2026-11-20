@@ -137,7 +137,6 @@ export function EmbeddingPanel() {
             className="field-input"
             disabled={pending !== null}
             inputMode="url"
-            maxLength={255}
             name="embed-origin"
             onChange={(event) => setValue(event.target.value)}
             placeholder="https://app.example.com"

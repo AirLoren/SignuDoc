@@ -1,6 +1,10 @@
 import { MAX_JSON_BODY_BYTES, readBodyWithin } from "@/lib/api/body";
 import { apiError, apiJson, bodyTooLarge } from "@/lib/api/http";
-import { applyAccountLimit, handleApi } from "@/lib/api/route";
+import {
+  API_EMBED_LINK_LIMIT,
+  applyAccountLimit,
+  handleApi,
+} from "@/lib/api/route";
 import { issueEmbedLink } from "@/lib/embedding";
 
 type RouteContext = { params: Promise<{ id: string; signerId: string }> };
@@ -11,11 +15,7 @@ type RouteContext = { params: Promise<{ id: string; signerId: string }> };
 
 export async function POST(request: Request, context: RouteContext) {
   return handleApi(request, "write", "api_embed_link_failure", async (api) => {
-    const limited = await applyAccountLimit(api, {
-      key: "api-embed-link",
-      limit: 300,
-      windowMs: 10 * 60 * 1000,
-    });
+    const limited = await applyAccountLimit(api, API_EMBED_LINK_LIMIT);
 
     if (limited) {
       return limited;

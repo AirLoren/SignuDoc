@@ -268,7 +268,7 @@ export function buildOpenApiDocument(
             delivery: {
               default: "email",
               description:
-                "embedded: signers sign inside your app (see POST /envelopes/{id}/signers/{signerId}/embed-link), and no invitations or reminders are emailed.",
+                "embedded: signers sign inside your app (see POST /envelopes/{id}/signers/{signerId}/embed-link), and no invitations or reminders are emailed. It needs a site on the install's list of allowed sites, simple signatures (signatureLevel simple), no signer accessCode or requireEmailCode, and an install that is not in Part 11 mode; otherwise the send is refused with 400.",
               enum: ["email", "embedded"],
               type: "string",
             },
@@ -285,6 +285,8 @@ export function buildOpenApiDocument(
               type: ["integer", "null"],
             },
             signatureLevel: {
+              description:
+                "advanced and qualified are sent by email only, not with delivery embedded.",
               enum: ["simple", "advanced", "qualified"],
               type: "string",
             },

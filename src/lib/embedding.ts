@@ -377,6 +377,11 @@ export type EmbedOpenResult =
  * Checks that an embedded link is opened for the site it was made for,
  * and on first opening gives it the rest of a signing session. Leaves
  * other problems (expired, already signed) to the signing page itself.
+ *
+ * A link that signing or declining took away (spent) passes the same site
+ * checks, so its frame can show what happened (signed, completed) instead
+ * of saying the link expired. It opens nothing: the signing page only
+ * reports its state.
  */
 export async function openEmbedLink(
   token: string,
@@ -391,6 +396,7 @@ export async function openEmbedLink(
     envelopeExpiresAt: number | null;
     expiresAt: number | null;
     id: string;
+    live: boolean;
     originAllowed: boolean;
   }>(
     database,
@@ -398,13 +404,16 @@ export async function openEmbedLink(
       SELECT s.id, s.embed_origin AS "embedOrigin",
         s.embed_link_opened_at AS "embedLinkOpenedAt",
         s.signing_token_expires_at AS "expiresAt",
+        COALESCE(s.signing_token_hash = $1, false) AS "live",
         e.delivery, e.expires_at AS "envelopeExpiresAt",
         EXISTS (
           SELECT 1 FROM embed_allowed_origins a WHERE a.origin = s.embed_origin
         ) AS "originAllowed"
       FROM signers s
       JOIN envelopes e ON e.id = s.envelope_id
-      WHERE s.signing_token_hash = $1
+      WHERE s.signing_token_hash = $1 OR s.spent_signing_token_hash = $1
+      ORDER BY "live" DESC
+      LIMIT 1
     `,
     [hashOpaqueToken(token)],
   );
@@ -420,6 +429,10 @@ export async function openEmbedLink(
   // The site must still be on the list: removing it stops its links.
   if (!origin || row.embedOrigin !== origin || !row.originAllowed) {
     return { ok: false, reason: "wrong_origin" };
+  }
+
+  if (!row.live) {
+    return { ok: true };
   }
 
   if (

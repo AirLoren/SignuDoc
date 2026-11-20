@@ -14,7 +14,7 @@ import {
   createEnvelopeForApi,
   type ApiActor,
 } from "./api/envelopes.ts";
-import { openTestDatabase } from "./db/test-database.ts";
+import { openTestDatabase, waitUntilBlockedBy } from "./db/test-database.ts";
 import { ELECTRONIC_RECORDS_DISCLOSURE_VERSION } from "./electronic-records-disclosure.ts";
 import {
   addEmbedOrigin,
@@ -37,6 +37,7 @@ import {
   getSigningPayloadForToken,
   recordSignerConsent,
   SigningAccessError,
+  SigningMutationError,
   submitSigningForToken,
 } from "./signing.ts";
 import { setWebhookDrainScheduler } from "./webhooks/outbox.ts";
@@ -195,7 +196,15 @@ async function create(
 
 async function invitationsTo(email: string): Promise<number> {
   const dir = process.env.EMAIL_CAPTURE_DIR!;
-  const files = await readdir(dir).catch(() => [] as string[]);
+  // No outbox yet means nothing was sent; any other failure must not pass
+  // for an empty one.
+  const files = await readdir(dir).catch((error: unknown) => {
+    if ((error as { code?: string }).code === "ENOENT") {
+      return [] as string[];
+    }
+
+    throw error;
+  });
   let count = 0;
 
   for (const file of files) {
@@ -742,6 +751,136 @@ test("a signer who declines in the app is recorded as declining there", async ()
     apiKeyName: "Portal",
     origin: ORIGIN,
   });
+});
+
+test("a finished embedded link opened again in its site says what happened, not that it expired", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const signerId = envelope.signers[0]!.id;
+  const token = await linkFor(admin, envelope.id, signerId);
+  const field = await database.query<{ id: string }>(
+    `select id from fields where envelope_id = $1 and signer_id = $2`,
+    [envelope.id, signerId],
+  );
+
+  await openEmbedLink(token, ORIGIN, database);
+  await recordSignerConsent(
+    token,
+    { disclosureVersion: ELECTRONIC_RECORDS_DISCLOSURE_VERSION },
+    { database },
+  );
+  await submitSigningForToken(
+    token,
+    {
+      clientTimezoneOffsetMinutes: 0,
+      fields: [
+        {
+          fieldId: field.rows[0]!.id,
+          imageDataUrl: DRAWN_SIGNATURE,
+          inputMethod: "drawn",
+          type: "signature",
+        },
+      ],
+    },
+    { database },
+  );
+
+  const openedAt = (await signerLink(signerId)).openedAt;
+
+  // The spent link passes the site checks, so the page goes on to say the
+  // signer already signed...
+  assert.deepEqual(await openEmbedLink(token, ORIGIN, database), {
+    ok: true,
+  });
+  await assert.rejects(
+    getSigningPayloadForToken(token, { database }),
+    (error: unknown) =>
+      error instanceof SigningAccessError && error.state === "already-signed",
+  );
+  // ...it opens nothing, and another site still learns nothing.
+  assert.equal((await signerLink(signerId)).openedAt, openedAt);
+  assert.deepEqual(
+    await openEmbedLink(token, "https://other.example.com", database),
+    { ok: false, reason: "wrong_origin" },
+  );
+});
+
+test("a signing already under way when its site is removed does not finish", async () => {
+  const admin = await createAdmin();
+
+  await addEmbedOrigin(admin, ORIGIN, { database });
+
+  const envelope = await create(admin);
+  const signerId = envelope.signers[0]!.id;
+  const token = await linkFor(admin, envelope.id, signerId);
+  const field = await database.query<{ id: string }>(
+    `select id from fields where envelope_id = $1 and signer_id = $2`,
+    [envelope.id, signerId],
+  );
+
+  await openEmbedLink(token, ORIGIN, database);
+  await recordSignerConsent(
+    token,
+    { disclosureVersion: ELECTRONIC_RECORDS_DISCLOSURE_VERSION },
+    { database },
+  );
+
+  // The removal holds the signer's row while the submission starts, and
+  // expires the link (as removeEmbedOrigin does) once the submission waits.
+  const remover = await database.connect();
+  let submitted: Promise<unknown> | undefined;
+
+  try {
+    await remover.query("begin");
+    await remover.query(`select id from signers where id = $1 for update`, [
+      signerId,
+    ]);
+    submitted = submitSigningForToken(
+      token,
+      {
+        clientTimezoneOffsetMinutes: 0,
+        fields: [
+          {
+            fieldId: field.rows[0]!.id,
+            imageDataUrl: DRAWN_SIGNATURE,
+            inputMethod: "drawn",
+            type: "signature",
+          },
+        ],
+      },
+      { database },
+    );
+    // Handled at once, so a failure before it waits is reported below
+    // instead of as an unhandled rejection.
+    submitted.catch(() => undefined);
+
+    await waitUntilBlockedBy(database, remover);
+    await remover.query(
+      `update signers set signing_token_expires_at = $2 where id = $1`,
+      [signerId, Math.floor(Date.now() / 1000) - 1],
+    );
+    await remover.query("commit");
+  } finally {
+    await remover.query("rollback").catch(() => undefined);
+    await submitted?.catch(() => undefined);
+    remover.release();
+  }
+
+  await assert.rejects(
+    submitted!,
+    (error: unknown) =>
+      error instanceof SigningMutationError && error.statusCode === 409,
+  );
+
+  const signer = await database.query<{ status: string }>(
+    `select status from signers where id = $1`,
+    [signerId],
+  );
+
+  assert.equal(signer.rows[0]?.status, "notified");
 });
 
 test("the evidence names the key that asked for the link, not the one that made the envelope", async () => {
