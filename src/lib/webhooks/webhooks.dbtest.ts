@@ -23,6 +23,7 @@ import { issueSigningLink } from "../services/signing-links.ts";
 import { getSigningPayloadForToken } from "../signing.ts";
 import {
   drainWebhookDeliveries,
+  hasDueWebhookDeliveries,
   MAX_ATTEMPTS,
   sendTestWebhook,
 } from "./deliver.ts";
@@ -357,6 +358,7 @@ test("an endpoint removed while an event is recorded is skipped, and the change 
   const { endpoint } = await addEndpoint(admin, ["envelope.voided"]);
   const envelope = await createEnvelope(admin);
   const remover = await database.connect();
+  let recorded: Promise<unknown> | undefined;
 
   try {
     // An administrator removes the endpoint, not yet committed, just as
@@ -366,7 +368,7 @@ test("an endpoint removed while an event is recorded is skipped, and the change 
       endpoint.id,
     ]);
 
-    const recorded = recordAuditEvent(
+    recorded = recordAuditEvent(
       {
         actorType: "sender",
         envelopeId: envelope.id,
@@ -375,15 +377,22 @@ test("an endpoint removed while an event is recorded is skipped, and the change 
       },
       database,
     );
+    // Handled at once, so a failure before it waits is reported below
+    // instead of as an unhandled rejection.
+    recorded.catch(() => undefined);
 
     await waitUntilBlockedBy(database, remover);
     await remover.query("commit");
-
-    // The change goes through; before, it failed on the foreign key.
-    await recorded;
   } finally {
+    // A no-op after the commit; otherwise the removal is let go, so the
+    // event can finish and the connection goes back clean.
+    await remover.query("rollback").catch(() => undefined);
+    await recorded?.catch(() => undefined);
     remover.release();
   }
+
+  // The change goes through; before, it failed on the foreign key.
+  await recorded;
 
   assert.equal((await deliveriesFor(endpoint.id)).length, 0);
 
@@ -484,6 +493,67 @@ test("a failed try is retried later with the same payload, then given up", async
   [row] = await deliveriesFor(endpoint.id);
   assert.equal(row!.status, "delivered");
   assert.equal(row!.attempts, 1);
+
+  // Sent again once delivered, it no longer reads as delivered until it is.
+  assert.ok(await resendWebhookDelivery(row!.id, database));
+
+  const reset = await database.query(
+    `
+      select status, delivered_at as "deliveredAt",
+        last_status_code as "lastStatusCode"
+      from webhook_deliveries where id = $1
+    `,
+    [row!.id],
+  );
+
+  assert.deepEqual(reset.rows[0], {
+    deliveredAt: null,
+    lastStatusCode: null,
+    status: "pending",
+  });
+});
+
+test("a last try that never finished is marked failed, not sent again", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin);
+
+  await createEnvelope(admin);
+
+  const [row] = await deliveriesFor(endpoint.id);
+
+  // As if a drain claimed the last try and its function then stopped.
+  await database.query(
+    `
+      update webhook_deliveries
+      set attempts = $2, next_attempt_at = 0, locked_until = $3
+      where id = $1
+    `,
+    [row!.id, MAX_ATTEMPTS, Math.floor(Date.now() / 1000) - 1],
+  );
+  assert.equal(await hasDueWebhookDeliveries(database), false);
+  await drainWebhookDeliveries({ database, env });
+
+  const [after] = await deliveriesFor(endpoint.id);
+
+  assert.equal(received.length, 0);
+  assert.equal(after!.status, "failed");
+  assert.match(after!.lastError ?? "", /did not finish/);
+});
+
+test("deliveries waiting for an endpoint that is off are not due", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin);
+
+  await createEnvelope(admin);
+  assert.equal(await hasDueWebhookDeliveries(database), true);
+
+  await updateWebhookEndpoint(
+    admin,
+    endpoint.id,
+    { enabled: false },
+    { database, env },
+  );
+  assert.equal(await hasDueWebhookDeliveries(database), false);
 });
 
 test("two drains at once never send the same delivery twice", async () => {
@@ -609,6 +679,48 @@ test("after a rotation both secrets sign, and an unreadable secret says so", asy
   );
 });
 
+test("a second new secret waits until the old one's day is over", async () => {
+  const admin = await createAdmin();
+  const { endpoint, secret: first } = await addEndpoint(admin);
+
+  await rotateWebhookSecret(admin, endpoint.id, { database, env });
+  await assert.rejects(
+    rotateWebhookSecret(admin, endpoint.id, { database, env }),
+    (error: unknown) =>
+      error instanceof WebhookEndpointError &&
+      error.statusCode === 409 &&
+      /old secret still signs until/.test(error.message),
+  );
+
+  // The secret from before the switch-over still signs.
+  await createEnvelope(admin);
+  await drainWebhookDeliveries({ database, env });
+
+  const [delivery] = received;
+
+  assert.ok(
+    verifyWebhook(first, {
+      body: delivery!.body,
+      id: delivery!.headers["webhook-id"] as string,
+      signatureHeader: delivery!.headers["webhook-signature"] as string,
+      timestamp: Number(delivery!.headers["webhook-timestamp"]),
+    }),
+  );
+
+  // Once that day is over, another new secret can be made.
+  await database.query(
+    `update webhook_endpoints set previous_secret_expires_at = $2 where id = $1`,
+    [endpoint.id, Math.floor(Date.now() / 1000) - 1],
+  );
+
+  const again = await rotateWebhookSecret(admin, endpoint.id, {
+    database,
+    env,
+  });
+
+  assert.ok(again.secret.startsWith("whsec_"));
+});
+
 test("a test event is sent at once, tried once, and left out of the API list", async () => {
   const admin = await createAdmin();
   const { endpoint } = await addEndpoint(admin);
@@ -697,16 +809,30 @@ test("old deliveries are cleared, failed ones kept longer, and endpoints removed
   const day = 24 * 60 * 60;
 
   await database.query(
-    `update webhook_deliveries set status = 'delivered', created_at = $2 where id = $1`,
+    `
+      update webhook_deliveries
+      set status = 'delivered', created_at = $2, delivered_at = $2, updated_at = $2
+      where id = $1
+    `,
     [delivered!.id, now - 31 * day],
   );
   await database.query(
-    `update webhook_deliveries set status = 'failed', created_at = $2 where id = $1`,
+    `
+      update webhook_deliveries
+      set status = 'failed', created_at = $2, updated_at = $2
+      where id = $1
+    `,
     [failed!.id, now - 31 * day],
   );
   assert.equal(await deleteOldWebhookDeliveries(database, now), 1);
   assert.equal((await deliveriesFor(endpoint.id)).length, 1);
-  assert.equal(await deleteOldWebhookDeliveries(database, now + 60 * day), 1);
+  assert.equal(await deleteOldWebhookDeliveries(database, now + 58 * day), 0);
+
+  // Sent again, it keeps its retries however old its event is: the 90 days
+  // count from its last change.
+  assert.ok(await resendWebhookDelivery(failed!.id, database, now));
+  assert.equal(await deleteOldWebhookDeliveries(database, now + 60 * day), 0);
+  assert.equal(await deleteOldWebhookDeliveries(database, now + 91 * day), 1);
 
   await createEnvelope(admin);
   await deleteWebhookEndpoint(admin, endpoint.id, database);

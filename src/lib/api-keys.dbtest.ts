@@ -257,6 +257,7 @@ test("removing an administrator takes the key rows before the audit lock, as rev
     database,
   );
   const holder = await database.connect();
+  let roleChange: Promise<unknown> | undefined;
 
   try {
     await holder.query("begin");
@@ -264,12 +265,10 @@ test("removing an administrator takes the key rows before the audit lock, as rev
       summary.id,
     ]);
 
-    const roleChange = setPersonRole(
-      stays.userId,
-      leaves.userId,
-      "user",
-      database,
-    );
+    roleChange = setPersonRole(stays.userId, leaves.userId, "user", database);
+    // Handled at once, so a failure before it waits is reported below
+    // instead of as an unhandled rejection.
+    roleChange.catch(() => undefined);
 
     await waitUntilBlockedBy(database, holder);
 
@@ -279,9 +278,13 @@ test("removing an administrator takes the key rows before the audit lock, as rev
     );
 
     assert.equal(free.rows[0]?.locked, true);
-    await holder.query("rollback");
-    await roleChange;
   } finally {
+    // Let go of the key row whatever happened, and let the role change
+    // finish before the connection goes back to the pool.
+    await holder.query("rollback").catch(() => undefined);
+    await roleChange?.catch(() => undefined);
     holder.release();
   }
+
+  await roleChange;
 });

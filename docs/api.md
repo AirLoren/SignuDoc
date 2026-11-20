@@ -339,8 +339,14 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 function isFromSignuDoc(headers, rawBody, secret) {
   const id = headers["webhook-id"];
   const timestamp = headers["webhook-timestamp"];
+  const signatures = headers["webhook-signature"];
 
-  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > 300) {
+  if (!id || !timestamp || !signatures) {
+    return false;
+  }
+
+  // Written this way round so a timestamp that is not a number fails too.
+  if (!(Math.abs(Date.now() / 1000 - Number(timestamp)) <= 300)) {
     return false;
   }
 
@@ -350,7 +356,7 @@ function isFromSignuDoc(headers, rawBody, secret) {
   );
 
   // During a secret rotation there are two signatures, space separated.
-  return headers["webhook-signature"].split(" ").some((signature) => {
+  return signatures.split(" ").some((signature) => {
     const given = Buffer.from(signature);
 
     return given.length === expected.length && timingSafeEqual(given, expected);
@@ -360,7 +366,10 @@ function isFromSignuDoc(headers, rawBody, secret) {
 
 "New secret" in Settings makes a new secret and shows it once. For 24 hours
 after that, deliveries are signed with both the old and the new one, so you
-can switch without missing any.
+can switch without missing any. Another new secret can be made once those
+24 hours are over, so the old one always gets its full day. To replace a
+secret sooner, for example one that leaked, remove the endpoint and add it
+again.
 
 ### Answers and retries
 
@@ -380,8 +389,11 @@ day. On Pro you can run it more often by changing the schedule of
 `/api/internal/webhooks` in `vercel.json`, for example to `*/5 * * * *`.
 
 If your app was down, `GET /api/v1/webhook-deliveries?since=…` lists what
-it missed, with the same payloads. Deliveries are kept 30 days once
-delivered and 90 days otherwise.
+it missed, with the same payloads. Times are kept to the second, so a
+`since` with a fraction counts from the start of its second, and you may
+get a delivery you already have: skip it by its `webhook-id`. Deliveries
+are kept 30 days after they are delivered, and otherwise 90 days after
+their last try or "Send again".
 
 ### Safety
 

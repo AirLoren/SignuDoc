@@ -16,6 +16,7 @@ import {
 import {
   handleWebhookAdmin,
   noStore,
+  notAJsonObject,
   readJsonObject,
 } from "@/lib/webhooks/admin-route";
 
@@ -53,6 +54,11 @@ export function POST(request: Request) {
       }
 
       const body = await readJsonObject(request);
+
+      if (!body) {
+        return notAJsonObject();
+      }
+
       const events = parseWebhookEventTypes(body.events);
       const description = parseWebhookDescription(body.description);
 

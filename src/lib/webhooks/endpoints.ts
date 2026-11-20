@@ -298,7 +298,10 @@ export async function updateWebhookEndpoint(
 
 /**
  * Makes a new secret. The old one keeps signing for a day as well, so a
- * receiver can switch without dropping deliveries.
+ * receiver can switch without dropping deliveries. Refused while an
+ * earlier switch-over is still running: a second new secret would drop
+ * the old one before its day was up, and receivers still on it would
+ * start refusing deliveries.
  */
 export async function rotateWebhookSecret(
   actor: WebhookActor,
@@ -321,6 +324,8 @@ export async function rotateWebhookSecret(
             secret_encrypted = $3,
             updated_at = $4
         WHERE id = $1
+          AND (previous_secret_expires_at IS NULL
+            OR previous_secret_expires_at <= $4)
         RETURNING ${ENDPOINT_COLUMNS}
       `,
       [
@@ -332,7 +337,25 @@ export async function rotateWebhookSecret(
     );
 
     if (!endpoint) {
-      throw new WebhookEndpointError("That endpoint does not exist.", 404);
+      // Two rotations at once queue on the row, and the second then sees
+      // the first one's switch-over here.
+      const existing = await queryOne<{ previousSecretExpiresAt: number }>(
+        tx,
+        `
+          SELECT previous_secret_expires_at AS "previousSecretExpiresAt"
+          FROM webhook_endpoints WHERE id = $1
+        `,
+        [id],
+      );
+
+      if (!existing) {
+        throw new WebhookEndpointError("That endpoint does not exist.", 404);
+      }
+
+      throw new WebhookEndpointError(
+        `This endpoint's old secret still signs until ${new Date(existing.previousSecretExpiresAt * 1000).toISOString()}, so receivers can switch. Make another new secret after that, or remove the endpoint and add it again to replace its secret now.`,
+        409,
+      );
     }
 
     await recordSystemAuditEvent(

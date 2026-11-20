@@ -21,6 +21,7 @@ const errors = {
   "404": errorResponse,
   "409": errorResponse,
   "429": errorResponse,
+  "500": errorResponse,
 };
 
 const envelopeResponse = (description: string) => ({
@@ -39,11 +40,19 @@ const idParameter = {
 
 const idempotencyKey = {
   description:
-    "Any unique string up to 255 characters. A retry with the same key and body within 24 hours gets the first response again.",
+    "Any unique string of 1 to 255 characters, not only spaces (spaces at either end are ignored). A retry with the same key and body within 24 hours gets the first response again.",
   in: "header",
   name: "Idempotency-Key",
   required: false,
-  schema: { maxLength: 255, type: "string" },
+  schema: { maxLength: 255, minLength: 1, pattern: "\\S", type: "string" },
+};
+
+/** Titles: not blank, and spaces at either end are dropped. */
+const titleSchema = {
+  maxLength: 160,
+  minLength: 1,
+  pattern: "\\S",
+  type: "string",
 };
 
 const isoTime = { format: "date-time", type: ["string", "null"] };
@@ -117,7 +126,7 @@ export function buildOpenApiDocument(serverUrl: string) {
               minItems: 1,
               type: "array",
             },
-            title: { maxLength: 160, type: "string" },
+            title: titleSchema,
             uploadId: {
               description: "With JSON: the id from POST /uploads.",
               type: "string",
@@ -307,6 +316,45 @@ export function buildOpenApiDocument(serverUrl: string) {
             url: { format: "uri", type: "string" },
           },
           required: ["uploadId", "url", "method", "headers", "expiresAt"],
+          type: "object",
+        },
+        WebhookDelivery: {
+          properties: {
+            attempts: { type: "integer" },
+            createdAt: { format: "date-time", type: "string" },
+            deliveredAt: isoTime,
+            endpointId: { type: "string" },
+            envelopeId: { type: ["string", "null"] },
+            id: {
+              description: "The webhook-id header it was sent with.",
+              type: "string",
+            },
+            lastStatusCode: { type: ["integer", "null"] },
+            object: { const: "webhook_delivery", type: "string" },
+            payload: {
+              description:
+                "The JSON body it was sent with, or null before its first try.",
+              type: ["object", "null"],
+            },
+            status: {
+              enum: ["delivered", "failed", "pending"],
+              type: "string",
+            },
+            type: { enum: [...webhookEventTypes], type: "string" },
+          },
+          required: [
+            "object",
+            "id",
+            "type",
+            "status",
+            "attempts",
+            "endpointId",
+            "envelopeId",
+            "lastStatusCode",
+            "payload",
+            "createdAt",
+            "deliveredAt",
+          ],
           type: "object",
         },
       },
@@ -699,7 +747,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                       minItems: 1,
                       type: "array",
                     },
-                    title: { maxLength: 160, type: "string" },
+                    title: titleSchema,
                   },
                   required: ["title", "signers"],
                   type: "object",
@@ -721,7 +769,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           parameters: [
             {
-              description: "Only deliveries made at or after this time.",
+              description:
+                "Only deliveries made at or after this time. Times are kept to the second, so a time with a fraction counts from the start of its second.",
               in: "query",
               name: "since",
               schema: { format: "date-time", type: "string" },
@@ -753,6 +802,22 @@ export function buildOpenApiDocument(serverUrl: string) {
           ],
           responses: {
             "200": {
+              content: {
+                "application/json": {
+                  schema: {
+                    properties: {
+                      data: {
+                        items: { $ref: "#/components/schemas/WebhookDelivery" },
+                        type: "array",
+                      },
+                      nextCursor: { type: ["string", "null"] },
+                      object: { const: "list", type: "string" },
+                    },
+                    required: ["object", "data", "nextCursor"],
+                    type: "object",
+                  },
+                },
+              },
               description:
                 "Webhook deliveries to every endpoint, newest first, each with the payload it carried (null until its first try).",
             },
