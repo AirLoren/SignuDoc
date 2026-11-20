@@ -135,7 +135,10 @@ function field(
 
 const options = () => ({ database, storageService });
 
-async function createTwoRoleTemplate(userId: string) {
+async function createTwoRoleTemplate(
+  userId: string,
+  { sameStep = false }: { sameStep?: boolean } = {},
+) {
   const draft = await createDraftEnvelope(
     userId,
     {
@@ -150,8 +153,16 @@ async function createTwoRoleTemplate(userId: string) {
     envelopeId,
     {
       signers: [
-        { email: "riley@example.test", name: "Riley Recipient" },
-        { email: "casey@example.test", name: "Casey Second" },
+        {
+          email: "riley@example.test",
+          name: "Riley Recipient",
+          ...(sameStep ? { signingStep: 1 } : {}),
+        },
+        {
+          email: "casey@example.test",
+          name: "Casey Second",
+          ...(sameStep ? { signingStep: 1 } : {}),
+        },
       ],
     },
     database,
@@ -448,6 +459,43 @@ test("a 3-row batch creates and sends three envelopes with the template's fields
       firstSignerEmails.some((address) => email.to.includes(address)),
     ).length,
     3,
+  );
+});
+
+test("copy recipients and email codes keep the template's shared signing step", async () => {
+  const userId = await createUser();
+  const template = await createTwoRoleTemplate(userId, { sameStep: true });
+  const result = await bulkSendFromTemplate(
+    userId,
+    template.id,
+    confirmBody(
+      twoRoleCsv([
+        [
+          "Tess Step",
+          `tess-step-${randomUUID()}@example.test`,
+          "Lou Step",
+          `lou-step-${randomUUID()}@example.test`,
+          "Lease",
+        ],
+      ]),
+      {
+        copyRecipients: [
+          { email: `copy-${randomUUID()}@example.test`, name: "Copy" },
+        ],
+        requireEmailCode: true,
+      },
+    ),
+    { ...options(), sender: senderFor(userId) },
+  );
+
+  assert.equal(result.rows[0]?.status, "sent");
+  const steps = await database.query<{ signing_step: number | null }>(
+    `select signing_step from signers where envelope_id = $1 and role = 'signer' order by sign_order`,
+    [result.rows[0]?.envelopeId],
+  );
+  assert.deepEqual(
+    steps.rows.map((row) => row.signing_step),
+    [1, 1],
   );
 });
 

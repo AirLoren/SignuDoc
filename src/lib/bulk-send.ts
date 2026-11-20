@@ -619,6 +619,8 @@ async function sendOneRow(
               name: signer.name,
               requireEmailCode,
               signatureMeaning,
+              // Signers who share a step keep signing at the same time.
+              signingStep: signer.step,
             })),
         },
         database,
