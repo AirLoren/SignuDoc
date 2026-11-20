@@ -13,7 +13,7 @@ import {
   MAX_API_KEYS_PER_USER,
   revokeApiKey,
 } from "./api-keys.ts";
-import { openTestDatabase } from "./db/test-database.ts";
+import { openTestDatabase, waitUntilBlockedBy } from "./db/test-database.ts";
 import { setPersonRole } from "./people.ts";
 import { SYSTEM_AUDIT_LOCK_ID } from "./services/system-audit.ts";
 
@@ -245,34 +245,6 @@ test("every key that is not revoked stays in the list, however many are revoked 
   );
 });
 
-/** Resolves once another session is waiting on a lock that `holder` has. */
-async function waitUntilBlockedBy(holder: pg.PoolClient) {
-  const self = await holder.query<{ pid: number }>(
-    "select pg_backend_pid() as pid",
-  );
-  const holderPid = self.rows[0]?.pid;
-
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    const waiting = await database.query(
-      `
-        select 1
-        from pg_stat_activity
-        where $1::integer = any(pg_blocking_pids(pid))
-        limit 1
-      `,
-      [holderPid],
-    );
-
-    if (waiting.rowCount) {
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-
-  throw new Error("Nothing started waiting on the held key row.");
-}
-
 test("removing an administrator takes the key rows before the audit lock, as revoking a key does", async () => {
   // revokeApiKey locks a key row and then the audit chain. Hold a key row
   // the way it does, and the role change must wait for it without already
@@ -299,7 +271,7 @@ test("removing an administrator takes the key rows before the audit lock, as rev
       database,
     );
 
-    await waitUntilBlockedBy(holder);
+    await waitUntilBlockedBy(database, holder);
 
     const free = await holder.query<{ locked: boolean }>(
       `select pg_try_advisory_xact_lock($1) as locked`,
