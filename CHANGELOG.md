@@ -8,6 +8,25 @@ release says when it does.
 
 ## [Unreleased]
 
+### Templates
+
+- **Send to many** on a template: upload or paste a CSV of names and email
+  addresses and send one envelope per row, with a preview that flags missing
+  or invalid addresses, duplicate rows and batches over 200 before anything
+  is created. Each row is sent on its own, so one failure does not take the
+  others with it. Confirming is idempotent: the same batch key returns the
+  stored results instead of sending again. After sending, the results can be
+  downloaded as a CSV. In Part 11 mode, a row is skipped when the signer
+  does not have a verified, identity-checked account.
+
+Send the same template to many people at once from a CSV. This needs three
+migration steps (`20261118090000_bulk_send_batches.sql`,
+`20261118120000_bulk_send_row_reason_cleared_with_envelope.sql`,
+`20261120090000_bulk_send_skipped_rows.sql`): a confirmed batch stores its
+results so a retry does not send the same envelopes again, a stored failure
+reason is cleared when its envelope is deleted, and rows skipped by the Part
+11 account check are stored so a retry skips them again.
+
 ## [0.6.0] - 2026-11-20
 
 Other apps can now work with SignuDoc: an API with keys, signed webhooks, and
