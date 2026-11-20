@@ -220,7 +220,8 @@ test("a change to the support address after the page loaded is refused too", asy
     await database.query(
       "update public.app_settings set support_address = 'new-help@example.test' where id",
     );
-    invalidateSettingsCache();
+    // The settings cache in this process still holds the old address, as
+    // another server instance would. The signing page must not use it.
 
     const afterChange = await getSigningPayloadForToken(token, { database });
 
