@@ -8,24 +8,52 @@ release says when it does.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
+A sender can now send one template to many people at once from a CSV. Two
+signing fixes from outside contributors are in too. This release changes the
+database: see the end of this entry.
+
 ### Templates
 
 - **Send to many** on a template: upload or paste a CSV of names and email
   addresses and send one envelope per row, with a preview that flags missing
   or invalid addresses, duplicate rows and batches over 200 before anything
   is created. Each row is sent on its own, so one failure does not take the
-  others with it. Confirming is idempotent: the same batch key returns the
+  others with it. Confirming is safe to retry: the same batch returns its
   stored results instead of sending again. After sending, the results can be
   downloaded as a CSV. In Part 11 mode, a row is skipped when the signer
-  does not have a verified, identity-checked account.
+  does not have a verified, identity-checked account (PR #37 by
+  @mvanhorn).
 
-Send the same template to many people at once from a CSV. This needs three
-migration steps (`20261118090000_bulk_send_batches.sql`,
-`20261118120000_bulk_send_row_reason_cleared_with_envelope.sql`,
-`20261120090000_bulk_send_skipped_rows.sql`): a confirmed batch stores its
-results so a retry does not send the same envelopes again, a stored failure
-reason is cleared when its envelope is deleted, and rows skipped by the Part
-11 account check are stored so a retry skips them again.
+### Signing
+
+- A required dropdown whose choices are all too long for their box no longer
+  stops the signer from finishing. The signer cannot shorten the sender's
+  text, so the choice is taken and drawn whole in the box, however small.
+  Typed Text and Number answers are still checked as before (PR #196 by
+  @RayFernando1337).
+- A page with no fields for the signer stays readable. The notice that
+  covered the whole page is gone, and the toolbar says "No fields on this
+  page" instead (#182, PR #194 by @HimanshuMahto).
+
+Thank you to everyone who helped with this release. @mvanhorn built Send to
+many and worked through every review round until a lost connection, a slow
+retry or an edited draft could no longer send anyone a second envelope.
+@RayFernando1337 found the stuck dropdown and explained exactly why a signer
+could not get past it, @chrisremboldt reported the notice that covered pages
+without fields in #182, and @HimanshuMahto moved it out of the way and added
+a test that checks nothing covers the document.
+
+This release changes the database, in three migrations:
+`20261118090000_bulk_send_batches.sql`,
+`20261118120000_bulk_send_row_reason_cleared_with_envelope.sql` and
+`20261120090000_bulk_send_skipped_rows.sql`. They add the
+`bulk_send_batches` and `bulk_send_batch_rows` tables, so a confirmed batch
+keeps its results and a retry does not send the same envelopes again, and a
+trigger that clears a stored failure reason when its envelope is deleted. On
+Vercel the production build applies the migrations. On other hosts, run
+`npm run db:migrate` as on every deploy.
 
 ## [0.6.0] - 2026-11-20
 
@@ -558,6 +586,7 @@ checked against the real services:
 
 SignuDoc is software, not legal advice. See the README's legal disclaimer.
 
+[0.7.0]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.7.0
 [0.6.0]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.6.0
 [0.5.2]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.2
 [0.5.1]: https://github.com/NYLLON-SOFTWARE/SignuDoc/releases/tag/v0.5.1
