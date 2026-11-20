@@ -2,6 +2,7 @@ import { expect, type Page } from "@playwright/test";
 import pg from "pg";
 
 import { e2eDatabaseUrl } from "../../playwright.config";
+import { startSendLimitAfresh } from "./send-limit";
 import { startSignInWindowAfresh } from "./sign-in-limit";
 
 // The password every account in signing-flow.spec.ts is made with.
@@ -39,6 +40,7 @@ export async function signInAsAdministrator(page: Page): Promise<string> {
     // These tests each sign in, one after another, and quick ones can fit
     // four sign-ins into Better Auth's ten-second window.
     await startSignInWindowAfresh(database);
+    await startSendLimitAfresh(database, admin.rows[0]?.id ?? "");
   } finally {
     await database.end();
   }

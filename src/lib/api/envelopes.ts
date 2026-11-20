@@ -27,7 +27,7 @@ import {
 import { fieldTypeSchema } from "../schemas/field.ts";
 import {
   MAX_COPY_RECIPIENTS_PER_ENVELOPE,
-  MAX_SIGNERS_PER_ENVELOPE,
+  MAX_SIGNERS_CEILING,
   signatureMeanings,
   type EnvelopeStatus,
   type SignerStatus,
@@ -145,7 +145,9 @@ export const apiCreateEnvelopeSchema = z
     fields: z.array(apiFieldSchema).min(1).max(MAX_API_FIELDS),
     metadata: metadataSchema.optional(),
     send: apiSendOptionsSchema.optional(),
-    signers: z.array(apiSignerSchema).min(1).max(MAX_SIGNERS_PER_ENVELOPE),
+    // The install's own limit, MAX_SIGNERS_PER_ENVELOPE, is checked when
+    // the signers are saved, as in the web app.
+    signers: z.array(apiSignerSchema).min(1).max(MAX_SIGNERS_CEILING),
     title: envelopeTitleSchema,
   })
   .superRefine((value, ctx) => {
