@@ -15,6 +15,7 @@ import {
   API_SEND_LIMIT,
   apiErrorFor,
   handleApi,
+  isKept,
   runIdempotently,
 } from "@/lib/api/route";
 import { pendingUploadKeyFor } from "@/lib/api/uploads";
@@ -197,9 +198,13 @@ export async function POST(request: Request) {
             );
           } catch (error) {
             // Only the request that did the work removes the upload, and
-            // only when a retry would get the same refusal. After a failure
-            // of the install's own, the retry needs the upload again.
-            if (apiErrorFor(error)) {
+            // only when a retry would get the same refusal: one that is
+            // kept for the key. After a failure of the install's own (a
+            // 5xx, such as email not being connected) or a 429, the key is
+            // let go and the retry needs the upload again.
+            const known = apiErrorFor(error);
+
+            if (known && isKept(known.status)) {
               await cleanUp();
             }
 

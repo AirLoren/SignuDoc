@@ -193,7 +193,8 @@ curl https://sign.example.com/api/v1/envelopes \
 
 The upload URL works for 10 minutes, and an upload that is never used is
 deleted after a day. Installs that keep files on their own disk (not on
-Vercel) do not need this and answer 404: send any size in the form.
+Vercel) do not need this and answer 404: send PDFs of up to 20 MB in the
+form.
 
 ## The envelope
 
@@ -259,7 +260,7 @@ webhooks (coming in the next release).
 | `GET /api/v1/envelopes/{id}`                   | read   | One envelope.                                                                                                                                                                                           |
 | `POST /api/v1/envelopes/{id}/send`             | write  | Sends a draft. Body: the `send` options above.                                                                                                                                                          |
 | `POST /api/v1/envelopes/{id}/void`             | write  | Voids a sent envelope. Body: `{"reason": "…"}`, required on Part 11 installs.                                                                                                                           |
-| `POST /api/v1/envelopes/{id}/remind`           | write  | Emails a reminder to each signer whose turn it is, at most once a day as in the web app.                                                                                                                |
+| `POST /api/v1/envelopes/{id}/remind`           | write  | Emails a reminder to each signer whose turn it is, at most once a day as in the web app. Too soon gets 429 with `Retry-After`.                                                                          |
 | `DELETE /api/v1/envelopes/{id}`                | write  | Deletes a draft.                                                                                                                                                                                        |
 | `GET /api/v1/envelopes/{id}/events`            | read   | The audit trail, oldest first.                                                                                                                                                                          |
 | `GET /api/v1/envelopes/{id}/files/signed`      | read   | The signed PDF.                                                                                                                                                                                         |
