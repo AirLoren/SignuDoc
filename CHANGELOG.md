@@ -8,6 +8,20 @@ release says when it does.
 
 ## [Unreleased]
 
+### Settings
+
+- An administrator can write the disclosure signers read and agree to before
+  signing, under Settings, Organization, "What signers agree to before
+  signing". It starts from the built-in text, which stays the default when the
+  setting is empty. A heading line starts with `## `, and `{sender}` and
+  `{contact}` fill in who is asking and who to write to. The version recorded
+  with each signer's agreement follows the text, and the audit trail keeps the
+  words the signer saw. The hosted service keeps the built-in text.
+
+This release adds one database column, `app_settings.consent_disclosure`.
+The migration runs with the production build. Until it has, the setting reads
+as empty and signers see the built-in text.
+
 ## [0.5.2] - 2026-11-19
 
 Twenty-four bug fixes. Seventeen fix reported issues (sixteen from @coygeek,
