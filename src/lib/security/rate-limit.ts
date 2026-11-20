@@ -159,11 +159,11 @@ export async function consumeRateLimit(
         values ($1, 1, $2::bigint + $3::bigint)
         on conflict (key) do update set
           count = case
-            when current.expires_at <= $2::bigint then 1
+            when current.expires_at <= $2::bigint or current.count <= 0 then 1
             else least(current.count + 1, 1000000)
           end,
           expires_at = case
-            when current.expires_at <= $2::bigint
+            when current.expires_at <= $2::bigint or current.count <= 0
               then $2::bigint + $3::bigint
             else current.expires_at
           end
@@ -239,7 +239,7 @@ export async function peekRateLimit(
  * Takes back one request counted by consumeRateLimit, for limits that
  * count every attempt up front (so parallel ones cannot all pass a peek)
  * but only mean to keep the ones that fail. A count that drops to nothing
- * is removed, so its window starts again with the next failure.
+ * starts a new window with the next request, as if it had never been.
  */
 export async function refundRateLimit(
   key: string,
@@ -249,18 +249,13 @@ export async function refundRateLimit(
   }: ConsumeRateLimitOptions & { now?: number } = {},
 ): Promise<void> {
   try {
-    const executor = database ?? getDb();
-    const removed = await executor.query(
-      "delete from public.rate_limits where key = $1 and count <= 1",
-      [hashKey(key)],
+    // One statement, so refunds that arrive together each take one off:
+    // the row's lock puts them in turn. A count of zero is left in place;
+    // consumeRateLimit treats it as no window at all.
+    await (database ?? getDb()).query(
+      "update public.rate_limits set count = greatest(count - 1, 0) where key = $1 and expires_at > $2",
+      [hashKey(key), now],
     );
-
-    if ((removed.rowCount ?? 0) === 0) {
-      await executor.query(
-        "update public.rate_limits set count = count - 1 where key = $1 and count > 1 and expires_at > $2",
-        [hashKey(key), now],
-      );
-    }
   } catch (error) {
     warnAboutFallback(error);
 

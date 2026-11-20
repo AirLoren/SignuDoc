@@ -175,3 +175,50 @@ test("guesses sent at the same moment cannot pass the last try together, and rig
     JSON.stringify(statuses),
   );
 });
+
+test("right codes sent at the same moment are both taken back off the count", async () => {
+  const { token } = await createEnvelopeWithAccessCode("2468");
+
+  // Both are counted before either is taken back.
+  const together = 2;
+  let arrived = 0;
+  let releaseAll!: () => void;
+  const allArrived = new Promise<void>((resolve) => {
+    releaseAll = resolve;
+  });
+  const pool = afterStatement(
+    database,
+    (text) =>
+      arrived < together && text.includes("insert into public.rate_limits"),
+    async () => {
+      arrived += 1;
+
+      if (arrived === together) {
+        releaseAll();
+      }
+
+      await allArrived;
+    },
+  );
+
+  for (const result of await Promise.all(
+    Array.from({ length: together }, () =>
+      verifySignerCheck(
+        token,
+        { code: "2468", method: "access_code" },
+        { database: pool },
+      ),
+    ),
+  )) {
+    assert.deepEqual(result, ["access_code"]);
+  }
+
+  // Every wrong try is still left.
+  for (let attempt = 0; attempt < ACCESS_CODE_MAX_FAILURES; attempt += 1) {
+    await assert.rejects(
+      tryCode(token, String(8000 + attempt)),
+      (error: unknown) =>
+        error instanceof SigningMutationError && error.statusCode === 400,
+    );
+  }
+});
