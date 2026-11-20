@@ -128,6 +128,56 @@ test("an expired key is refused", async () => {
   assert.equal(await authenticateApiKey(key, database, later), null);
 });
 
+test("using a key records when, at most once a minute, and never moves the time back", async () => {
+  const admin = await createUser();
+  const { key, summary } = await createApiKey(
+    admin,
+    { expiresInDays: null, name: "Busy app", scope: "read" },
+    database,
+  );
+  const lastUsedAt = async () => {
+    const result = await database.query<{ last_used_at: string | null }>(
+      `select last_used_at::text from api_keys where id = $1`,
+      [summary.id],
+    );
+    const value = result.rows[0]?.last_used_at ?? null;
+
+    return value === null ? null : Number(value);
+  };
+  const start = Math.floor(Date.now() / 1000);
+
+  assert.equal(await lastUsedAt(), null);
+  assert.ok(await authenticateApiKey(key, database, start));
+  assert.equal(await lastUsedAt(), start);
+
+  // Within the minute the time is not written again.
+  assert.ok(await authenticateApiKey(key, database, start + 30));
+  assert.equal(await lastUsedAt(), start);
+
+  // Once it is over, it is.
+  assert.ok(await authenticateApiKey(key, database, start + 61));
+  assert.equal(await lastUsedAt(), start + 61);
+
+  // A request that read the key before a newer time was written cannot
+  // put an older one back: here another request writes a later time just
+  // before this one's write, and the write checks the row as it is then.
+  const racing: Pick<pg.Pool, "query"> = {
+    query: (async (text: string, values?: unknown[]) => {
+      if (text.includes("UPDATE api_keys SET last_used_at")) {
+        await database.query(
+          `update api_keys set last_used_at = $2 where id = $1`,
+          [summary.id, start + 500],
+        );
+      }
+
+      return database.query(text, values);
+    }) as pg.Pool["query"],
+  };
+
+  assert.ok(await authenticateApiKey(key, racing, start + 200));
+  assert.equal(await lastUsedAt(), start + 500);
+});
+
 test("an administrator who loses the role loses their keys for good", async () => {
   const stays = await createUser();
   const leaves = await createUser();

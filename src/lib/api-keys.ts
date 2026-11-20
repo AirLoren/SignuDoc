@@ -511,12 +511,14 @@ export async function authenticateApiKey(
   ) {
     // The interval is checked again against the row as it is now, so
     // requests at the same moment write once and an older time never
-    // replaces a newer one.
+    // replaces a newer one. The casts are needed: Postgres reads the WHERE
+    // first and cannot subtract two parameters of unknown type.
     await database
       .query(
         `
-          UPDATE api_keys SET last_used_at = $1
-          WHERE id = $2 AND (last_used_at IS NULL OR last_used_at <= $1 - $3)
+          UPDATE api_keys SET last_used_at = $1::bigint
+          WHERE id = $2
+            AND (last_used_at IS NULL OR last_used_at <= $1::bigint - $3::bigint)
         `,
         [now, row.id, LAST_USED_WRITE_INTERVAL_SECONDS],
       )

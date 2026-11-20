@@ -6,6 +6,7 @@ import {
   queryOne,
   type DbExecutor,
 } from "../db/connection.ts";
+import { signingStepOf } from "../signing-steps.ts";
 import type { EnvelopeStatus, SignerStatus } from "../types/domain.ts";
 
 // How the public API shows an envelope: one shape, ApiEnvelope, returned by
@@ -26,6 +27,8 @@ export type ApiSigner = {
   ref: string | null;
   signedAt: string | null;
   status: SignerStatus;
+  /** Signers who share a step sign at the same time. */
+  step: number;
   viewedAt: string | null;
 };
 
@@ -82,6 +85,7 @@ type SignerRow = {
   name: string;
   role: "cc" | "signer";
   signedAt: number | null;
+  signingStep: number | null;
   signOrder: number;
   status: SignerStatus;
   viewedAt: number | null;
@@ -124,6 +128,7 @@ async function readSigners(
         s.email,
         s.role,
         s.sign_order AS "signOrder",
+        s.signing_step AS "signingStep",
         s.status,
         s.signed_at AS "signedAt",
         s.declined_at AS "declinedAt",
@@ -202,6 +207,7 @@ export function toApiEnvelope(
         ref: signer.apiRef,
         signedAt: isoTime(signer.signedAt),
         status: signer.status,
+        step: signingStepOf(signer),
         viewedAt: isoTime(signer.viewedAt),
       })),
     status: row.status,

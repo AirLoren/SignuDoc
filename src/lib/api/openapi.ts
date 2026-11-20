@@ -3,6 +3,7 @@
 // path here has a route file, so the two cannot drift apart. Lists of
 // allowed values come from the app's own, so they cannot drift either.
 
+import { getMaxSignersPerEnvelope } from "../signer-limit.ts";
 import { fieldTypes, signatureMeanings } from "../types/domain.ts";
 
 import { webhookEventTypes } from "../webhooks/events.ts";
@@ -67,7 +68,14 @@ const listOf = (item: Record<string, unknown>) => ({
   type: "object",
 });
 
-export function buildOpenApiDocument(serverUrl: string) {
+/**
+ * maxSigners is this install's limit, MAX_SIGNERS_PER_ENVELOPE, so the
+ * description says what this install accepts.
+ */
+export function buildOpenApiDocument(
+  serverUrl: string,
+  maxSigners: number = getMaxSignersPerEnvelope(),
+) {
   return {
     components: {
       schemas: {
@@ -118,11 +126,17 @@ export function buildOpenApiDocument(serverUrl: string) {
                     enum: [...signatureMeanings],
                     type: "string",
                   },
+                  step: {
+                    description:
+                      "The step of the signing order. Signers who share a step sign at the same time, and the next step starts once they all have. Give it for every signer or for none; left out, they sign one after the other.",
+                    minimum: 1,
+                    type: "integer",
+                  },
                 },
                 required: ["ref", "name", "email"],
                 type: "object",
               },
-              maxItems: 10,
+              maxItems: maxSigners,
               minItems: 1,
               type: "array",
             },
@@ -272,6 +286,11 @@ export function buildOpenApiDocument(serverUrl: string) {
                 "pending: not their turn yet. notified: their turn, invited. signed. declined.",
               enum: ["pending", "notified", "signed", "declined"],
               type: "string",
+            },
+            step: {
+              description:
+                "Their step of the signing order. Signers who share a step sign at the same time.",
+              type: "integer",
             },
             viewedAt: isoTime,
           },
@@ -539,7 +558,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           parameters: [idParameter],
           responses: { "200": envelopeResponse("The envelope."), ...errors },
-          summary: "Remind the signer whose turn it is",
+          summary: "Remind each signer whose turn it is",
         },
       },
       "/envelopes/{id}/send": {
@@ -671,7 +690,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                         required: ["name", "email"],
                         type: "object",
                       },
-                      maxItems: 10,
+                      maxItems: maxSigners,
                       minItems: 1,
                       type: "array",
                     },
