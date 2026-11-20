@@ -76,7 +76,7 @@ Every error has the same shape, and the code is meant for your program:
 | 403    | `forbidden`              | The key may not do this, such as a read-only key asked to send.                          |
 | 404    | `not_found`              | There is no such thing, or the key's administrator cannot see it.                        |
 | 409    | `wrong_state`            | Not possible in the envelope's current state, such as sending one that was sent already. |
-| 413    | `payload_too_large`      | The file is too big.                                                                     |
+| 413    | `payload_too_large`      | The file is too big, or a JSON-only request is over 64 KB.                               |
 | 422    | `idempotency_key_reused` | An `Idempotency-Key` was used before with a different request.                           |
 | 429    | `rate_limited`           | Too many requests. Wait the number of seconds in `Retry-After`.                          |
 | 500    | `internal_error`         | Something went wrong on the install. Try again later.                                    |
@@ -91,7 +91,9 @@ stands:
 - `RateLimit-Reset`: seconds until the window starts again.
 
 On top of that, each key may create 60 envelopes in 10 minutes and send 100
-in an hour, counting creates and template calls that also send. Your email
+in an hour, counting creates and template calls that also send. A retry that
+gets its first answer again, through an `Idempotency-Key`, counts against
+neither. Your email
 provider's own limits usually bite first: Resend's free plan sends 100
 emails a day. An address that sends 30 bad keys in 10 minutes gets 429 for
 any more bad keys until the 10 minutes are up. Good keys from it keep
@@ -134,12 +136,13 @@ Things to know:
   they are and which comes back with the signer. Up to 10 signers, and up to
   10 `copyRecipients` (`name`, `email`) who get the finished document.
   `accessCode` and `requireEmailCode: true` add the same extra checks the web
-  app offers.
+  app offers. On a Part 11 install, give each signer a `signatureMeaning`
+  (`approval`, `review`, `responsibility` or `authorship`) before sending.
 - **Fields** are placed on a page by fractions of its width and height from
   its top left corner: `"x": 0.1, "y": 0.8` is 10% in from the left and 80%
-  down. Types: `signature`, `initials`, `date`, `text`, `checkbox`, `number`,
-  `dropdown` (with `options`), `radio` (buttons with one `groupId` are one
-  question). `required` is true unless set to false. Every signer needs at
+  down. Types: `signature`, `initials`, `date`, `name` (filled in with the
+  signer's name when they sign), `text`, `checkbox`, `number`, `dropdown`
+  (with `options`), `radio` (buttons with one `groupId` are one question). `required` is true unless set to false. Every signer needs at
   least one `signature` field.
 - **Sending** needs `"permittedUseConfirmed": true`: your app confirms, as the
   web app's send button asks a person to, that the envelope is an ordinary
@@ -245,25 +248,25 @@ To know when something happens without asking again and again, use
 
 ## Endpoints
 
-| Method and path                                             | Access | What it does                                                                                                                                                   |
-| ----------------------------------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/v1/me`                                            | read   | Which key this is and whom it acts as.                                                                                                                         |
-| `POST /api/v1/envelopes`                                    | write  | Creates an envelope, and sends it if asked.                                                                                                                    |
-| `GET /api/v1/envelopes`                                     | read   | Lists envelopes, newest first: `?status=`, `?limit=` (up to 100, 25 by default), and `?cursor=` with the `nextCursor` of the page before.                      |
-| `GET /api/v1/envelopes/{id}`                                | read   | One envelope.                                                                                                                                                  |
-| `POST /api/v1/envelopes/{id}/send`                          | write  | Sends a draft. Body: the `send` options above.                                                                                                                 |
-| `POST /api/v1/envelopes/{id}/void`                          | write  | Voids a sent envelope. Body: `{"reason": "…"}`, required on Part 11 installs.                                                                                  |
-| `POST /api/v1/envelopes/{id}/remind`                        | write  | Emails the signer whose turn it is a reminder, at most once a day as in the web app.                                                                           |
-| `POST /api/v1/envelopes/{id}/signers/{signerId}/embed-link` | write  | A signing link for an embedded envelope, to show in a frame. Body: `{"origin": "https://…"}`. See [Embedded signing](#embedded-signing).                       |
-| `DELETE /api/v1/envelopes/{id}`                             | write  | Deletes a draft.                                                                                                                                               |
-| `GET /api/v1/envelopes/{id}/events`                         | read   | The audit trail, oldest first.                                                                                                                                 |
-| `GET /api/v1/envelopes/{id}/files/signed`                   | read   | The signed PDF.                                                                                                                                                |
-| `GET /api/v1/envelopes/{id}/files/certificate`              | read   | The certificate of completion.                                                                                                                                 |
-| `POST /api/v1/uploads`                                      | write  | An upload URL for a PDF over 4 MB.                                                                                                                             |
-| `GET /api/v1/templates`                                     | read   | Saved templates, with their roles in signing order.                                                                                                            |
-| `POST /api/v1/templates/{id}/envelopes`                     | write  | An envelope from a template: `title`, `signers` (`name`, `email`, one per role in order), and optionally `metadata` and `send`. Takes an `Idempotency-Key`.    |
-| `GET /api/v1/webhook-deliveries`                            | read   | Webhook deliveries, newest first, with the payload each carried: `?since=` (ISO time), `?type=`, `?status=`, `?limit=`, `?cursor=`. See [Webhooks](#webhooks). |
-| `GET /api/v1/openapi.json`                                  | none   | The OpenAPI 3.1 description of all of this, for code generators and API tools.                                                                                 |
+| Method and path                                             | Access | What it does                                                                                                                                                                                            |
+| ----------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/v1/me`                                            | read   | Which key this is and whom it acts as.                                                                                                                                                                  |
+| `POST /api/v1/envelopes`                                    | write  | Creates an envelope, and sends it if asked.                                                                                                                                                             |
+| `GET /api/v1/envelopes`                                     | read   | Lists envelopes, newest first: `?status=`, `?limit=` (up to 100, 25 by default), and `?cursor=` with the `nextCursor` of the page before.                                                               |
+| `GET /api/v1/envelopes/{id}`                                | read   | One envelope.                                                                                                                                                                                           |
+| `POST /api/v1/envelopes/{id}/send`                          | write  | Sends a draft. Body: the `send` options above.                                                                                                                                                          |
+| `POST /api/v1/envelopes/{id}/void`                          | write  | Voids a sent envelope. Body: `{"reason": "…"}`, required on Part 11 installs.                                                                                                                           |
+| `POST /api/v1/envelopes/{id}/remind`                        | write  | Emails the signer whose turn it is a reminder, at most once a day as in the web app.                                                                                                                    |
+| `POST /api/v1/envelopes/{id}/signers/{signerId}/embed-link` | write  | A signing link for an embedded envelope, to show in a frame. Body: `{"origin": "https://…"}`. See [Embedded signing](#embedded-signing).                                                                |
+| `DELETE /api/v1/envelopes/{id}`                             | write  | Deletes a draft.                                                                                                                                                                                        |
+| `GET /api/v1/envelopes/{id}/events`                         | read   | The audit trail, oldest first.                                                                                                                                                                          |
+| `GET /api/v1/envelopes/{id}/files/signed`                   | read   | The signed PDF.                                                                                                                                                                                         |
+| `GET /api/v1/envelopes/{id}/files/certificate`              | read   | The certificate of completion.                                                                                                                                                                          |
+| `POST /api/v1/uploads`                                      | write  | An upload URL for a PDF over 4 MB.                                                                                                                                                                      |
+| `GET /api/v1/templates`                                     | read   | Saved templates, with their roles in signing order.                                                                                                                                                     |
+| `POST /api/v1/templates/{id}/envelopes`                     | write  | An envelope from a template: `title`, `signers` (`name`, `email`, and `signatureMeaning` on Part 11 installs, one per role in order), and optionally `metadata` and `send`. Takes an `Idempotency-Key`. |
+| `GET /api/v1/webhook-deliveries`                            | read   | Webhook deliveries, newest first, with the payload each carried: `?since=` (ISO time), `?type=`, `?status=`, `?limit=`, `?cursor=`. See [Webhooks](#webhooks).                                          |
+| `GET /api/v1/openapi.json`                                  | none   | The OpenAPI 3.1 description of all of this, for code generators and API tools.                                                                                                                          |
 
 Envelopes made through the API are ordinary envelopes: they show in the key's
 administrator's documents, can be followed and voided there, and their audit

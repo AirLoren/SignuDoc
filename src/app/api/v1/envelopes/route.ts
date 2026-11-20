@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
-import { apiError, apiJson } from "@/lib/api/http";
+import { readBodyWithin } from "@/lib/api/body";
+import { apiError, apiJson, bodyTooLarge } from "@/lib/api/http";
 import {
   apiCreateEnvelopeSchema,
   apiListQuerySchema,
@@ -13,7 +14,6 @@ import {
   API_CREATE_LIMIT,
   API_SEND_LIMIT,
   apiErrorFor,
-  applyAccountLimit,
   handleApi,
   runIdempotently,
 } from "@/lib/api/route";
@@ -72,17 +72,15 @@ export async function POST(request: Request) {
     "write",
     "api_envelope_create_failure",
     async (context) => {
-      const limited = await applyAccountLimit(context, API_CREATE_LIMIT);
+      // A little room over the PDF limit for the form's own parts. Reading
+      // stops there, so an oversized request is never held whole.
+      const raw = await readBodyWithin(
+        request,
+        MAX_UPLOAD_SIZE_BYTES + 256 * 1024,
+      );
 
-      if (limited) {
-        return limited;
-      }
-
-      const raw = new Uint8Array(await request.arrayBuffer());
-
-      // A little room over the PDF limit for the form's own parts.
-      if (raw.byteLength > MAX_UPLOAD_SIZE_BYTES + 256 * 1024) {
-        return apiError(413, "payload_too_large", "The request is too large.");
+      if (!raw) {
+        return bodyTooLarge();
       }
 
       const contentType = request.headers.get("content-type") ?? "";
@@ -185,14 +183,6 @@ export async function POST(request: Request) {
         return apiError(400, "invalid_request", describeZodError(input.error));
       }
 
-      if (input.data.send) {
-        const sendLimited = await applyAccountLimit(context, API_SEND_LIMIT);
-
-        if (sendLimited) {
-          return sendLimited;
-        }
-      }
-
       return runIdempotently(
         context,
         "POST /api/v1/envelopes",
@@ -237,6 +227,9 @@ export async function POST(request: Request) {
                 status: 404,
               };
         },
+        input.data.send
+          ? [API_CREATE_LIMIT, API_SEND_LIMIT]
+          : [API_CREATE_LIMIT],
       );
     },
   );

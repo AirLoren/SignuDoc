@@ -13,7 +13,7 @@ import {
   MAX_API_KEYS_PER_USER,
   revokeApiKey,
 } from "./api-keys.ts";
-import { openTestDatabase } from "./db/test-database.ts";
+import { openTestDatabase, waitUntilBlockedBy } from "./db/test-database.ts";
 import { setPersonRole } from "./people.ts";
 import { SYSTEM_AUDIT_LOCK_ID } from "./services/system-audit.ts";
 
@@ -271,8 +271,7 @@ test("removing an administrator takes the key rows before the audit lock, as rev
       database,
     );
 
-    // Give it time to reach the key row.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await waitUntilBlockedBy(database, holder);
 
     const free = await holder.query<{ locked: boolean }>(
       `select pg_try_advisory_xact_lock($1) as locked`,

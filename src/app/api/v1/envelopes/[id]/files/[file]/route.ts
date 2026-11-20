@@ -17,7 +17,10 @@ export async function GET(request: Request, context: Context) {
     "read",
     "api_envelope_file_failure",
     async ({ actor }) => {
-      const type = FILE_TYPES[file as keyof typeof FILE_TYPES];
+      // Own keys only, so a name like "constructor" is a 404 too.
+      const type = Object.hasOwn(FILE_TYPES, file)
+        ? FILE_TYPES[file as keyof typeof FILE_TYPES]
+        : undefined;
 
       if (!type) {
         return apiError(

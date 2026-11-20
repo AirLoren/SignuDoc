@@ -285,28 +285,31 @@ test("a create that cannot be finished leaves no draft behind", async () => {
 });
 
 test("the request is checked before anything is written", () => {
-  assert.throws(() =>
-    request({
-      fields: [
-        {
-          height: 0.05,
-          page: 1,
-          signer: "nobody",
-          type: "signature",
-          width: 0.3,
-          x: 0.1,
-          y: 0.8,
-        },
-      ],
-    }),
+  const signatureFor = (signer: string) => ({
+    height: 0.05,
+    page: 1,
+    signer,
+    type: "signature",
+    width: 0.3,
+    x: 0.1,
+    y: 0.8,
+  });
+
+  assert.throws(
+    () => request({ fields: [signatureFor("nobody")] }),
+    /No signer has the ref/,
   );
-  assert.throws(() =>
-    request({
-      signers: [
-        { email: "a@example.test", name: "A", ref: "same" },
-        { email: "b@example.test", name: "B", ref: "same" },
-      ],
-    }),
+  // Every field names "same", so the only thing wrong is the repeated ref.
+  assert.throws(
+    () =>
+      request({
+        fields: [signatureFor("same")],
+        signers: [
+          { email: "a@example.test", name: "A", ref: "same" },
+          { email: "b@example.test", name: "B", ref: "same" },
+        ],
+      }),
+    /Each signer needs its own ref/,
   );
   assert.throws(() => request({ metadata: { blob: "x".repeat(3000) } }));
   assert.throws(() => request({ send: { permittedUseConfirmed: false } }));
@@ -334,13 +337,32 @@ test("the list pages with a cursor, newest first, and filters by status", async 
   const actor = await createActor();
   const ids: string[] = [];
 
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 4; index += 1) {
     ids.push(
       (await createEnvelopeForApi(actor, request(), source(), database)).id,
     );
   }
 
-  // Same-second creations still come back in a stable order.
+  // One envelope is older, and three were made in the same second, so the
+  // id must keep their order stable across pages.
+  const [older, ...sameSecond] = ids as [string, ...string[]];
+
+  await database.query(`update envelopes set created_at = $2 where id = $1`, [
+    older,
+    1_000,
+  ]);
+  await database.query(
+    `update envelopes set created_at = $2 where id = any($1::text[])`,
+    [sameSecond, 2_000],
+  );
+
+  const expected = await database.query<{ id: string }>(
+    `
+      select id from envelopes where id = any($1::text[])
+      order by created_at desc, id desc
+    `,
+    [ids],
+  );
   const first = await listApiEnvelopes(actor.userId, { limit: 2 }, database);
 
   assert.ok(first);
@@ -354,12 +376,13 @@ test("the list pages with a cursor, newest first, and filters by status", async 
   );
 
   assert.ok(second);
-  assert.equal(second.data.length, 1);
+  assert.equal(second.data.length, 2);
   assert.equal(second.nextCursor, null);
   assert.deepEqual(
-    new Set([...first.data, ...second.data].map((envelope) => envelope.id)),
-    new Set(ids),
+    [...first.data, ...second.data].map((envelope) => envelope.id),
+    expected.rows.map((row) => row.id),
   );
+  assert.equal(expected.rows.at(-1)?.id, older);
   assert.equal(
     (
       await listApiEnvelopes(
@@ -380,8 +403,13 @@ test("an idempotency key replays the first response and refuses a different requ
     requestHash: "a".repeat(64),
   };
 
-  assert.deepEqual(await claimIdempotencyKey(claim, database), { kind: "new" });
-  assert.deepEqual(await claimIdempotencyKey(claim, database), {
+  const now = Math.floor(Date.now() / 1000);
+
+  assert.deepEqual(await claimIdempotencyKey(claim, database, now), {
+    kind: "new",
+    reservedAt: now,
+  });
+  assert.deepEqual(await claimIdempotencyKey(claim, database, now), {
     kind: "in_progress",
   });
 
@@ -389,6 +417,7 @@ test("an idempotency key replays the first response and refuses a different requ
     {
       apiKeyId: actor.apiKeyId,
       key: "order-1042",
+      reservedAt: now,
       response: { id: "env_1" },
       statusCode: 201,
     },
@@ -412,12 +441,16 @@ test("an idempotency key replays the first response and refuses a different requ
   const other = await createActor();
 
   assert.deepEqual(
-    await claimIdempotencyKey({ ...claim, apiKeyId: other.apiKeyId }, database),
-    { kind: "new" },
+    await claimIdempotencyKey(
+      { ...claim, apiKeyId: other.apiKeyId },
+      database,
+      now,
+    ),
+    { kind: "new", reservedAt: now },
   );
 
   // After the window the value is free again.
-  const later = Math.floor(Date.now() / 1000) + IDEMPOTENCY_WINDOW_SECONDS + 1;
+  const later = now + IDEMPOTENCY_WINDOW_SECONDS + 1;
 
   assert.deepEqual(
     await claimIdempotencyKey(
@@ -425,14 +458,52 @@ test("an idempotency key replays the first response and refuses a different requ
       database,
       later,
     ),
-    { kind: "new" },
+    { kind: "new", reservedAt: later },
   );
-  assert.ok(
-    (await deleteExpiredIdempotencyKeys(
+
+  // Work left over from the old reservation does not touch the new one.
+  await completeIdempotencyKey(
+    {
+      apiKeyId: actor.apiKeyId,
+      key: "order-1042",
+      reservedAt: now,
+      response: { id: "env_old" },
+      statusCode: 201,
+    },
+    database,
+  );
+  assert.deepEqual(
+    await claimIdempotencyKey(
+      { ...claim, requestHash: "c".repeat(64) },
       database,
-      later + IDEMPOTENCY_WINDOW_SECONDS,
-    )) >= 1,
+      later,
+    ),
+    { kind: "in_progress" },
   );
+
+  // The daily cleanup, in a transaction that is rolled back, so it cannot
+  // take other tests' keys with it.
+  const client = await database.connect();
+
+  try {
+    await client.query("begin");
+    assert.ok(
+      (await deleteExpiredIdempotencyKeys(
+        client,
+        later + IDEMPOTENCY_WINDOW_SECONDS,
+      )) >= 1,
+    );
+
+    const left = await client.query(
+      `select 1 from api_idempotency where api_key_id = $1`,
+      [actor.apiKeyId],
+    );
+
+    assert.equal(left.rowCount, 0);
+  } finally {
+    await client.query("rollback");
+    client.release();
+  }
 });
 
 test("once the envelope is made and sent, a retry is told about it instead of making another", async () => {
@@ -443,8 +514,12 @@ test("once the envelope is made and sent, a retry is told about it instead of ma
     requestHash: "d".repeat(64),
   };
   const remembered: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
 
-  assert.deepEqual(await claimIdempotencyKey(claim, database), { kind: "new" });
+  assert.deepEqual(await claimIdempotencyKey(claim, database, now), {
+    kind: "new",
+    reservedAt: now,
+  });
 
   const envelope = await createEnvelopeForApi(
     actor,
@@ -462,7 +537,12 @@ test("once the envelope is made and sent, a retry is told about it instead of ma
         assert.equal(row.rows[0]?.status, "sent");
         remembered.push(envelopeId);
         await rememberIdempotentResource(
-          { apiKeyId: claim.apiKeyId, key: claim.key, resourceId: envelopeId },
+          {
+            apiKeyId: claim.apiKeyId,
+            key: claim.key,
+            reservedAt: now,
+            resourceId: envelopeId,
+          },
           database,
         );
       },
@@ -472,8 +552,9 @@ test("once the envelope is made and sent, a retry is told about it instead of ma
   assert.deepEqual(remembered, [envelope.id]);
   // Say the answer could not be read back and the request failed here: the
   // key is kept, and the retry is pointed at the envelope.
-  assert.deepEqual(await claimIdempotencyKey(claim, database), {
+  assert.deepEqual(await claimIdempotencyKey(claim, database, now), {
     kind: "recover",
+    reservedAt: now,
     resourceId: envelope.id,
   });
 });

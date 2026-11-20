@@ -60,3 +60,8 @@ export function codeForStatus(status: number): ApiErrorCode {
       return status >= 500 ? "internal_error" : "invalid_request";
   }
 }
+
+/** The answer when a body is over its limit. */
+export function bodyTooLarge() {
+  return apiError(413, "payload_too_large", "The request is too large.");
+}

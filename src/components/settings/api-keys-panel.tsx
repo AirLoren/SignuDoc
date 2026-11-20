@@ -89,9 +89,14 @@ export function ApiKeysPanel() {
   }, [revision]);
 
   async function createKey() {
+    // A key on screen stays until Done, so its one-time secret is never lost
+    // to a second key that then fails to be made.
+    if (newKey) {
+      return;
+    }
+
     setIsCreating(true);
     setError(null);
-    setNewKey(null);
     setCopied(false);
 
     try {
@@ -115,8 +120,12 @@ export function ApiKeysPanel() {
         return;
       }
 
-      setNewKey({ key: payload.key, name: payload.summary.name });
+      const created = payload.summary;
+
+      setNewKey({ key: payload.key, name: created.name });
       setName("");
+      // Shown at once, in case reading the list again fails.
+      setKeys((current) => (current ? [created, ...current] : current));
       setRevision((value) => value + 1);
     } catch {
       setError(GENERIC_ERROR_MESSAGE);
@@ -136,6 +145,7 @@ export function ApiKeysPanel() {
       );
       const payload = (await response.json().catch(() => null)) as {
         error?: string;
+        key?: ApiKeySummary;
       } | null;
 
       if (!response.ok) {
@@ -143,7 +153,21 @@ export function ApiKeysPanel() {
         return;
       }
 
+      const revoked = payload?.key;
+
       setRevokingId(null);
+
+      // Shown as revoked at once, in case reading the list again fails.
+      if (revoked) {
+        setKeys((current) =>
+          current
+            ? current.map((listed) =>
+                listed.id === revoked.id ? revoked : listed,
+              )
+            : current,
+        );
+      }
+
       setRevision((value) => value + 1);
     } catch {
       setError(GENERIC_ERROR_MESSAGE);
@@ -243,7 +267,7 @@ export function ApiKeysPanel() {
         <div className="flex items-end">
           <button
             className="btn-quiet min-h-12 w-full px-5 text-sm"
-            disabled={isCreating || trimmedName.length === 0}
+            disabled={isCreating || newKey !== null || trimmedName.length === 0}
             onClick={() => void createKey()}
             type="button"
           >

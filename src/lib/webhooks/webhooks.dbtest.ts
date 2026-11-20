@@ -17,7 +17,7 @@ import {
   type ApiActor,
 } from "../api/envelopes.ts";
 import { withTransaction } from "../db/connection.ts";
-import { openTestDatabase } from "../db/test-database.ts";
+import { openTestDatabase, waitUntilBlockedBy } from "../db/test-database.ts";
 import { recordAuditEvent } from "../services/audit.ts";
 import { issueSigningLink } from "../services/signing-links.ts";
 import { getSigningPayloadForToken } from "../signing.ts";
@@ -350,6 +350,49 @@ test("a delivery is written with its audit event, and not when that rolls back",
     database,
   );
   assert.equal((await deliveriesFor(endpoint.id)).length, 1);
+});
+
+test("an endpoint removed while an event is recorded is skipped, and the change still goes through", async () => {
+  const admin = await createAdmin();
+  const { endpoint } = await addEndpoint(admin, ["envelope.voided"]);
+  const envelope = await createEnvelope(admin);
+  const remover = await database.connect();
+
+  try {
+    // An administrator removes the endpoint, not yet committed, just as
+    // the envelope changes (here a void, as a signature would be).
+    await remover.query("begin");
+    await remover.query(`delete from webhook_endpoints where id = $1`, [
+      endpoint.id,
+    ]);
+
+    const recorded = recordAuditEvent(
+      {
+        actorType: "sender",
+        envelopeId: envelope.id,
+        event: "voided",
+        metadata: { reason: "Wrong client" },
+      },
+      database,
+    );
+
+    await waitUntilBlockedBy(database, remover);
+    await remover.query("commit");
+
+    // The change goes through; before, it failed on the foreign key.
+    await recorded;
+  } finally {
+    remover.release();
+  }
+
+  assert.equal((await deliveriesFor(endpoint.id)).length, 0);
+
+  const voided = await database.query(
+    `select 1 from audit_events where envelope_id = $1 and event = 'voided'`,
+    [envelope.id],
+  );
+
+  assert.equal(voided.rowCount, 1);
 });
 
 test("a delivery is signed, carries the envelope, and is marked delivered", async () => {

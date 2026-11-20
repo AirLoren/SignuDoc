@@ -1,16 +1,12 @@
-import { apiError } from "@/lib/api/http";
+import { MAX_JSON_BODY_BYTES, readBodyWithin } from "@/lib/api/body";
+import { apiError, bodyTooLarge } from "@/lib/api/http";
 import {
   apiSendOptionsSchema,
   describeZodError,
   getApiEnvelope,
   sendEnvelopeForApi,
 } from "@/lib/api/envelopes";
-import {
-  API_SEND_LIMIT,
-  applyAccountLimit,
-  handleApi,
-  runIdempotently,
-} from "@/lib/api/route";
+import { API_SEND_LIMIT, handleApi, runIdempotently } from "@/lib/api/route";
 
 type Context = { params: Promise<{ id: string }> };
 
@@ -23,13 +19,13 @@ export async function POST(request: Request, context: Context) {
     "write",
     "api_envelope_send_failure",
     async (api) => {
-      const limited = await applyAccountLimit(api, API_SEND_LIMIT);
+      const raw = await readBodyWithin(request, MAX_JSON_BODY_BYTES);
 
-      if (limited) {
-        return limited;
+      if (!raw) {
+        return bodyTooLarge();
       }
 
-      const text = await request.text();
+      const text = new TextDecoder().decode(raw);
       let body: unknown;
 
       try {
@@ -71,6 +67,7 @@ export async function POST(request: Request, context: Context) {
           return readBack();
         },
         readBack,
+        [API_SEND_LIMIT],
       );
     },
   );
