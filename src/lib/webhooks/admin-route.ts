@@ -20,28 +20,33 @@ export async function handleWebhookAdmin(
   category: string,
   run: (actor: WebhookActor) => Promise<Response>,
 ): Promise<Response> {
-  const sessionResult = await requireAdminSession(request);
-
-  if (sessionResult instanceof Response) {
-    return sessionResult;
-  }
-
-  if ((await getSettings()).hosted) {
-    return NextResponse.json(
-      { error: "Webhooks are for self-hosted installs." },
-      { headers: noStore, status: 400 },
-    );
-  }
-
-  const actor: WebhookActor = {
-    email: sessionResult.user.email,
-    ipAddress: getClientIpAddress(request.headers),
-    userAgent: getRequestUserAgent(request.headers),
-    userId: sessionResult.user.id,
-  };
+  const ipAddress = getClientIpAddress(request.headers);
+  // Known once the session is checked; a failure before that (the
+  // database is down) is logged and answered the same way, just without it.
+  let userId: string | null = null;
 
   try {
-    return await run(actor);
+    const sessionResult = await requireAdminSession(request);
+
+    if (sessionResult instanceof Response) {
+      return sessionResult;
+    }
+
+    userId = sessionResult.user.id;
+
+    if ((await getSettings()).hosted) {
+      return NextResponse.json(
+        { error: "Webhooks are for self-hosted installs." },
+        { headers: noStore, status: 400 },
+      );
+    }
+
+    return await run({
+      email: sessionResult.user.email,
+      ipAddress,
+      userAgent: getRequestUserAgent(request.headers),
+      userId: sessionResult.user.id,
+    });
   } catch (error) {
     if (error instanceof WebhookEndpointError) {
       return NextResponse.json(
@@ -52,10 +57,10 @@ export async function handleWebhookAdmin(
 
     logRouteError(error, {
       category,
-      ipAddress: actor.ipAddress ?? null,
+      ipAddress: ipAddress ?? null,
       message: "Unexpected failure in a webhook settings request.",
       path: getRequestPathname(request),
-      userId: actor.userId,
+      userId,
     });
 
     return NextResponse.json(

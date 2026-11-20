@@ -357,7 +357,7 @@ export function buildOpenApiDocument(
             object: { const: "webhook_delivery", type: "string" },
             payload: {
               description:
-                "The JSON body it was sent with, or null before its first try.",
+                "The JSON body it carries: made at its first try and sent unchanged on every later one. Null before its first try. A delivery that failed because its signing secret could not be read has one but was never sent.",
               type: ["object", "null"],
             },
             status: {
@@ -730,7 +730,7 @@ export function buildOpenApiDocument(
           parameters: [
             {
               description:
-                "Only deliveries made at or after this time. Times are kept to the second, so a time with a fraction counts from the start of its second.",
+                "Only deliveries queued at or after this time, which is when their event happened, not when they were sent. Times are kept to the second, so a time with a fraction counts from the start of its second.",
               in: "query",
               name: "since",
               schema: { format: "date-time", type: "string" },

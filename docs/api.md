@@ -376,8 +376,10 @@ again.
 
 ### Answers and retries
 
-Answer with any `2xx` within 10 seconds, and do the slow work after. Any
-other answer, a redirect, or no answer counts as a failure, and the delivery
+Store or queue the event first, then answer with any `2xx` within 10
+seconds and do the slow work after. A `2xx` counts as delivered, so an
+event your app answered but did not keep is not sent again. Any other
+answer, a redirect, or no answer counts as a failure, and the delivery
 is tried again 1 minute, 5 minutes, 30 minutes, 2 hours, 8 hours, 24 hours
 and 24 hours later, about two and a half days in all. After the eighth try
 it is marked failed. A delivery whose envelope has since been deleted is
@@ -392,8 +394,10 @@ day. On Pro you can run it more often by changing the schedule of
 `/api/internal/webhooks` in `vercel.json`, for example to `*/5 * * * *`.
 
 If your app was down, `GET /api/v1/webhook-deliveries?since=…` lists what
-it missed, with the same payloads. Times are kept to the second, so a
-`since` with a fraction counts from the start of its second, and you may
+it missed, with the same payloads. `since` counts from when each delivery
+was queued, which is when its event happened, not when it was sent: give
+the time of the last event your app has. Times are kept to the second, so
+a `since` with a fraction counts from the start of its second, and you may
 get a delivery you already have: skip it by its `webhook-id`. Deliveries
 are kept 30 days after they are delivered, and otherwise 90 days after
 their last try or "Send again".

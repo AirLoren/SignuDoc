@@ -292,6 +292,27 @@ export function WebhooksPanel() {
     };
   }, [revision]);
 
+  // Wakes the panel when the earliest switch-over ends, so its New secret
+  // button comes back without reloading the page.
+  useEffect(() => {
+    const ends = (endpoints ?? [])
+      .map((endpoint) => endpoint.previousSecretExpiresAt)
+      .filter((at): at is number => at !== null && at > now);
+
+    if (ends.length === 0) {
+      return;
+    }
+
+    const waitMs = (Math.min(...ends) - Math.floor(Date.now() / 1000)) * 1000;
+    const timer = window.setTimeout(
+      () => setNow(Math.floor(Date.now() / 1000)),
+      // Past the end by a second, and never longer than a timer can wait.
+      Math.min(Math.max(waitMs, 0) + 1000, 2_147_483_647),
+    );
+
+    return () => window.clearTimeout(timer);
+  }, [endpoints, now]);
+
   function showSecret(secret: string, endpointUrl: string) {
     setNewSecret({ secret, url: endpointUrl });
     setCopied(false);
@@ -299,8 +320,9 @@ export function WebhooksPanel() {
 
   async function createEndpoint() {
     // A secret on screen stays until Done, so it is never lost to a second
-    // endpoint, made or not.
-    if (newSecret) {
+    // endpoint, made or not. Nor while a new secret is on its way: both
+    // answers would be shown, and the first would be lost.
+    if (newSecret || pendingId !== null) {
       return;
     }
 
@@ -334,8 +356,9 @@ export function WebhooksPanel() {
     endpoint: WebhookEndpoint,
     action: "delete" | "disable" | "enable" | "rotate" | "test",
   ) {
-    // The same for a new secret: it would take the place of one on screen.
-    if (action === "rotate" && newSecret) {
+    // The same for a new secret: it would take the place of one on screen,
+    // or of a new endpoint's secret still on its way.
+    if (action === "rotate" && (newSecret || isCreating)) {
       return;
     }
 
@@ -491,6 +514,7 @@ export function WebhooksPanel() {
             className="btn-quiet min-h-12 px-5 text-sm"
             disabled={
               isCreating ||
+              pendingId !== null ||
               newSecret !== null ||
               url.trim().length === 0 ||
               events.length === 0
@@ -628,6 +652,7 @@ export function WebhooksPanel() {
                       className="btn-quiet"
                       disabled={
                         pendingId !== null ||
+                        isCreating ||
                         newSecret !== null ||
                         (endpoint.previousSecretExpiresAt !== null &&
                           endpoint.previousSecretExpiresAt > now)
