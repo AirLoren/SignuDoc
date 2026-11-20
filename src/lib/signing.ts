@@ -58,6 +58,7 @@ import {
 } from "./part11.ts";
 import {
   listAuditEventsForEnvelope,
+  lockEnvelopeAuditChain,
   recordAuditEvent,
   recordEmailSent,
 } from "./services/audit.ts";
@@ -102,6 +103,7 @@ import {
   nextSignerLinkExpiresAt,
 } from "./envelope-deadline.ts";
 import { describeEntryProblem, judgeRadioGroups } from "./field-choices.ts";
+import { consumeRateLimit, refundRateLimit } from "./security/rate-limit.ts";
 import {
   buildDisclosureSections,
   CONSENT_STATEMENT,
@@ -1311,6 +1313,10 @@ async function sendCompletionEmails(input: {
   }
 }
 
+/** Wrong access codes a signer may give for one code in a week. */
+export const ACCESS_CODE_MAX_FAILURES = 10;
+const ACCESS_CODE_FAILURE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 export class SigningMutationError extends Error {
   readonly statusCode: number;
 
@@ -1600,6 +1606,7 @@ export async function verifySignerCheck(
         email: parsed.email,
         ipAddress: requestMeta.ipAddress ?? null,
         password: parsed.password,
+        signerName: context.signer.name,
         userAgent: requestMeta.userAgent ?? null,
         userId: state.accountUserId!,
       },
@@ -1629,7 +1636,34 @@ export async function verifySignerCheck(
       throw new SigningMutationError(describeCredentialFailure(result), 400);
     }
   } else if (parsed.method === "access_code") {
+    // An access code can be short, so wrong ones are counted per signer and
+    // code, over every link and address: a guesser gets a few tries a week,
+    // not a few every quarter of an hour. A new code from the sender starts
+    // a new count. Each try is counted before the code is compared, so tries
+    // sent at the same moment cannot all pass the check; a right one is
+    // then taken back off the count.
+    const failuresKey = `signing-access-code-failures:${context.signer.id!}:${state.accessCodeHash!}`;
+    const attempt = await consumeRateLimit(
+      {
+        key: failuresKey,
+        limit: ACCESS_CODE_MAX_FAILURES,
+        windowMs: ACCESS_CODE_FAILURE_WINDOW_MS,
+      },
+      { database },
+    );
+
+    if (!attempt.allowed) {
+      throw new SigningMutationError(
+        "Too many wrong access codes. Ask the sender for the code, or for a new one.",
+        429,
+      );
+    }
+
     passed = checkAccessCode(parsed.code, state.accessCodeHash!);
+
+    if (passed) {
+      await refundRateLimit(failuresKey, attempt, { database });
+    }
   } else {
     // Count the attempt and read the code in one statement, so parallel
     // guesses cannot share an attempt.
@@ -2191,6 +2225,7 @@ async function reauthenticatePart11Signer(
       email: reauthentication.email,
       ipAddress: requestMeta.ipAddress ?? null,
       password: reauthentication.password,
+      signerName: context.signer.name,
       userAgent: requestMeta.userAgent ?? null,
       userId: state.accountUserId,
     },
@@ -3019,10 +3054,6 @@ async function submitSigningOnce(
       context.envelope.id,
       database,
     );
-    const auditEvents = [
-      ...(await listAuditEventsForEnvelope(context.envelope.id, database)),
-      signedAuditEvent,
-    ];
     const storageIdentity = {
       envelopeId: context.envelope.id,
       userId: context.envelope.userId,
@@ -3076,6 +3107,17 @@ async function submitSigningOnce(
         if (stillToSign) {
           throw new SigningRouteChangedError();
         }
+
+        // The audit trail the certificate shows, read with the envelope and
+        // its audit chain held: an event recorded since the link was opened
+        // (a view, an email, a reminder) is on it, and one recorded from
+        // now on waits until the envelope is finished.
+        await lockEnvelopeAuditChain(context.envelope.id, tx);
+
+        const auditEvents = [
+          ...(await listAuditEventsForEnvelope(context.envelope.id, tx)),
+          signedAuditEvent,
+        ];
 
         // Made while the envelope is locked: the files have fixed keys, and
         // a second submission at the same time waits, then stops above.
@@ -3454,10 +3496,6 @@ async function declineSigningOnce(
     declinedAt,
     declineReason,
   );
-  const auditEvents = [
-    ...(await listAuditEventsForEnvelope(context.envelope.id, database)),
-    declinedAuditEvent,
-  ];
   const storedCertificateKeys: string[] = [];
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
@@ -3524,6 +3562,16 @@ async function declineSigningOnce(
     ) {
       throw new SigningRouteChangedError();
     }
+
+    // The audit trail the certificates show, read with the envelope and its
+    // audit chain held, so an event recorded since the link was opened is
+    // on them and none can be added before the decline is.
+    await lockEnvelopeAuditChain(context.envelope.id, tx);
+
+    const auditEvents = [
+      ...(await listAuditEventsForEnvelope(context.envelope.id, tx)),
+      declinedAuditEvent,
+    ];
 
     // Made while the envelope is locked: the certificates have fixed keys,
     // and a void, the last signature or a second decline at the same time

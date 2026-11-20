@@ -90,6 +90,7 @@ import {
 import { withUserEmailLegalFooter } from "./services/email-legal-footer.ts";
 import { buildSigningInvitationEmail } from "./services/signing-invitation-email.ts";
 import {
+  findTypedValueTooLongForField,
   loadInstallSealer,
   storeEnvelopeCertificatePdf,
   storeRecipientEnvelopeCertificatePdf,
@@ -1582,6 +1583,40 @@ function describeChoiceProblem(
   );
 }
 
+/**
+ * A dropdown whose box is too small to show one of its choices at a
+ * readable size, in words for the sender, or null. A signer cannot shorten
+ * a choice, so a choice that does not fit is drawn as small as it takes,
+ * and on the signed document that can be too small to read. The sender
+ * fixes it before sending instead.
+ */
+async function findUnreadableDropdown(
+  signers: readonly PersistedSignerRecord[],
+  fields: readonly FieldRecord[],
+  pages: Parameters<typeof findTypedValueTooLongForField>[1],
+): Promise<string | null> {
+  for (const field of fields) {
+    if (field.type !== "dropdown" || !field.options?.length) {
+      continue;
+    }
+
+    const tooLong = await findTypedValueTooLongForField(
+      field.options.map((option) => ({ field, value: option })),
+      pages,
+    );
+
+    if (tooLong) {
+      const signerName =
+        signers.find((signer) => signer.id === field.signerId)?.name ??
+        "a signer";
+
+      return `A dropdown for ${signerName} on page ${String(tooLong.page)} is too small to show its choices at a readable size. Make the box bigger or the choices shorter.`;
+    }
+  }
+
+  return null;
+}
+
 /** The fields with each group of radio buttons counted once. */
 function withRadioGroupsOnce(fields: readonly FieldRecord[]): FieldRecord[] {
   const seenGroups = new Set<string>();
@@ -2668,6 +2703,16 @@ export async function sendDraftEnvelope(
     throw new EnvelopeMutationError(choiceProblem, 400);
   }
 
+  const unreadableDropdown = await findUnreadableDropdown(
+    signers,
+    fields,
+    await listEnvelopePagesForEnvelopeId(envelopeId, database),
+  );
+
+  if (unreadableDropdown) {
+    throw new EnvelopeMutationError(unreadableDropdown, 400);
+  }
+
   // In Part 11 mode each signer signs with their own verified account, and
   // the envelope keeps that rule even if the mode is turned off later.
   const part11 = (await readStoredSettings(database))?.part11Mode ?? false;
@@ -2759,7 +2804,10 @@ export async function sendDraftEnvelope(
     }
   }
 
-  const part11SignerAccounts = new Map<string, string>();
+  const part11SignerAccounts = new Map<
+    string,
+    { name: string; userId: string }
+  >();
 
   if (part11) {
     const checks = await listSignerCheckSettings(envelopeId, database);
@@ -2786,12 +2834,23 @@ export async function sendDraftEnvelope(
         );
       }
 
-      part11SignerAccounts.set(signer.id, account.userId);
+      part11SignerAccounts.set(signer.id, {
+        name: account.name,
+        userId: account.userId,
+      });
     }
   }
 
-  // Everyone in the first step of the signing order is invited now.
-  const firstSigners = firstStepSigners(signers);
+  // Everyone in the first step of the signing order is invited now. A
+  // Part 11 signer is invited, and recorded as sent to, in the name the
+  // administrator confirmed, which is the name saved on the signer below.
+  const firstSigners = firstStepSigners(
+    signers.map((signer) => {
+      const account = part11SignerAccounts.get(signer.id);
+
+      return account ? { ...signer, name: account.name } : signer;
+    }),
+  );
   const firstSigner = firstSigners[0];
 
   if (!firstSigner) {
@@ -2938,16 +2997,19 @@ export async function sendDraftEnvelope(
           envelopeId,
         ]);
 
-        for (const [signerId, accountId] of part11SignerAccounts) {
+        // Each signer is bound to their account and named as the
+        // administrator confirmed them, so the signature and its audit
+        // record carry the confirmed name, not one typed for the draft.
+        for (const [signerId, account] of part11SignerAccounts) {
           const bound = await tx.query(
             `
               UPDATE signers
-              SET user_id = $1
+              SET user_id = $1, name = $4
               WHERE id = $2
                 AND envelope_id = $3
                 AND signature_meaning IS NOT NULL
             `,
-            [accountId, signerId, envelopeId],
+            [account.userId, signerId, envelopeId, account.name],
           );
 
           if (bound.rowCount !== 1) {
@@ -3878,10 +3940,6 @@ async function voidSentEnvelopeOnce(
         })
       : signer,
   );
-  const auditEvents = [
-    ...(await listAuditEventsForEnvelope(envelopeId, database)),
-    voidedAuditEvent,
-  ];
   const storedCertificateKeys: string[] = [];
   // The seal's key and the install's name, read before the transaction:
   // sealing inside it then needs no second connection from the pool.
@@ -3935,6 +3993,16 @@ async function voidSentEnvelopeOnce(
     ) {
       throw new VoidRouteChangedError();
     }
+
+    // The audit trail the certificates show, read with the envelope and its
+    // audit chain held, so an event recorded since the page was opened is
+    // on them and none can be added before the void is.
+    await lockEnvelopeAuditChain(envelopeId, tx);
+
+    const auditEvents = [
+      ...(await listAuditEventsForEnvelope(envelopeId, tx)),
+      voidedAuditEvent,
+    ];
 
     const certificate = await storeEnvelopeCertificatePdf(
       {
