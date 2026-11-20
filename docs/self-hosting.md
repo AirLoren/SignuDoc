@@ -177,6 +177,18 @@ These cover the people with an account (senders and administrators). Signers who
 - **Wrong passwords.** Ten wrong passwords for one email address within 15 minutes stop sign-in for that address until the 15 minutes are up. This happens whether or not the address has an account, so it says nothing about which ones do. Ten wrong codes at the second step lock that step for 15 minutes in the same way.
 - **The site audit trail** (Settings, Organization, Sign-in security) records each sign-in and failed sign-in with the address it came from, lockouts, sign-outs, password changes and resets, two-step sign-in being turned on, off or reset, new backup codes, and changes to settings, roles, the logo, the email domain, identity confirmations and signing locks. The rows form one hash chain, so a changed or removed row shows, and the trail downloads as CSV.
 
+### API keys
+
+Another app can create and send envelopes through the [SignuDoc API](api.md). An administrator makes a key for it under Settings, Organization, API keys. The key is shown once and only its hash is stored. It acts as the administrator who made it, skips two-step sign-in (it is for servers, not people), and stops working when it is revoked, expires, or its administrator stops being one. Making and revoking keys is in the site audit trail.
+
+### Webhooks
+
+An administrator can add webhook endpoints under Settings, Organization, Webhooks, so another app hears when an envelope is sent, viewed, signed, completed, declined, voided or expires. Deliveries are signed, retried for about two and a half days, and listed in a delivery log. Adding, changing and removing endpoints is in the site audit trail. Retries that are due are sent by the next request that changes an envelope, the next API call, or a daily cron job on `/api/internal/webhooks`, which takes the same `CRON_SECRET` as the daily cleanup. See [Webhooks](api.md#webhooks).
+
+### Embedded signing
+
+An app can show the signing page inside its own site, for envelopes it sends through the API with embedded delivery: no invitations are emailed, and the app says who the signer is. An administrator lists the sites allowed to do this under Settings, Organization, Embedded signing; with none listed it is off, and no page can be framed. Removing a site stops the links already made for it. See [Embedded signing](api.md#embedded-signing).
+
 ### Send the audit trail to your SIEM
 
 Every row added to the site audit trail or to a document's audit trail is also written to the function logs, once it is saved, as one line of JSON. So are refused requests and failures worth a look. A Vercel log drain (team Settings, Drains, or an observability integration from the Vercel Marketplace such as Datadog, Axiom or Better Stack) then delivers them to your SIEM as fields it can search and alert on. Log drains are a paid Vercel feature; see Vercel's pricing page for which plans have them.

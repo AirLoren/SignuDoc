@@ -74,6 +74,7 @@ import {
   storeRecipientEnvelopeCertificatePdf,
 } from "./services/pdf-finalize.ts";
 import { buildSigningInvitationEmail } from "./services/signing-invitation-email.ts";
+import { readEmbedEvidence } from "./embedding.ts";
 import { issueSigningLink } from "./services/signing-links.ts";
 import { signingProviderById } from "./services/signing-providers.ts";
 import {
@@ -788,6 +789,9 @@ async function lockSentEnvelope(
  * before any of their rows are written. The token is read once when the
  * page is opened; a correction can replace the hash in the meantime and
  * leave status as notified, which the later UPDATE used to treat as enough.
+ * The link must also not have expired since: removing an embedding site
+ * expires its links, and a submission already under way must not finish
+ * on one.
  */
 async function lockSignerForPresentedToken(
   tx: DbExecutor,
@@ -801,10 +805,10 @@ async function lockSignerForPresentedToken(
     tokenHash: string;
   },
 ): Promise<void> {
-  const locked = await queryOne<{ id: string }>(
+  const locked = await queryOne<{ expiresAt: number | null }>(
     tx,
     `
-      SELECT id
+      SELECT signing_token_expires_at AS "expiresAt"
       FROM signers
       WHERE id = $1
         AND envelope_id = $2
@@ -815,7 +819,15 @@ async function lockSignerForPresentedToken(
     [signerId, envelopeId, tokenHash],
   );
 
-  if (!locked) {
+  // The expiry is checked once the lock is held, on the row as it is then
+  // and against the time then. A time taken before the query would be as
+  // old as the wait for the lock, and could let through a link that
+  // expired during it, such as one whose site was removed meanwhile.
+  if (
+    !locked ||
+    (locked.expiresAt !== null &&
+      locked.expiresAt < Math.floor(Date.now() / 1000))
+  ) {
     throw new SigningMutationError(
       "This signing link is no longer active.",
       409,
@@ -829,6 +841,13 @@ async function recordViewedEventOnce(
   database: DbPool,
 ): Promise<void> {
   await withTransaction(async (tx) => {
+    // Two first openings at once must not both pass the check below and
+    // record two first views (and send two signer.viewed webhooks). This
+    // lock is taken only here, before any other, so it cannot deadlock.
+    await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+      `signudoc:first-view:${context.signer.id ?? ""}`,
+    ]);
+
     const existing = await queryOne<{ id: string }>(
       tx,
       `
@@ -1007,6 +1026,7 @@ type Part11SignatureRecord = {
 
 function buildSignedAuditEvent(input: {
   authMethods: readonly SignerCheckMethod[];
+  embedded?: { apiKeyName: string | null; origin: string | null } | null;
   envelopeId: string;
   part11?: Part11SignatureRecord | null;
   providerSignature?: ProviderSignatureEvidence | null;
@@ -1033,6 +1053,7 @@ function buildSignedAuditEvent(input: {
       authMethods: [...input.authMethods],
       signatureMethods: [...input.signatureMethods],
       timezoneOffsetMinutes: input.timezoneOffsetMinutes,
+      ...(input.embedded ? { embedded: input.embedded } : {}),
       ...(input.part11 ? { part11: input.part11 } : {}),
       ...(input.providerSignature
         ? { providerSignature: input.providerSignature }
@@ -1044,6 +1065,7 @@ function buildSignedAuditEvent(input: {
 
 function buildDeclinedAuditEvent(input: {
   declinedAt: number;
+  embedded?: { apiKeyName: string | null; origin: string | null } | null;
   envelopeId: string;
   reason?: string;
   requestMeta: SigningRequestMeta;
@@ -1064,6 +1086,7 @@ function buildDeclinedAuditEvent(input: {
       signerName: input.signer.name,
       signerOrder: input.signer.signOrder,
       signingStep: signingStepOf(input.signer),
+      ...(input.embedded ? { embedded: input.embedded } : {}),
     },
     userAgent: input.requestMeta.userAgent ?? null,
   };
@@ -2553,6 +2576,14 @@ async function submitSigningOnce(
 ): Promise<SigningSubmitResponse> {
   const parsedInput = signingSubmissionSchema.parse(input);
   const context = await resolveSigningContext(token, { database });
+  // Signed inside another app: no email to the next signer, and the
+  // evidence says where.
+  const embedded = context.signer.id
+    ? await readEmbedEvidence(context.envelope.id, context.signer.id, database)
+    : null;
+  const doneRedirectPath = embedded?.origin
+    ? `/embed/sign/${encodeURIComponent(token)}/done?${new URLSearchParams({ origin: embedded.origin, title: context.envelope.title }).toString()}`
+    : getSigningDoneRedirectPath(token, context.envelope.title);
 
   // A document sent for advanced or qualified signatures is signed by each
   // signer's provider, never by a plain submit, and the other way round.
@@ -2641,6 +2672,7 @@ async function submitSigningOnce(
 
     const signedAuditEvent = buildSignedAuditEvent({
       authMethods: signerChecks.passed,
+      embedded,
       envelopeId: context.envelope.id,
       part11: part11Signature,
       providerSignature: providerSignature?.evidence ?? null,
@@ -2865,8 +2897,12 @@ async function submitSigningOnce(
       signingStatePersisted = true;
       await deleteReplacedRevision(replacedRevisionKey, storageService);
 
-      // Nobody to invite while others in this step are still signing.
-      for (const nextSignerDelivery of nextSignerDeliveries) {
+      // Nobody to invite while others in this step are still signing. In
+      // an embedded envelope nobody is emailed: the app starts the next
+      // step's turns, and the signer.signed webhook shows who is next.
+      const invitations = embedded ? [] : nextSignerDeliveries;
+
+      for (const nextSignerDelivery of invitations) {
         try {
           const delivery = await emailService.send(
             buildSigningInvitationEmail({
@@ -2900,7 +2936,7 @@ async function submitSigningOnce(
 
       return signingSubmitResponseSchema.parse({
         envelopeId: context.envelope.id,
-        redirectPath: getSigningDoneRedirectPath(token, context.envelope.title),
+        redirectPath: doneRedirectPath,
         submittedAt,
       });
     }
@@ -3188,7 +3224,7 @@ async function submitSigningOnce(
 
     return signingSubmitResponseSchema.parse({
       envelopeId: context.envelope.id,
-      redirectPath: getSigningDoneRedirectPath(token, context.envelope.title),
+      redirectPath: doneRedirectPath,
       submittedAt,
     });
   } catch (error) {
@@ -3326,8 +3362,16 @@ async function declineSigningOnce(
     );
   }
 
+  // Declined inside another app: the certificate says where, not that an
+  // emailed link was used.
+  const embedded = await readEmbedEvidence(
+    context.envelope.id,
+    currentSignerId,
+    database,
+  );
   const declinedAuditEvent = buildDeclinedAuditEvent({
     declinedAt,
+    embedded,
     envelopeId: context.envelope.id,
     reason: declineReason,
     requestMeta,

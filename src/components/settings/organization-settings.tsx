@@ -4,11 +4,14 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 
 import { FieldShell, ShellButton } from "@/components/shared/form-shell";
+import { ApiKeysPanel } from "@/components/settings/api-keys-panel";
 import { BrandingPanel } from "@/components/settings/branding-panel";
+import { EmbeddingPanel } from "@/components/settings/embedding-panel";
 import { Part11Panel } from "@/components/settings/part11-panel";
 import { PeoplePanel } from "@/components/settings/people-panel";
 import { SecurityPanel } from "@/components/settings/security-panel";
 import { SignerDataPanel } from "@/components/settings/signer-data-panel";
+import { WebhooksPanel } from "@/components/settings/webhooks-panel";
 import type { EmailDnsRecord, EmailStatus } from "@/lib/email-status";
 import type {
   OrganizationSettingsField,
@@ -412,6 +415,12 @@ export function OrganizationSettings({
         {!values.hosted ? (
           <Part11Panel initialEnabled={values.part11Mode} />
         ) : null}
+
+        {!values.hosted ? <ApiKeysPanel /> : null}
+
+        {!values.hosted ? <WebhooksPanel /> : null}
+
+        {!values.hosted ? <EmbeddingPanel /> : null}
 
         <SignerDataPanel />
       </div>

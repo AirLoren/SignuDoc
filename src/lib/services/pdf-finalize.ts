@@ -1267,6 +1267,23 @@ function currentSignerIdentityStart(
   return starts[starts.length - 1] ?? 0;
 }
 
+/**
+ * For a signature made inside another app: identity then rests on that app
+ * having signed the person in. The record shows only where the link was
+ * given, not that the app checked who opened it, so the certificate says
+ * the check was left to the app rather than that it happened.
+ */
+function describeEmbeddedDelivery(embedded: Record<string, unknown>): string {
+  const origin =
+    typeof embedded.origin === "string" ? embedded.origin : "another site";
+  const key =
+    typeof embedded.apiKeyName === "string"
+      ? ` through the API key "${embedded.apiKeyName}"`
+      : "";
+
+  return `a signing link given to the app at ${origin}${key} (embedded signing; identifying the signer was left to that app)`;
+}
+
 /** What the record shows about how one signer was identified and agreed. */
 function describeSignerEvidence(
   signer: SignerRecord,
@@ -1295,8 +1312,22 @@ function describeSignerEvidence(
     }
   }
 
+  // A signer who declined in another app has no signed event; the
+  // declined event carries the same record of where it happened.
+  const declined =
+    signed === undefined && signer.status === "declined"
+      ? forSigner.findLast((event) => event.event === "declined")
+      : undefined;
+  const embeddedSource = signed ?? declined;
+  const embedded =
+    embeddedSource?.metadata?.embedded &&
+    typeof embeddedSource.metadata.embedded === "object"
+      ? (embeddedSource.metadata.embedded as Record<string, unknown>)
+      : null;
   const checks = [
-    "possession of the emailed signing link",
+    embedded
+      ? describeEmbeddedDelivery(embedded)
+      : "possession of the emailed signing link",
     ...readStringArray(signed?.metadata?.authMethods).map(
       (method) => AUTHENTICATION_LABELS[method] ?? method,
     ),
