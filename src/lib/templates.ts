@@ -228,8 +228,9 @@ export type TemplateForBulkSend = UseTemplateData & {
 };
 
 /**
- * Whether this template can be sent as it stands: every role needs a
- * signature field, and choice fields must be finished. Saved from a draft
+ * Whether this template can be sent as it stands: someone has to sign,
+ * every signer role needs a signature field, an approver role has no
+ * fields, and choice fields must be finished. Saved from a draft
  * that was still being prepared, it is kept, but it cannot go out.
  */
 export function describeUnsendableTemplate(
@@ -256,8 +257,23 @@ export function describeUnsendableTemplate(
     return UNUSABLE_TEMPLATE_MESSAGE;
   }
 
+  if (!roles.some((role) => role.kind !== "approver")) {
+    return "Add at least one signer. Approvers approve or reject, so someone else has to sign.";
+  }
+
+  const approverWithFields = roles.find(
+    (role) =>
+      role.kind === "approver" &&
+      parsed.data.some((field) => field.signerId === role.id),
+  );
+
+  if (approverWithFields) {
+    return `${approverWithFields.name} is an approver, and approvers have no fields. Remove their fields, or make them a signer.`;
+  }
+
   const missing = roles.find(
     (role) =>
+      role.kind !== "approver" &&
       !parsed.data.some(
         (field) => field.signerId === role.id && field.type === "signature",
       ),
