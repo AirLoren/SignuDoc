@@ -313,6 +313,9 @@ test("a teammate and an administrator see a sent envelope as someone else's", as
 
       assert.equal(access?.ownerUserId, owner.id);
       assert.equal(access?.viewerIsOwner, false);
+      // Only an administrator may keep a thumbnail drawn for someone
+      // else's envelope.
+      assert.equal(access?.viewerIsAdmin, viewer === admin);
     }
 
     assert.equal(

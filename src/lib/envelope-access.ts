@@ -12,6 +12,8 @@ export type EnvelopeViewerAccess = {
   ownerEmail: string;
   ownerName: string | null;
   ownerUserId: string;
+  /** Whether the viewer is an administrator of the install. */
+  viewerIsAdmin: boolean;
   /**
    * False when an administrator, or someone on a team with the sender, is
    * looking at someone else's envelope.
@@ -94,6 +96,7 @@ export async function resolveEnvelopeViewerAccess(
     ownerEmail: row.ownerEmail,
     ownerName: row.ownerName,
     ownerUserId: row.ownerUserId,
+    viewerIsAdmin: row.viewerRole === "admin",
     viewerIsOwner,
   };
 }
