@@ -389,6 +389,33 @@ async function inspectEmail({
     };
   }
 
+  if (!domainsClient && resolveEmailDriver(env) === "smtp") {
+    // There is no provider API to ask. An SMTP install counts as ready once
+    // a sender address at a real domain is set; "Send a test email" is what
+    // shows the server takes it.
+    const smtpSettings = settings ?? (await getSettings(env));
+    const smtpMarkReady =
+      recordReady ??
+      ((ready: boolean) => defaultRecordReady(ready, smtpSettings));
+    const smtpSender = extractEmailAddress(
+      buildEmailAddresses(smtpSettings).senderAddress,
+    );
+    const smtpDomain = getAddressDomain(smtpSender);
+    const hasSender = Boolean(smtpDomain) && !isResendTestSender(smtpSender);
+
+    await smtpMarkReady(hasSender);
+
+    return {
+      client: null,
+      domainId: null,
+      markReady: smtpMarkReady,
+      status:
+        hasSender && smtpDomain
+          ? { domain: smtpDomain, senderAddress: smtpSender, state: "ready" }
+          : { senderAddress: smtpSender, state: "test_sender" },
+    };
+  }
+
   const client = domainsClient ?? createDomainsClient(env);
 
   if (!client) {

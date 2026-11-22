@@ -567,3 +567,25 @@ test("RESEND_REGION picks a known Resend region and ignores anything else", () =
   assert.deepEqual(resendRegionOption({ RESEND_REGION: "mars-1" }), {});
   assert.deepEqual(resendRegionOption({}), {});
 });
+
+test("an SMTP install is ready once its sender has a domain, without asking Resend", async () => {
+  const marks: boolean[] = [];
+  const recordReady = async (ready: boolean) => {
+    marks.push(ready);
+  };
+  const smtpEnv = { EMAIL_DRIVER: "smtp" };
+
+  const status = await getEmailStatus({ env: smtpEnv, recordReady, settings });
+
+  assert.equal(status.state, "ready");
+  assert.deepEqual(marks, [true]);
+
+  const withoutSender = await getEmailStatus({
+    env: smtpEnv,
+    recordReady,
+    settings: resolveSettings({ ...stored, senderAddress: null }, env),
+  });
+
+  assert.equal(withoutSender.state, "test_sender");
+  assert.deepEqual(marks, [true, false]);
+});

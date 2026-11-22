@@ -8,6 +8,9 @@ import {
   createEmailService,
   createLazyEmailService,
   type EmailService,
+  readSmtpSettings,
+  resolveEmailDriver,
+  type SmtpTransport,
 } from "./email.ts";
 
 // What the Resend client is asked to do when the service turns a request
@@ -181,5 +184,123 @@ test("signup knows when there is no email provider to send with (issue #95)", ()
       NODE_ENV: "production",
     }),
     false,
+  );
+});
+
+test("EMAIL_DRIVER=smtp is a driver of its own", () => {
+  assert.equal(resolveEmailDriver({ EMAIL_DRIVER: "smtp" }), "smtp");
+  assert.equal(resolveEmailDriver({ EMAIL_DRIVER: " SMTP " }), "smtp");
+  assert.throws(() => resolveEmailDriver({ EMAIL_DRIVER: "sendmail" }), /smtp/);
+});
+
+test("the SMTP driver needs a host, a user and a password", () => {
+  const smtp = { EMAIL_DRIVER: "smtp", NODE_ENV: "production" };
+
+  assert.equal(canSendEmail(smtp), false);
+  assert.equal(
+    canSendEmail({
+      ...smtp,
+      SMTP_HOST: "smtp.example.test",
+      SMTP_USER: "sign@example.test",
+    }),
+    false,
+  );
+  assert.equal(
+    canSendEmail({
+      ...smtp,
+      SMTP_HOST: "smtp.example.test",
+      SMTP_PASSWORD: "secret",
+      SMTP_USER: "sign@example.test",
+    }),
+    true,
+  );
+});
+
+test("SMTP uses TLS on port 465 and requires STARTTLS on other ports", () => {
+  const base = {
+    SMTP_HOST: " smtp.example.test ",
+    SMTP_PASSWORD: "secret",
+    SMTP_USER: "sign@example.test",
+  };
+
+  assert.deepEqual(readSmtpSettings(base), {
+    auth: { pass: "secret", user: "sign@example.test" },
+    host: "smtp.example.test",
+    port: 465,
+    requireTLS: false,
+    secure: true,
+  });
+  assert.deepEqual(
+    { ...readSmtpSettings({ ...base, SMTP_PORT: "587" }), auth: undefined },
+    {
+      auth: undefined,
+      host: "smtp.example.test",
+      port: 587,
+      requireTLS: true,
+      secure: false,
+    },
+  );
+  assert.equal(
+    readSmtpSettings({ ...base, SMTP_PORT: "2525", SMTP_SECURE: "true" })
+      .secure,
+    true,
+  );
+  assert.throws(
+    () => readSmtpSettings({ ...base, SMTP_PORT: "smtp" }),
+    /SMTP_PORT/,
+  );
+});
+
+test("the SMTP driver sends each message with the install's addresses", async () => {
+  const sent: Record<string, unknown>[] = [];
+  const transport: SmtpTransport = {
+    sendMail: (async (mail: Record<string, unknown>) => {
+      sent.push(mail);
+
+      return {
+        accepted: [mail.to],
+        messageId: `<${String(sent.length)}@example.test>`,
+        rejected: [],
+      };
+    }) as unknown as SmtpTransport["sendMail"],
+  };
+  const service = createEmailService({
+    resolveAddresses: async () => ({
+      senderAddress: "Example <hello@example.test>",
+      supportAddress: "help@example.test",
+    }),
+    smtpTransport: transport,
+  });
+
+  const result = await service.send({
+    ...MESSAGE,
+    attachments: [
+      {
+        content: new Uint8Array([37, 80, 68, 70]),
+        contentType: "application/pdf",
+        filename: "signed.pdf",
+      },
+    ],
+  });
+  const batch = await service.sendBatch([
+    MESSAGE,
+    { ...MESSAGE, to: "b@example.test" },
+  ]);
+
+  assert.deepEqual(result, {
+    accepted: [MESSAGE.to],
+    messageId: "<1@example.test>",
+    rejected: [],
+  });
+  assert.equal(sent[0]?.from, "Example <hello@example.test>");
+  assert.equal(sent[0]?.replyTo, "help@example.test");
+  assert.equal(sent[0]?.subject, MESSAGE.subject);
+  assert.equal(
+    (sent[0]?.attachments as { filename: string }[])[0]?.filename,
+    "signed.pdf",
+  );
+  assert.deepEqual(
+    batch.map((item) => item.accepted[0]),
+    [MESSAGE.to, "b@example.test"],
   );
 });

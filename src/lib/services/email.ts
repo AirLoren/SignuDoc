@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import nodemailer, { type Transporter } from "nodemailer";
 import { Resend } from "resend";
 
 import { getSettings } from "../settings.ts";
@@ -22,7 +23,7 @@ const EMAIL_ENV_KEYS = ["RESEND_API_KEY"] as const;
 const DEFAULT_CAPTURE_DIR = ".data/outbox";
 const DEFAULT_CAPTURE_SENDER_ADDRESS = "dev@signudoc.localhost";
 
-export type EmailDriver = "capture" | "resend";
+export type EmailDriver = "capture" | "resend" | "smtp";
 
 export type EmailAttachment = {
   content: Uint8Array;
@@ -72,6 +73,8 @@ type CreateEmailServiceOptions = {
   /** Replaced in tests, where there is no database to read settings from. */
   resolveAddresses?: () => Promise<EmailAddresses>;
   resendClient?: Resend;
+  /** Replaced in tests, where there is no SMTP server to talk to. */
+  smtpTransport?: SmtpTransport;
   /** Replaced in tests, so that they do not really wait. */
   wait?: (milliseconds: number) => Promise<void>;
 };
@@ -193,12 +196,16 @@ export function resolveEmailDriver(env: EnvSource = process.env): EmailDriver {
     return "resend";
   }
 
-  if (configuredDriver === "capture" || configuredDriver === "resend") {
+  if (
+    configuredDriver === "capture" ||
+    configuredDriver === "resend" ||
+    configuredDriver === "smtp"
+  ) {
     return configuredDriver;
   }
 
   throw new Error(
-    `Unknown EMAIL_DRIVER "${configuredDriver}". Use "resend" or "capture".`,
+    `Unknown EMAIL_DRIVER "${configuredDriver}". Use "resend", "smtp" or "capture".`,
   );
 }
 
@@ -289,6 +296,100 @@ function createCaptureEmailService(
   };
 }
 
+const SMTP_ENV_KEYS = ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"] as const;
+
+/** The part of a nodemailer transport used here. Replaced by a fake in tests. */
+export type SmtpTransport = Pick<Transporter, "sendMail">;
+
+function addressList(addresses: readonly unknown[] | undefined): string[] {
+  return (addresses ?? []).map((address) =>
+    typeof address === "string"
+      ? address
+      : String((address as { address?: unknown }).address ?? address),
+  );
+}
+
+/**
+ * Settings for EMAIL_DRIVER=smtp. SMTP_PORT is 465 unless set. Port 465
+ * uses TLS from the start; any other port has to upgrade with STARTTLS.
+ * SMTP_SECURE=true or false overrides that choice.
+ */
+export function readSmtpSettings(env: EnvSource) {
+  const port = Number(env.SMTP_PORT?.trim() || "465");
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`SMTP_PORT "${env.SMTP_PORT ?? ""}" is not a port number.`);
+  }
+
+  const secureSetting = env.SMTP_SECURE?.trim().toLowerCase();
+  const secure = secureSetting ? secureSetting === "true" : port === 465;
+
+  return {
+    auth: { pass: env.SMTP_PASSWORD ?? "", user: env.SMTP_USER?.trim() ?? "" },
+    host: env.SMTP_HOST?.trim() ?? "",
+    port,
+    // Without implicit TLS, refuse to send the password in the clear.
+    requireTLS: !secure,
+    secure,
+  };
+}
+
+/**
+ * Sends through an SMTP server of the operator's own. The sender address
+ * comes from RESEND_FROM_EMAIL or the install's settings, as with Resend.
+ */
+function createSmtpEmailService(
+  env: EnvSource,
+  resolveAddresses: () => Promise<EmailAddresses>,
+  smtpTransport?: SmtpTransport,
+): EmailService {
+  if (!smtpTransport) {
+    assertServiceConfig("email", SMTP_ENV_KEYS, env);
+  }
+
+  const transport =
+    smtpTransport ?? nodemailer.createTransport(readSmtpSettings(env));
+
+  async function deliver(
+    message: TransactionalEmailMessage,
+  ): Promise<EmailDeliveryResult> {
+    const config = await resolveAddresses();
+    const info = await transport.sendMail({
+      attachments: message.attachments?.map((attachment) => ({
+        content: Buffer.from(attachment.content),
+        contentType: attachment.contentType,
+        filename: attachment.filename,
+      })),
+      from: config.senderAddress,
+      html: message.htmlBody,
+      replyTo: message.replyTo ?? config.supportAddress ?? undefined,
+      subject: message.subject,
+      text: message.textBody,
+      to: message.to,
+    });
+
+    return {
+      accepted: addressList(info.accepted),
+      messageId: info.messageId,
+      rejected: addressList(info.rejected),
+    };
+  }
+
+  return {
+    send: (message) => deliver(message),
+    // SMTP has no batch call: messages go one after another.
+    async sendBatch(messages) {
+      const results: EmailDeliveryResult[] = [];
+
+      for (const message of messages) {
+        results.push(await deliver(message));
+      }
+
+      return results;
+    },
+  };
+}
+
 /** The addresses this install sends from, as configured right now. */
 export async function resolveEmailAddresses(
   env: EnvSource = process.env,
@@ -355,10 +456,15 @@ export function createEmailService({
   env = process.env,
   resolveAddresses = () => resolveEmailAddresses(env),
   resendClient,
+  smtpTransport,
   wait = waitFor,
 }: CreateEmailServiceOptions = {}): EmailService {
   if (!resendClient && resolveEmailDriver(env) === "capture") {
     return createCaptureEmailService(env, resolveAddresses);
+  }
+
+  if (!resendClient && (smtpTransport || resolveEmailDriver(env) === "smtp")) {
+    return createSmtpEmailService(env, resolveAddresses, smtpTransport);
   }
 
   if (!resendClient) {
