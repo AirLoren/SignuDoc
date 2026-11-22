@@ -10,6 +10,7 @@ import {
   type EmailService,
   readSmtpSettings,
   resolveEmailDriver,
+  type SmtpIdempotencyStore,
   type SmtpTransport,
 } from "./email.ts";
 
@@ -269,6 +270,7 @@ test("the SMTP driver sends each message with the install's addresses", async ()
       senderAddress: "Example <hello@example.test>",
       supportAddress: "help@example.test",
     }),
+    smtpIdempotency: memoryIdempotency(),
     smtpTransport: transport,
   });
 
@@ -302,5 +304,84 @@ test("the SMTP driver sends each message with the install's addresses", async ()
   assert.deepEqual(
     batch.map((item) => item.accepted[0]),
     [MESSAGE.to, "b@example.test"],
+  );
+});
+
+/** An idempotency store kept in memory, standing in for the database table. */
+function memoryIdempotency(): SmtpIdempotencyStore & { keys: Set<string> } {
+  const keys = new Set<string>();
+
+  return {
+    claim: async (key) => {
+      if (keys.has(key)) {
+        return false;
+      }
+
+      keys.add(key);
+      return true;
+    },
+    keys,
+    release: async (key) => {
+      keys.delete(key);
+    },
+  };
+}
+
+test("an SMTP send with an idempotency key already used is not sent again", async () => {
+  let sends = 0;
+  let failNext = false;
+  const transport = {
+    sendMail: (async () => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("connection reset");
+      }
+
+      sends += 1;
+      return {
+        accepted: [MESSAGE.to],
+        messageId: "<x@example.test>",
+        rejected: [],
+      };
+    }) as unknown as SmtpTransport["sendMail"],
+  };
+  const idempotency = memoryIdempotency();
+  const service = createEmailService({
+    resolveAddresses: async () => ({
+      senderAddress: "hello@example.test",
+      supportAddress: null,
+    }),
+    smtpIdempotency: idempotency,
+    smtpTransport: transport,
+  });
+
+  await service.send(MESSAGE, { idempotencyKey: "expiry-notice/1" });
+  const again = await service.send(MESSAGE, {
+    idempotencyKey: "expiry-notice/1",
+  });
+
+  assert.equal(sends, 1);
+  assert.deepEqual(again, { accepted: [MESSAGE.to], rejected: [] });
+
+  // A send that fails gives its key back, so the retry goes out.
+  failNext = true;
+  await assert.rejects(
+    service.send(MESSAGE, { idempotencyKey: "expiry-notice/2" }),
+    /connection reset/,
+  );
+  await service.send(MESSAGE, { idempotencyKey: "expiry-notice/2" });
+  assert.equal(sends, 2);
+
+  // Without a key, every send goes out.
+  await service.send(MESSAGE);
+  await service.send(MESSAGE);
+  assert.equal(sends, 4);
+
+  // A batch key covers each message of the batch separately.
+  await service.sendBatch([MESSAGE, MESSAGE], { idempotencyKey: "batch/1" });
+  await service.sendBatch([MESSAGE, MESSAGE], { idempotencyKey: "batch/1" });
+  assert.equal(sends, 6);
+  assert.ok(
+    idempotency.keys.has("batch/1/0") && idempotency.keys.has("batch/1/1"),
   );
 });

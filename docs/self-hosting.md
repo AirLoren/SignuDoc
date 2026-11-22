@@ -381,6 +381,7 @@ SMTP_PASSWORD=...
 ```
 
 - Mail is sent from `RESEND_FROM_EMAIL` when it is set (despite the name, it is used by both drivers), and otherwise from the address set under Settings, Organization. It must be an address your SMTP server is allowed to send as.
-- There is no domain to add or verify in the app: Settings, Organization shows email as ready once a sender address is set. Use "Send a test email" there to check that your server accepts the login and delivers. SPF, DKIM and DMARC for the sender's domain are set up with your mail host.
+- There is no domain to add or verify in the app: Settings, Organization shows that email goes through your SMTP server once a sender address is set. Use "Send me a test email" there to check that your server accepts the login and delivers. SPF, DKIM and DMARC for the sender's domain are set up with your mail host.
 - Without TLS from the start, the connection must upgrade with STARTTLS before the password is sent; a server that does not offer it is refused.
 - Messages are sent one by one, and attachments go with them as they do with Resend.
+- Resend refuses a repeated send with the same idempotency key for 24 hours. SMTP servers do not, so SignuDoc keeps the keys of SMTP sends in the `email_idempotency_keys` table for 24 hours instead: a notice whose follow-up database write failed is not sent twice.

@@ -5,6 +5,7 @@ import path from "node:path";
 import nodemailer, { type Transporter } from "nodemailer";
 import { Resend } from "resend";
 
+import { getDb } from "../db/connection.ts";
 import { getSettings } from "../settings.ts";
 import { type EmailTemplateKind } from "../types/domain.ts";
 import { getEnv, isLocalDeployment, type EnvSource } from "../utils/env.ts";
@@ -73,6 +74,8 @@ type CreateEmailServiceOptions = {
   /** Replaced in tests, where there is no database to read settings from. */
   resolveAddresses?: () => Promise<EmailAddresses>;
   resendClient?: Resend;
+  /** Replaced in tests, where there is no database to keep keys in. */
+  smtpIdempotency?: SmtpIdempotencyStore;
   /** Replaced in tests, where there is no SMTP server to talk to. */
   smtpTransport?: SmtpTransport;
   /** Replaced in tests, so that they do not really wait. */
@@ -301,6 +304,41 @@ const SMTP_ENV_KEYS = ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD"] as const;
 /** The part of a nodemailer transport used here. Replaced by a fake in tests. */
 export type SmtpTransport = Pick<Transporter, "sendMail">;
 
+/**
+ * Where the SMTP driver remembers idempotency keys, since SMTP servers do
+ * not (Resend keeps them for 24 hours). claim answers false when the key was
+ * already used; release gives a key back after a send that failed.
+ */
+export type SmtpIdempotencyStore = {
+  claim(key: string): Promise<boolean>;
+  release(key: string): Promise<void>;
+};
+
+const IDEMPOTENCY_WINDOW = "24 hours";
+
+function createDatabaseIdempotencyStore(): SmtpIdempotencyStore {
+  return {
+    async claim(key) {
+      const db = getDb();
+
+      await db.query(
+        `DELETE FROM email_idempotency_keys WHERE claimed_at < now() - interval '${IDEMPOTENCY_WINDOW}'`,
+      );
+      const claimed = await db.query(
+        `INSERT INTO email_idempotency_keys (key) VALUES ($1) ON CONFLICT (key) DO NOTHING`,
+        [key],
+      );
+
+      return claimed.rowCount === 1;
+    },
+    async release(key) {
+      await getDb().query(`DELETE FROM email_idempotency_keys WHERE key = $1`, [
+        key,
+      ]);
+    },
+  };
+}
+
 function addressList(addresses: readonly unknown[] | undefined): string[] {
   return (addresses ?? []).map((address) =>
     typeof address === "string"
@@ -342,6 +380,7 @@ function createSmtpEmailService(
   env: EnvSource,
   resolveAddresses: () => Promise<EmailAddresses>,
   smtpTransport?: SmtpTransport,
+  idempotency: SmtpIdempotencyStore = createDatabaseIdempotencyStore(),
 ): EmailService {
   if (!smtpTransport) {
     assertServiceConfig("email", SMTP_ENV_KEYS, env);
@@ -350,7 +389,7 @@ function createSmtpEmailService(
   const transport =
     smtpTransport ?? nodemailer.createTransport(readSmtpSettings(env));
 
-  async function deliver(
+  async function transmit(
     message: TransactionalEmailMessage,
   ): Promise<EmailDeliveryResult> {
     const config = await resolveAddresses();
@@ -375,14 +414,43 @@ function createSmtpEmailService(
     };
   }
 
+  async function deliver(
+    message: TransactionalEmailMessage,
+    idempotencyKey?: string,
+  ): Promise<EmailDeliveryResult> {
+    if (!idempotencyKey) {
+      return transmit(message);
+    }
+
+    if (!(await idempotency.claim(idempotencyKey))) {
+      // Already sent under this key: answer as Resend does, without sending.
+      return { accepted: [message.to], rejected: [] };
+    }
+
+    try {
+      return await transmit(message);
+    } catch (error) {
+      await idempotency.release(idempotencyKey);
+      throw error;
+    }
+  }
+
   return {
-    send: (message) => deliver(message),
-    // SMTP has no batch call: messages go one after another.
-    async sendBatch(messages) {
+    send: (message, options) => deliver(message, options?.idempotencyKey),
+    // SMTP has no batch call: messages go one after another, each with its
+    // own key derived from the batch's.
+    async sendBatch(messages, options) {
       const results: EmailDeliveryResult[] = [];
 
-      for (const message of messages) {
-        results.push(await deliver(message));
+      for (const [index, message] of messages.entries()) {
+        results.push(
+          await deliver(
+            message,
+            options?.idempotencyKey
+              ? `${options.idempotencyKey}/${String(index)}`
+              : undefined,
+          ),
+        );
       }
 
       return results;
@@ -456,6 +524,7 @@ export function createEmailService({
   env = process.env,
   resolveAddresses = () => resolveEmailAddresses(env),
   resendClient,
+  smtpIdempotency,
   smtpTransport,
   wait = waitFor,
 }: CreateEmailServiceOptions = {}): EmailService {
@@ -464,7 +533,12 @@ export function createEmailService({
   }
 
   if (!resendClient && (smtpTransport || resolveEmailDriver(env) === "smtp")) {
-    return createSmtpEmailService(env, resolveAddresses, smtpTransport);
+    return createSmtpEmailService(
+      env,
+      resolveAddresses,
+      smtpTransport,
+      smtpIdempotency,
+    );
   }
 
   if (!resendClient) {

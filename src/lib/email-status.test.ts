@@ -568,24 +568,27 @@ test("RESEND_REGION picks a known Resend region and ignores anything else", () =
   assert.deepEqual(resendRegionOption({}), {});
 });
 
-test("an SMTP install is ready once its sender has a domain, without asking Resend", async () => {
+test("an SMTP install reports its own state, without asking Resend", async () => {
   const marks: boolean[] = [];
   const recordReady = async (ready: boolean) => {
     marks.push(ready);
   };
-  const smtpEnv = { EMAIL_DRIVER: "smtp" };
+  const smtpEnv = { EMAIL_DRIVER: "smtp", SMTP_HOST: "smtp.acme.com" };
 
-  const status = await getEmailStatus({ env: smtpEnv, recordReady, settings });
-
-  assert.equal(status.state, "ready");
+  assert.deepEqual(
+    await getEmailStatus({ env: smtpEnv, recordReady, settings }),
+    { host: "smtp.acme.com", senderAddress: "sign@acme.com", state: "smtp" },
+  );
   assert.deepEqual(marks, [true]);
 
-  const withoutSender = await getEmailStatus({
-    env: smtpEnv,
-    recordReady,
-    settings: resolveSettings({ ...stored, senderAddress: null }, env),
-  });
-
-  assert.equal(withoutSender.state, "test_sender");
+  // No sender chosen yet: Resend's shared test address is not used for SMTP.
+  assert.deepEqual(
+    await getEmailStatus({
+      env: smtpEnv,
+      recordReady,
+      settings: resolveSettings({ ...stored, senderAddress: null }, smtpEnv),
+    }),
+    { host: "smtp.acme.com", senderAddress: null, state: "smtp" },
+  );
   assert.deepEqual(marks, [true, false]);
 });
