@@ -306,15 +306,20 @@ export type SmtpTransport = Pick<Transporter, "sendMail">;
 
 /**
  * Where the SMTP driver remembers idempotency keys, since SMTP servers do
- * not (Resend keeps them for 24 hours). claim answers false when the key was
- * already used; release gives a key back after a send that failed.
+ * not (Resend keeps them for 24 hours). claim answers "claimed" when this
+ * send should go out, "sent" when the key was already delivered, and
+ * "in_flight" when another attempt may still be sending it. complete marks a
+ * delivered key; release gives a key back after a send that failed.
  */
 export type SmtpIdempotencyStore = {
-  claim(key: string): Promise<boolean>;
+  claim(key: string): Promise<"claimed" | "in_flight" | "sent">;
+  complete(key: string): Promise<void>;
   release(key: string): Promise<void>;
 };
 
 const IDEMPOTENCY_WINDOW = "24 hours";
+/** After this, a key still marked as sending belongs to an interrupted attempt. */
+const SENDING_LEASE = "10 minutes";
 
 function createDatabaseIdempotencyStore(): SmtpIdempotencyStore {
   return {
@@ -324,12 +329,31 @@ function createDatabaseIdempotencyStore(): SmtpIdempotencyStore {
       await db.query(
         `DELETE FROM email_idempotency_keys WHERE claimed_at < now() - interval '${IDEMPOTENCY_WINDOW}'`,
       );
+      // A new key, or one left 'sending' by an attempt that was interrupted.
       const claimed = await db.query(
-        `INSERT INTO email_idempotency_keys (key) VALUES ($1) ON CONFLICT (key) DO NOTHING`,
+        `INSERT INTO email_idempotency_keys (key) VALUES ($1)
+         ON CONFLICT (key) DO UPDATE SET claimed_at = now()
+         WHERE email_idempotency_keys.state = 'sending'
+           AND email_idempotency_keys.claimed_at < now() - interval '${SENDING_LEASE}'`,
         [key],
       );
 
-      return claimed.rowCount === 1;
+      if (claimed.rowCount === 1) {
+        return "claimed";
+      }
+
+      const existing = await db.query<{ state: string }>(
+        `SELECT state FROM email_idempotency_keys WHERE key = $1`,
+        [key],
+      );
+
+      return existing.rows[0]?.state === "sent" ? "sent" : "in_flight";
+    },
+    async complete(key) {
+      await getDb().query(
+        `UPDATE email_idempotency_keys SET state = 'sent' WHERE key = $1`,
+        [key],
+      );
     },
     async release(key) {
       await getDb().query(`DELETE FROM email_idempotency_keys WHERE key = $1`, [
@@ -422,17 +446,32 @@ function createSmtpEmailService(
       return transmit(message);
     }
 
-    if (!(await idempotency.claim(idempotencyKey))) {
-      // Already sent under this key: answer as Resend does, without sending.
+    const claim = await idempotency.claim(idempotencyKey);
+
+    if (claim === "sent") {
+      // Already delivered under this key: answer as Resend does, without sending.
       return { accepted: [message.to], rejected: [] };
     }
 
+    if (claim === "in_flight") {
+      // Another attempt may still be sending it. Failing lets the caller try
+      // again later, rather than count a message that may never go out.
+      throw new Error(
+        `An email with idempotency key "${idempotencyKey}" is already being sent. Try again later.`,
+      );
+    }
+
+    let result: EmailDeliveryResult;
+
     try {
-      return await transmit(message);
+      result = await transmit(message);
     } catch (error) {
       await idempotency.release(idempotencyKey);
       throw error;
     }
+
+    await idempotency.complete(idempotencyKey);
+    return result;
   }
 
   return {

@@ -308,17 +308,28 @@ test("the SMTP driver sends each message with the install's addresses", async ()
 });
 
 /** An idempotency store kept in memory, standing in for the database table. */
-function memoryIdempotency(): SmtpIdempotencyStore & { keys: Set<string> } {
-  const keys = new Set<string>();
+function memoryIdempotency(): SmtpIdempotencyStore & {
+  keys: Map<string, "sending" | "sent">;
+} {
+  const keys = new Map<string, "sending" | "sent">();
 
   return {
     claim: async (key) => {
-      if (keys.has(key)) {
-        return false;
+      const state = keys.get(key);
+
+      if (state === "sent") {
+        return "sent";
       }
 
-      keys.add(key);
-      return true;
+      if (state === "sending") {
+        return "in_flight";
+      }
+
+      keys.set(key, "sending");
+      return "claimed";
+    },
+    complete: async (key) => {
+      keys.set(key, "sent");
     },
     keys,
     release: async (key) => {
